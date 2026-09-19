@@ -1,0 +1,12 @@
+{
+  "cisa-cybersecurity-mcp-server": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "@cyanheads/cisa-cybersecurity-mcp-server"
+    ],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}

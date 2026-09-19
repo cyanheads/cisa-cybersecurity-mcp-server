@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "cisa-cybersecurity-mcp-server",
+  "version": "0.1.0",
+  "description": "CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF) via MCP. Keyless. STDIO & Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "cisa",
+    "kev",
+    "known-exploited-vulnerabilities",
+    "bod-26-04"
+  ],
+  "mcpServers": {
+    "cisa-cybersecurity-mcp-server": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@cyanheads/cisa-cybersecurity-mcp-server"
+      ],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}

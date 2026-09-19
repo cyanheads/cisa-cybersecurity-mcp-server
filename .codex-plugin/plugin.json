@@ -1,0 +1,39 @@
+{
+  "name": "cisa-cybersecurity-mcp-server",
+  "version": "0.1.0",
+  "description": "CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF) via MCP. Keyless. STDIO & Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "cisa",
+    "kev",
+    "known-exploited-vulnerabilities",
+    "bod-26-04"
+  ],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "cisa-cybersecurity-mcp-server",
+    "shortDescription": "CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF).",
+    "longDescription": "MCP server over CISA's open vulnerability outputs: the Known Exploited Vulnerabilities catalog with federal remediation deadlines under BOD 26-04, the SSVC decision points CISA publishes per CVE in Vulnrichment, the complete Industrial Control Systems advisory corpus in CSAF form, and the current CISA alert feeds. Keyless.",
+    "developerName": "cyanheads",
+    "category": "security",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server",
+    "defaultPrompt": []
+  }
+}
