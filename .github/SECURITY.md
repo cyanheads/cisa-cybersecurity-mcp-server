@@ -13,7 +13,7 @@ Please do not open a public issue for security reports. Instead:
      Settings → Code security → Private vulnerability reporting. -->
 
 - Report privately via GitHub: **Security** tab → **Report a vulnerability**, or
-- Email **[your-contact-email]**
+- Email **security@caseyjhand.com**
 
 Include a minimal reproduction where possible, with any API keys, tokens, or
 credentials redacted — a placeholder is enough to show the shape. You'll

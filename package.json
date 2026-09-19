@@ -95,5 +95,15 @@
   "homepage": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server#readme",
   "bugs": {
     "url": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server/issues"
-  }
+  },
+  "funding": [
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/cyanheads"
+    },
+    {
+      "type": "buy_me_a_coffee",
+      "url": "https://www.buymeacoffee.com/cyanheads"
+    }
+  ]
 }
