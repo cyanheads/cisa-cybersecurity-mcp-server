@@ -31,6 +31,55 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "CISA_KEV_REFRESH_CRON",
+          "description": "Cron expression for the KEV catalog conditional-refresh poll. HTTP transport only; an empty value disables the in-process schedule.",
+          "format": "string",
+          "isRequired": false,
+          "default": "*/30 * * * *"
+        },
+        {
+          "name": "CISA_CSAF_MIRROR_PATH",
+          "description": "Filesystem path to the local SQLite index of ICS advisories.",
+          "format": "string",
+          "isRequired": false,
+          "default": ".mirror/csaf.sqlite3"
+        },
+        {
+          "name": "CISA_CSAF_MIRROR_AUTO_INIT",
+          "description": "Seed the ICS advisory index in the background at startup when it has never completed a sync. Accepts true or false; set false where seeding runs out of band.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
+          "name": "CISA_CSAF_REFRESH_CRON",
+          "description": "Cron expression for the incremental ICS advisory refresh. HTTP transport only; an empty value disables it.",
+          "format": "string",
+          "isRequired": false,
+          "default": "17 */6 * * *"
+        },
+        {
+          "name": "CISA_VULNRICHMENT_CACHE_TTL_SECONDS",
+          "description": "Seconds a fetched SSVC record stays cached. Negative results use one sixth of this value.",
+          "format": "string",
+          "isRequired": false,
+          "default": "21600"
+        },
+        {
+          "name": "CISA_FEED_CACHE_TTL_SECONDS",
+          "description": "Seconds a parsed RSS feed window stays cached.",
+          "format": "string",
+          "isRequired": false,
+          "default": "900"
+        },
+        {
+          "name": "CISA_HTTP_TIMEOUT_MS",
+          "description": "Per-request timeout in milliseconds for every upstream fetch.",
+          "format": "string",
+          "isRequired": false,
+          "default": "30000"
         }
       ],
       "transport": {
@@ -88,6 +137,55 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "CISA_KEV_REFRESH_CRON",
+          "description": "Cron expression for the KEV catalog conditional-refresh poll. HTTP transport only; an empty value disables the in-process schedule.",
+          "format": "string",
+          "isRequired": false,
+          "default": "*/30 * * * *"
+        },
+        {
+          "name": "CISA_CSAF_MIRROR_PATH",
+          "description": "Filesystem path to the local SQLite index of ICS advisories.",
+          "format": "string",
+          "isRequired": false,
+          "default": ".mirror/csaf.sqlite3"
+        },
+        {
+          "name": "CISA_CSAF_MIRROR_AUTO_INIT",
+          "description": "Seed the ICS advisory index in the background at startup when it has never completed a sync. Accepts true or false; set false where seeding runs out of band.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
+          "name": "CISA_CSAF_REFRESH_CRON",
+          "description": "Cron expression for the incremental ICS advisory refresh. HTTP transport only; an empty value disables it.",
+          "format": "string",
+          "isRequired": false,
+          "default": "17 */6 * * *"
+        },
+        {
+          "name": "CISA_VULNRICHMENT_CACHE_TTL_SECONDS",
+          "description": "Seconds a fetched SSVC record stays cached. Negative results use one sixth of this value.",
+          "format": "string",
+          "isRequired": false,
+          "default": "21600"
+        },
+        {
+          "name": "CISA_FEED_CACHE_TTL_SECONDS",
+          "description": "Seconds a parsed RSS feed window stays cached.",
+          "format": "string",
+          "isRequired": false,
+          "default": "900"
+        },
+        {
+          "name": "CISA_HTTP_TIMEOUT_MS",
+          "description": "Per-request timeout in milliseconds for every upstream fetch.",
+          "format": "string",
+          "isRequired": false,
+          "default": "30000"
         }
       ],
       "transport": {

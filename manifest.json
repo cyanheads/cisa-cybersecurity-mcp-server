@@ -1,6 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "cisa-cybersecurity-mcp-server",
+  "display_name": "cisa-cybersecurity-mcp-server",
   "version": "0.1.0",
   "description": "CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF) via MCP. Keyless. STDIO & Streamable HTTP.",
   "author": {
@@ -15,7 +16,14 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "CISA_KEV_REFRESH_CRON": "${user_config.cisa_kev_refresh_cron}",
+        "CISA_CSAF_MIRROR_PATH": "${user_config.cisa_csaf_mirror_path}",
+        "CISA_CSAF_MIRROR_AUTO_INIT": "${user_config.cisa_csaf_mirror_auto_init}",
+        "CISA_CSAF_REFRESH_CRON": "${user_config.cisa_csaf_refresh_cron}",
+        "CISA_VULNRICHMENT_CACHE_TTL_SECONDS": "${user_config.cisa_vulnrichment_cache_ttl_seconds}",
+        "CISA_FEED_CACHE_TTL_SECONDS": "${user_config.cisa_feed_cache_ttl_seconds}",
+        "CISA_HTTP_TIMEOUT_MS": "${user_config.cisa_http_timeout_ms}"
       }
     }
   },
@@ -26,7 +34,57 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {},
+  "user_config": {
+    "cisa_kev_refresh_cron": {
+      "type": "string",
+      "title": "KEV refresh cron",
+      "description": "Cron expression for the KEV catalog conditional-refresh poll. Applies to HTTP transport only; leave blank for the default */30 * * * *.",
+      "required": false,
+      "default": ""
+    },
+    "cisa_csaf_mirror_path": {
+      "type": "string",
+      "title": "ICS advisory index path",
+      "description": "Filesystem path to the local SQLite index of ICS advisories. Leave blank for .mirror/csaf.sqlite3.",
+      "required": false,
+      "default": ""
+    },
+    "cisa_csaf_mirror_auto_init": {
+      "type": "string",
+      "title": "Seed the advisory index at startup",
+      "description": "true or false. When true and the index has never completed a sync, it seeds itself in the background at startup. Leave blank for true.",
+      "required": false,
+      "default": ""
+    },
+    "cisa_csaf_refresh_cron": {
+      "type": "string",
+      "title": "ICS advisory refresh cron",
+      "description": "Cron expression for the incremental ICS advisory refresh. Applies to HTTP transport only; leave blank for the default 17 */6 * * *.",
+      "required": false,
+      "default": ""
+    },
+    "cisa_vulnrichment_cache_ttl_seconds": {
+      "type": "string",
+      "title": "SSVC cache TTL (seconds)",
+      "description": "Seconds a fetched SSVC record stays cached; negative results use one sixth of it. Leave blank for 21600.",
+      "required": false,
+      "default": ""
+    },
+    "cisa_feed_cache_ttl_seconds": {
+      "type": "string",
+      "title": "RSS feed cache TTL (seconds)",
+      "description": "Seconds a parsed RSS feed window stays cached. Leave blank for 900.",
+      "required": false,
+      "default": ""
+    },
+    "cisa_http_timeout_ms": {
+      "type": "string",
+      "title": "Upstream request timeout (ms)",
+      "description": "Per-request timeout in milliseconds for every upstream fetch. Leave blank for 30000.",
+      "required": false,
+      "default": ""
+    }
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server"

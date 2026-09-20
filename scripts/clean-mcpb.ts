@@ -14,6 +14,9 @@
  *        b. Platform-specific native bindings, which would otherwise lock the
  *           bundle to the build host's platform and push it past the 25 MB cap
  *           registries enforce (issue #274).
+ *        c. Build-only source trees of a dependency that ships prebuilds for
+ *           every platform — present solely for a from-source compile that this
+ *           bundle never performs.
  *   3. Re-list and assert zero matching entries remain.
  *
  * Entry names are passed to `zip -d` with `-nw` (no-wildcard) so they match
@@ -61,6 +64,23 @@ export const AGENT_DOC_ENTRY =
  */
 export const NATIVE_BINDING_ENTRY = /^node_modules\/@duckdb\/node-bindings-[^/]+\//;
 
+/**
+ * Build-only source trees that must not ship in a bundle.
+ * KEEP IN SYNC with `BUILD_ONLY_ENTRY` in `scripts/lint-packaging.ts`
+ * (post-bundle content check) — edit both literals together.
+ *
+ * `better-sqlite3` is a regular dependency here and its `prebuilds/` directory
+ * must **survive**: the package ships all eight platform prebuilds inside the npm
+ * tarball and selects one at runtime, which is what keeps the bundle
+ * cross-platform. What does not need to ship is `deps/` and `src/` — 9.8 MB of
+ * SQLite C source used solely for a from-source build that never happens inside a
+ * bundle. This is a separate literal rather than a widening of
+ * `NATIVE_BINDING_ENTRY` precisely because that regex exists to *remove* native
+ * bindings, and overloading it would invite the one deletion that breaks the
+ * bundle.
+ */
+export const BUILD_ONLY_ENTRY = /^node_modules\/better-sqlite3\/(?:deps|src)\//;
+
 /** Filter a bundle entry listing down to the agent-doc entries to strip. */
 export function filterAgentDocEntries(entries: string[]): string[] {
   return entries.filter((entry) => AGENT_DOC_ENTRY.test(entry));
@@ -69,6 +89,11 @@ export function filterAgentDocEntries(entries: string[]): string[] {
 /** Filter a bundle entry listing down to the native-binding entries to strip. */
 export function filterNativeBindingEntries(entries: string[]): string[] {
   return entries.filter((entry) => NATIVE_BINDING_ENTRY.test(entry));
+}
+
+/** Filter a bundle entry listing down to the build-only source entries to strip. */
+export function filterBuildOnlyEntries(entries: string[]): string[] {
+  return entries.filter((entry) => BUILD_ONLY_ENTRY.test(entry));
 }
 
 /** Listing a 12k-entry bundle exceeds execFileSync's 1 MB default buffer. */
@@ -113,14 +138,16 @@ function main(): void {
     process.exit(1);
   }
 
-  // 2. Exact-name strip of dependency-shipped agent docs and platform natives.
+  // 2. Exact-name strip of agent docs, platform natives, and build-only sources.
   let agentDocs: string[] = [];
   let natives: string[] = [];
+  let buildOnly: string[] = [];
   try {
     const entries = listEntries(bundle);
     agentDocs = filterAgentDocEntries(entries);
     natives = filterNativeBindingEntries(entries);
-    const doomed = [...agentDocs, ...natives];
+    buildOnly = filterBuildOnlyEntries(entries);
+    const doomed = [...agentDocs, ...natives, ...buildOnly];
     for (let i = 0; i < doomed.length; i += DELETE_BATCH) {
       run('zip', ['-q', '-d', '-nw', bundle, ...doomed.slice(i, i + DELETE_BATCH)]);
     }
@@ -133,11 +160,12 @@ function main(): void {
     process.exit(1);
   }
 
-  // 3. Verify: zero matching entries remain in either class.
+  // 3. Verify: zero matching entries remain in any class.
   const remainingEntries = listEntries(bundle);
   const remaining = [
     ...filterAgentDocEntries(remainingEntries),
     ...filterNativeBindingEntries(remainingEntries),
+    ...filterBuildOnlyEntries(remainingEntries),
   ];
   if (remaining.length > 0) {
     console.error(`✗ ${remaining.length} entries still present after strip, e.g.:`);
@@ -148,7 +176,7 @@ function main(): void {
   const sizeAfter = statSync(bundle).size;
   console.log(
     `Bundle cleaned: ${mb(sizeBefore)} → ${mb(sizeAfter)} ` +
-      `(${agentDocs.length} agent-doc, ${natives.length} native-binding entries stripped).`,
+      `(${agentDocs.length} agent-doc, ${natives.length} native-binding, ${buildOnly.length} build-only entries stripped).`,
   );
 }
 

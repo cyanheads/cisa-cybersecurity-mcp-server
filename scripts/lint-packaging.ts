@@ -146,6 +146,19 @@ export const AGENT_DOC_ENTRY =
  */
 export const NATIVE_BINDING_ENTRY = /^node_modules\/@duckdb\/node-bindings-[^/]+\//;
 
+/**
+ * Build-only source trees that must not ship in a bundle.
+ * KEEP IN SYNC with `BUILD_ONLY_ENTRY` in `scripts/clean-mcpb.ts` (the strip
+ * step this check verifies) — edit both literals together.
+ *
+ * `better-sqlite3` ships every platform prebuild inside its npm tarball, so
+ * `prebuilds/` must survive and the bundle stays cross-platform. `deps/` and
+ * `src/` are 9.8 MB of SQLite C source for a from-source build a bundle never
+ * performs. Kept separate from `NATIVE_BINDING_ENTRY`, whose whole purpose is
+ * deleting native bindings — the one deletion that would break this bundle.
+ */
+export const BUILD_ONLY_ENTRY = /^node_modules\/better-sqlite3\/(?:deps|src)\//;
+
 /** The canonical in-code identity pair — both must equal the unscoped package name. */
 const IDENTITY_PAIR = ['name', 'title'] as const;
 
@@ -260,8 +273,9 @@ export async function checkBundleContent(raw: string): Promise<string[]> {
 
 /**
  * Check 8: a built bundle must contain zero `node_modules/**` agent-doc
- * entries and zero platform-specific native bindings. `scripts/clean-mcpb.ts`
- * (wired into the `bundle` script) strips both after `mcpb pack`.
+ * entries, zero platform-specific native bindings, and zero build-only source
+ * trees. `scripts/clean-mcpb.ts` (wired into the `bundle` script) strips all
+ * three after `mcpb pack`.
  */
 export function checkBundleEntries(entries: string[], bundleLabel: string): string[] {
   const sampleOf = (offending: string[]) =>
@@ -287,6 +301,15 @@ export function checkBundleEntries(entries: string[], bundleLabel: string): stri
       `${bundleLabel} contains ${natives.length} platform-specific native binding entries — ` +
         `the bundle would run only on the platform it was packed on. Re-run the \`bundle\` ` +
         `script (scripts/clean-mcpb.ts strips them):${sampleOf(natives)}`,
+    );
+  }
+
+  const buildOnly = entries.filter((entry) => BUILD_ONLY_ENTRY.test(entry));
+  if (buildOnly.length > 0) {
+    errors.push(
+      `${bundleLabel} contains ${buildOnly.length} build-only source entries — ` +
+        `C source for a from-source compile the bundle never performs. Re-run the \`bundle\` ` +
+        `script (scripts/clean-mcpb.ts strips them):${sampleOf(buildOnly)}`,
     );
   }
 
