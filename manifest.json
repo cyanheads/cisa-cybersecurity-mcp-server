@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "cisa-cybersecurity-mcp-server",
   "display_name": "cisa-cybersecurity-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF) via MCP. Keyless. STDIO & Streamable HTTP.",
   "author": {
     "name": "cyanheads"
