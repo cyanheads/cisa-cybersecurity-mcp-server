@@ -5,22 +5,56 @@
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
-**Zod:** ^4.4.3
+**Zod:** ^4.6.5
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
 ---
 
-## First Session
+## This Server
 
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
+Four keyless CISA datasets, all read-only, served over seven tools and two resources. `docs/design.md` is the as-built specification — upstream shapes, per-tool contracts, storage tiers, and the numbered decisions log. Read it before changing a handler; every count and field name in it was verified against the live sources.
 
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
+**Surface**
 
-1. **Get your bearings.** Take stock of the project tree, the skills in `framework-skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `framework-skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `framework-skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
+| Primitive | Backed by |
+|:----------|:----------|
+| `cisa_list_reference` | Static reference tables in `src/reference/` plus live service state. No network call — it is the routing target of every recovery hint on this surface, so `openWorldHint` is `false`. |
+| `cisa_check_cve_status` | `kev-catalog`. Up to 200 CVE IDs, zero upstream requests. |
+| `cisa_search_kev` | `kev-catalog`. Filters AND together against the whole snapshot, never a page. |
+| `cisa_get_ssvc` | `vulnrichment` + `kev-catalog`. Computes the BOD 26-04 timeline from three published decision points plus the caller's `assetExposure`. |
+| `cisa_search_ics_advisories` | `csaf-mirror`. FTS5 plus indexed filters over the local index. |
+| `cisa_get_advisory` | `csaf-mirror`. `outlineOnOverflow` at `ADVISORY_OUTLINE_BUDGET` (24 KB), `selectSections` on the re-call. |
+| `cisa_get_alerts` | `cisa-feeds`. A 30-item rolling window; the cap is upstream's, not a server choice. |
+| `cisa://kev/{cveId}` | `kev-catalog`. Same record shape `cisa_check_cve_status` returns. |
+| `cisa://advisory/{advisoryId}` | `csaf-mirror`. The same overflow treatment as the tool's no-`sections` call. |
+
+No prompts: every workflow here is a direct lookup or a filtered search the tool schema already describes.
+
+**Services** — all four are init/accessor, constructed in `createApp({ setup })` and reached at request time through `getKevCatalog()` / `getVulnrichment()` / `getCsafMirror()` / `getCisaFeeds()`.
+
+| Service | Tier | Refresh |
+|:--------|:-----|:--------|
+| `kev-catalog` | In-memory process-level snapshot with derived indexes | `If-Modified-Since` poll on `CISA_KEV_REFRESH_CRON`. `If-None-Match` is deliberately unused — the origin serves an ETag and ignores it. |
+| `csaf-mirror` | `MirrorService` over embedded SQLite + FTS5 | One archive seeds it; refresh diffs `changes.csv` and fetches only the documents whose revision date moved. |
+| `vulnrichment` | Per-CVE fetch with a `ctx.state` TTL cache | On demand. A 404 caches as a negative at one sixth of the TTL. |
+| `cisa-feeds` | Timer cache | Unconditional — the feeds serve no `etag` and no `last-modified`, so nothing can make a request conditional. |
+
+**Invariants worth keeping**
+
+- Boot never depends on the advisory corpus. KEV, SSVC, and alert tools serve from the first request; the index seeds in the background and reports `mirror_not_ready` until it lands.
+- An HTML body on a JSON or XML route is `ServiceUnavailable`, never `SerializationError` — cisa.gov serves a Drupal error page transiently, and a parse-error classification makes a recoverable outage look like a data-shape defect.
+- A not-yet-seeded index throws rather than returning an empty result: an empty page asserts that nothing matches.
+- A computed BOD 26-04 timeline and CISA's assigned KEV due date are two separate facts, reported side by side and never reconciled.
+- No DHS seal, CISA logo, or implied endorsement on any surface. Advisory responses always carry `url`, `csafUrl`, and `attribution` — the CSAF repository declares no license and many advisories republish vendor text.
+
+**Mirror scripts** — `scripts/csaf-mirror-{init,refresh,verify}.ts`, sharing `scripts/_mirror-context.ts`. They ship in `package.json` `files[]` and in the Docker image, for `docker exec`, CI, and stdio operators who want explicit control over a background seed they cannot schedule.
+
+```sh
+bun run mirror:init      # full build from the repository archive; idempotent
+bun run mirror:refresh   # incremental, driven by the changes.csv diff
+bun run mirror:verify    # readiness, status, checkpoint, count, SQLite integrity; non-zero on failure
+```
 
 ---
 
@@ -59,73 +93,96 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool
 
+`src/mcp-server/tools/definitions/check-cve-status.tool.ts`, trimmed to its shape:
+
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { CveIdInputSchema, KevRecordSchema, renderKevRecord, toKevRecordOutput, toMissingKevOutput } from '@/mcp-server/schemas/kev-record.js';
+import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const checkCveStatusTool = tool('cisa_check_cve_status', {
+  title: 'cisa_check_cve_status',
+  description: 'Check CVE IDs against the CISA Known Exploited Vulnerabilities catalog — up to 200 per call, …',
+  annotations: { readOnlyHint: true, idempotentHint: true },
+
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    cveIds: z.array(CveIdInputSchema.describe('One CVE identifier, e.g. CVE-2025-39964.')).min(1).max(200)
+      .describe('CVE identifiers to check, up to 200 per call. The whole batch costs zero upstream requests.'),
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    results: z.array(KevRecordSchema).describe('One result per requested CVE, in the order supplied.'),
+    foundCount: z.number().int().describe('How many of the requested CVEs are in the catalog.'),
+    notFoundCount: z.number().int().describe('How many of the requested CVEs are not in the catalog.'),
   }),
-  auth: ['inventory:read'],
+
+  // Success-path agent context. Lands only because it is declared here.
+  enrichment: {
+    asOf: z.string().describe('The UTC date daysUntilDue and overdue were computed against.'),
+    notice: z.string().optional().describe('Guidance when none of the supplied CVE IDs are in the catalog.'),
+  },
+
+  errors: [
+    { reason: 'catalog_unavailable', code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'No KEV catalog snapshot is held and the fetch from cisa.gov failed.',
+      retryable: true, thrownBy: 'service',
+      recovery: 'The KEV catalog snapshot is not loaded yet; retry in a few seconds, or call cisa_list_reference with topic sources to see the current catalog state.' },
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const catalog = getKevCatalog();
+    const snapshot = await catalog.snapshot(ctx);
+    const asOf = catalog.asOf();
+    const results = input.cveIds.map((id) => id.trim().toUpperCase()).map((cveId) => {
+      const record = snapshot.byId.get(cveId);
+      return record ? toKevRecordOutput(record, asOf) : toMissingKevOutput(cveId);
+    });
+    const foundCount = results.filter((result) => result.inKev).length;
+    ctx.enrich({ asOf });
+    return { results, foundCount, notFoundCount: results.length - foundCount };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
   // Different clients read different surfaces (Claude Code → structuredContent,
   // Claude Desktop → content[]); both must carry the same data.
   // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  format: (result) => [{ type: 'text', text: result.results.flatMap(renderKevRecord).join('\n') }],
 });
 ```
 
+Shared output shapes and their renderers live in `src/mcp-server/schemas/` — `kev-record.ts` and `advisory.ts` — because a tool and its resource twin must serialize identically. Add a field to the schema and the renderer in the same edit, or `format-parity` fails.
+
 ### Resource
+
+`src/mcp-server/resources/definitions/kev-entry.resource.ts`, trimmed:
 
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { CveIdInputSchema, KevRecordSchema, toKevRecordOutput } from '@/mcp-server/schemas/kev-record.js';
+import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
+export const kevEntryResource = resource('cisa://kev/{cveId}', {
+  name: 'kev-entry',
+  title: 'KEV catalog entry',
+  description: 'One entry from the CISA Known Exploited Vulnerabilities catalog, addressed by CVE ID — …',
+  mimeType: 'application/json',
+  /* Public-domain data, byte-identical per tenant, refreshed on a 30-minute poll. */
+  cacheHint: { ttlMs: 1_800_000, cacheScope: 'public' },
+
+  params: z.object({ cveId: CveIdInputSchema.describe('The CVE identifier to look up.') }),
+  output: KevRecordSchema,
+
   async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
+    const catalog = getKevCatalog();
+    const snapshot = await catalog.snapshot(ctx);
+    const record = snapshot.byId.get(params.cveId.trim().toUpperCase());
+    if (!record) throw notFound(`${params.cveId} is not in the KEV catalog. …`, { cveId: params.cveId });
+    return toKevRecordOutput(record, catalog.asOf());
   },
-});
-```
 
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
+  list: () => ({ resources: /* the 30 most recently added entries */ [] }),
+  complete: { cveId: /* up to 100 CVE IDs from the snapshot */ () => [] },
 });
 ```
 
@@ -137,23 +194,28 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  csafMirrorPath: z.string().default('.mirror/csaf.sqlite3')
+    .describe('Filesystem path to the ICS advisory SQLite index.'),
+  csafMirrorAutoInit: z.stringbool().default(true)
+    .describe('Seed the advisory mirror in the background at startup when it has never synced.'),
+  httpTimeoutMs: z.coerce.number().int().positive().default(30_000)
+    .describe('Per-request timeout for every upstream fetch, in milliseconds.'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
+    csafMirrorPath: 'CISA_CSAF_MIRROR_PATH',
+    csafMirrorAutoInit: 'CISA_CSAF_MIRROR_AUTO_INIT',
+    httpTimeoutMs: 'CISA_HTTP_TIMEOUT_MS',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+All seven `CISA_*` variables are optional — every source is keyless and every tunable has a working default, so the server runs correctly with none of them set. Adding one means editing four files together: the schema above, `.env.example`, `server.json` `environmentVariables[]` (both package entries), and `manifest.json` (`mcp_config.env` + `user_config`). `lint:packaging` fails on a mismatch.
+
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`CISA_CSAF_MIRROR_PATH`) not the path (`csafMirrorPath`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
@@ -163,16 +225,18 @@ For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("
 
 ```ts
 await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
+  // Display identity is the machine name on every surface — name and title are
+  // both the unscoped package name, never a Title Case prose label.
+  name: 'cisa-cybersecurity-mcp-server',
+  title: 'cisa-cybersecurity-mcp-server',
+  websiteUrl: 'https://github.com/cyanheads/cisa-cybersecurity-mcp-server',
+  instructions: 'This server serves four CISA datasets, all keyless and all read-only. …',
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
+`description` is deliberately absent: `package.json` is its canonical source and the framework derives the served description from it, so an explicit copy here is drift. `lint:packaging` enforces the `name`/`title` pair against the unscoped package name.
+
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Here it routes the caller to the right entry point per dataset, states that the computed BOD 26-04 timeline is not a compliance determination, and warns that the index seeds on first run — guidance that would otherwise be repeated across seven tool descriptions. Client adoption is uneven, but there's no downside when set.
 
 ### Session posture and shutdown
 
@@ -199,12 +263,9 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
-| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
-| `ctx.signal` | `AbortSignal` for cancellation. |
+| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Used here for the `ssvc/<CVE-ID>` enrichment cache, best-effort in both directions: a miss or a storage failure falls through to a fetch, so correctness never depends on it. |
+| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). Note the written field names: `.total()` writes `totalCount`, `.truncated()` writes `truncated` / `shown` / `cap` as three flat fields, `.echo()` writes `effectiveQuery`. |
+| `ctx.signal` | `AbortSignal` for cancellation. Forwarded to every upstream fetch. |
 | `ctx.requestId` | Unique request ID. |
 | `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
 
@@ -258,21 +319,30 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() — services, cron jobs, surface registration
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # The seven CISA_* vars (Zod schema, lazy-parsed)
+  reference/
+    bod-2604.ts                         # Table 1, its definitions, and the timeline resolver
+    cvss.ts                             # Severity bands and the CVSS v2 band derivation
+    sectors.ts                          # The 16 canonical sectors and the longest-match extractor
+    tables.ts                           # The cisa_list_reference topic blocks
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    kev-catalog/                        # kev-catalog-service.ts, parse.ts, types.ts
+    vulnrichment/                       # vulnrichment-service.ts, paths.ts, types.ts
+    csaf-mirror/                        # csaf-mirror-service.ts, ingest.ts, normalize.ts, schema.ts, tar.ts, types.ts
+    upstream-http.ts                    # The single fetch boundary every service reaches the network through
   mcp-server/
+    schemas/
+      kev-record.ts                     # KEV output schema + renderer, shared by tool and resource
+      advisory.ts                       # Advisory output shape, section list, renderers
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+      [tool-name].tool.ts               # Seven tools, registered via index.ts
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      [resource-name].resource.ts       # Two resources, registered via index.ts
 ```
+
+No `prompts/` directory — this server ships none.
 
 ---
 
@@ -356,11 +426,17 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:coverage` | Run tests with Istanbul coverage |
+| `bun run mirror:init` | Full out-of-band build of the ICS advisory index; idempotent |
+| `bun run mirror:refresh` | Incremental advisory refresh, driven by the `changes.csv` diff |
+| `bun run mirror:verify` | Index health — readiness, status, checkpoint, count, SQLite integrity. Non-zero exit on failure |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
+| `bun run release:github` | Create the GitHub release from the pushed tag |
+| `bun run publish-mcp` | Publish `server.json` to the MCP Registry |
 
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
@@ -368,7 +444,11 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips three classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`), platform-specific native bindings that would lock the bundle to the platform it was packed on (`NATIVE_BINDING_ENTRY`), and build-only sources (`BUILD_ONLY_ENTRY`).
+
+`better-sqlite3` is a regular dependency here and the bundle **carries it**: the npm tarball ships all eight platform prebuilds and `lib/binding.js` picks one at runtime, so the bundle stays cross-platform with no install script and no node-gyp step. `BUILD_ONLY_ENTRY` strips only its `deps/` and `src/` trees — 9.8 MB of SQLite C source used solely for a source build — and never `prebuilds/`, which must survive. That is why it is a separate literal from `NATIVE_BINDING_ENTRY`, whose whole job is removing platform-locked natives. The regexes are duplicated in `scripts/lint-packaging.ts`; the files' own comments require editing them together. Under Bun the driver is never loaded at all — `openSqliteHandle` uses the built-in `bun:sqlite`.
+
+An `.mcpb` user has no shell into the bundle, which is why the advisory index seeds itself in the background rather than requiring `mirror:init`. MCPB is stdio-only — HTTP and Docker deployments are unaffected, and this server has no Cloudflare Workers deployment (the index needs embedded SQLite and a persistent filesystem).
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
@@ -430,9 +510,12 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] `ctx.log` for logging, `ctx.state` for storage
 - [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
-- [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
-- [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
-- [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
+- [ ] Raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields — the shapes in `docs/design.md` are the verified reference
+- [ ] Normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data. A missing directive is `null`, a derived CVSS band is flagged `severityDerived`, and a verbatim `sectorsRaw` survives normalization
+- [ ] Tests include at least one sparse payload case with omitted upstream fields (empty `cwes`, no sector note, `cvss_v2`-only, no CISA-ADP container)
+- [ ] A shared output schema in `src/mcp-server/schemas/` and its renderer changed together — `format-parity` fails otherwise
+- [ ] A new `CISA_*` variable added to all four surfaces: `server-config.ts`, `.env.example`, `server.json` (both package entries), `manifest.json` (`mcp_config.env` + `user_config` with `"default": ""`)
+- [ ] Advisory output still carries `url`, `csafUrl`, and `attribution`; no DHS seal, CISA logo, or implied endorsement anywhere
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
