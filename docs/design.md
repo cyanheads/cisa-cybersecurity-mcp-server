@@ -311,8 +311,8 @@ All filters AND together. Every one is applied against the complete snapshot, ne
 
 | Key | Kind | When |
 |:---|:---|:---|
-| `total` | `total` | Always — matches before paging |
-| `truncated` | `truncated` | When the `limit` cap was hit (`{ shown, cap }`) |
+| `totalCount` | `total` | Always — matches before paging. `ctx.enrich.total()` writes `totalCount`, not `total` |
+| `truncated`, `shown`, `cap` | `truncated` | When the `limit` cap was hit. `ctx.enrich.truncated()` writes these three fields, not a single nested `{ shown, cap }` object |
 | `catalog` | `echo` | Always |
 | `asOf` | `echo` | Always — a server-applied default that changes what `overdue` and `daysUntilDue` mean |
 | `appliedFilters` | `echo` | Always — the filters as the server parsed them |
@@ -458,8 +458,8 @@ cursor?, hasMore
 
 | Key | Kind | When |
 |:---|:---|:---|
-| `total` | `total` | Always |
-| `truncated` | `truncated` | Cap hit |
+| `totalCount` | `total` | Always — `ctx.enrich.total()` writes `totalCount`, not `total` |
+| `truncated`, `shown`, `cap` | `truncated` | Cap hit — `ctx.enrich.truncated()` writes these three fields separately |
 | `appliedFilters` | `echo` | Always |
 | `mirror` | `echo` | Always — `{ documentCount, checkpoint, lastRefreshedAt }` |
 | `sectorCoverage` | `notice` | Whenever `sector` is set — "729 of 3,926 advisories carry no sector note and cannot match a sector filter. Coverage begins in 2017 and is complete from 2023; every advisory published before 2017 is excluded by this filter regardless of which sectors it affects." |
@@ -523,7 +523,9 @@ revisionHistory? [ { number, date, summary, legacyVersion? } ]
 references?      [ { category, summary?, url } ]
 acknowledgments? [ { organization?, names[], summary? } ]
 sections?        # outline arm: OUTLINE_VARIANT.shape.sections
-notice?          # outline arm
+outlineNotice?   # outline arm. Named outlineNotice, not notice — a bare `notice`
+                 # key would read as agent-facing enrichment rather than the
+                 # outline arm's own payload
 guidance?        # present when found is false
 ```
 
@@ -576,8 +578,8 @@ window: { itemCount, oldest, newest, upstreamWindowSize: 30 }
 | Key | Kind | When |
 |:---|:---|:---|
 | `windowCaveat` | `notice` | Always — "This feed is a rolling window of the 30 most recent items. There is no history, no pagination, and no server-side date filter; anything older than the oldest item shown is unreachable from this feed. For ICS advisory history use cisa_search_ics_advisories." |
-| `echo` | `echo` | When `since` is set — the applied value and how many of the 30 it excluded |
-| `truncated` | `truncated` | When `limit` < window size |
+| `effectiveQuery` | `echo` | When `since` is set — the applied value and how many of the 30 it excluded. `ctx.enrich.echo()` writes `effectiveQuery`, not `echo` |
+| `truncated`, `shown`, `cap` | `truncated` | When `limit` < window size — `ctx.enrich.truncated()` writes these three fields separately |
 | `notice` | `notice` | When `since` excludes every item — "No item in the current 30-item window is on or after the since date. The window's oldest item is <date>; anything earlier is not in this feed." |
 
 **Errors**
@@ -664,18 +666,20 @@ Held per refresh: the parsed records, the raw envelope metadata (`catalogVersion
     published: 'TEXT', revised: 'TEXT', revision: 'TEXT',
     publisherCategory: 'TEXT',
     sourcePath: 'TEXT', url: 'TEXT', csafUrl: 'TEXT',
+    attribution: 'TEXT',     // the attribution string; a search-result column
+                             // rather than a per-read parse of `document`
     document: 'TEXT',        // the normalized advisory, JSON
   },
   fts: ['title', 'vendorsText', 'productsText'],
   indexes: [
     { columns: ['series'] }, { columns: ['maxCvss'] },
     { columns: ['published'] }, { columns: ['revised'] },
-    { columns: ['publisherCategory'] },
+    { columns: ['publisherCategory'] }, { columns: ['sourcePath'] },
   ],
 }
 ```
 
-Two auxiliary tables via a `migrations` step (`CREATE TABLE IF NOT EXISTS`, so a fresh database and an upgrade run identically): `advisory_cves(advisoryId, cve)` and `advisory_sectors(advisoryId, sector)`, each indexed on the second column. Exact CVE and sector membership is what they buy — scanning a delimited text column for either is both slow and wrong (`Water` is a substring of `Wastewater`). They are maintained from the ingester's mapping, reached through `mirror.raw()`.
+Three auxiliary tables via a `migrations` step (`CREATE TABLE IF NOT EXISTS`, so a fresh database and an upgrade run identically): `advisory_cves(advisoryId, cve)` and `advisory_sectors(advisoryId, sector)`, each indexed on the second column, and `mirror_meta(key, value)`. Exact CVE and sector membership is what the first two buy — scanning a delimited text column for either is both slow and wrong (`Water` is a substring of `Wastewater`). They are maintained from the ingester's mapping, reached through `mirror.raw()`. `mirror_meta` holds the `changes.csv` ETag between refresh runs, a field the framework's own sync state has no slot for.
 
 `document` holds the normalized advisory JSON rather than the raw CSAF: the flattening, sector extraction, and CVSS computation run once at ingest, not per read. It also means `cisa_get_advisory`'s section outline measures what it actually returns.
 
