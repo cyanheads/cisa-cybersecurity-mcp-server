@@ -19,11 +19,17 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://cisa-cybersecurity.caseyjhand.com/mcp](https://cisa-cybersecurity.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Overview
 
-CISA's open vulnerability outputs, made queryable: the Known Exploited Vulnerabilities catalog and the federal remediation deadlines it carries, the SSVC decision points CISA publishes per CVE in Vulnrichment, the full CSAF corpus of industrial control system advisories back to 2010, and CISA's current publication feeds. Check a scan's worth of CVE IDs against KEV in one call, find what is overdue for a vendor, work out what BOD 26-04 implies for an asset you own, and search or read ICS advisories by vendor, product, CVE, CVSS, or sector. Every source is keyless and read-only. Runs as a stdio process or a local Streamable HTTP server.
+CISA's open vulnerability outputs, made queryable: the Known Exploited Vulnerabilities catalog and the federal remediation deadlines it carries, the SSVC decision points CISA publishes per CVE in Vulnrichment, the full CSAF corpus of industrial control system advisories back to 2010, and CISA's current publication feeds. Check a scan's worth of CVE IDs against KEV in one call, find what is overdue for a vendor, work out what BOD 26-04 implies for an asset you own, and search or read ICS advisories by vendor, product, CVE, CVSS, or sector. Every source is keyless and read-only. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
@@ -154,6 +160,23 @@ Agent-friendly output:
 - Coverage gaps are disclosed where they bite: how many advisories a sector filter can never reach, that KEV revisions are undetectable, and that a computed timeline is not CISA's own due-date assignment
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://cisa-cybersecurity.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "cisa-cybersecurity-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://cisa-cybersecurity.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file. No API key is required.
 
