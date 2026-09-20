@@ -16,11 +16,11 @@ import {
 import { buildKevFeedBody } from '../../../fixtures/kev-feed.js';
 import { firstText } from '../../../helpers/format-text.js';
 
-async function loadCatalog() {
+async function loadCatalog(extraRecords: unknown[] = []) {
   const http = createFetchMock([
     {
       match: KEV_FEED_URL,
-      respond: new Response(buildKevFeedBody(), {
+      respond: new Response(buildKevFeedBody(extraRecords), {
         headers: { 'content-type': 'application/json' },
       }),
     },
@@ -209,6 +209,42 @@ describe('cisa_search_kev', () => {
       const input = searchKevTool.input.parse({ cveIdPrefix: 'CVE-2099' });
       await searchKevTool.handler(input, ctx);
       expect(getEnrichment(ctx).notice).toContain('Relax the narrowest filter');
+    });
+  });
+
+  describe('upstream records that do not fit the advertised shape', () => {
+    it('still returns a page the output schema accepts', async () => {
+      await loadCatalog([
+        {
+          cveID: 'CVE-2026-00009',
+          vendorProject: 'Acme Corp',
+          product: 'Malformed',
+          vulnerabilityName: 'Malformed upstream record',
+          dateAdded: '2026-09-02',
+          shortDescription: 'Carries a CWE value outside the published pattern.',
+          requiredAction: 'Apply updates per vendor instructions.',
+          dueDate: '2026-09-23',
+          knownRansomwareCampaignUse: 'Unknown',
+          forensicTriage: 'No',
+          notes: 'https://nvd.nist.gov/vuln/detail/CVE-2026-00009',
+          cwes: ['CWE-20', 'Improper Input Validation'],
+        },
+        { cveID: 'CVE-2026-9', dateAdded: '2026-09-02', dueDate: '2026-09-23' },
+      ]);
+
+      const ctx = createMockContext({ errors: searchKevTool.errors });
+      const input = searchKevTool.input.parse({ vendorProject: 'acme' });
+      const result = await searchKevTool.handler(input, ctx);
+
+      expect(() => searchKevTool.output.parse(result)).not.toThrow();
+      expect(result.results.map((entry) => entry.cveId)).not.toContain('CVE-2026-9');
+    });
+
+    it('rejects a nameContains value past the search-text ceiling', async () => {
+      await loadCatalog();
+      const ctx = createMockContext({ errors: searchKevTool.errors });
+      const input = searchKevTool.input.parse({ nameContains: 'widget '.repeat(200) });
+      await expect(searchKevTool.handler(input, ctx)).rejects.toThrow(/characters/);
     });
   });
 });

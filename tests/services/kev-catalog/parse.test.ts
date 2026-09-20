@@ -146,7 +146,9 @@ describe('toKevRecord', () => {
 
   it('defaults knownRansomwareCampaignUse to Unknown and forensicTriage to No for any other value', () => {
     const record = toKevRecord({
-      cveID: 'CVE-2026-1',
+      cveID: 'CVE-2026-0001',
+      dateAdded: '2026-01-01',
+      dueDate: '2026-01-22',
       knownRansomwareCampaignUse: '',
       forensicTriage: '',
     });
@@ -155,14 +157,37 @@ describe('toKevRecord', () => {
   });
 
   it('defaults cwes to an empty array when absent or malformed', () => {
-    expect(toKevRecord({ cveID: 'CVE-2026-1' })?.cwes).toEqual([]);
-    expect(toKevRecord({ cveID: 'CVE-2026-1', cwes: 'not-an-array' })?.cwes).toEqual([]);
+    const base = { cveID: 'CVE-2026-0001', dateAdded: '2026-01-01', dueDate: '2026-01-22' };
+    expect(toKevRecord(base)?.cwes).toEqual([]);
+    expect(toKevRecord({ ...base, cwes: 'not-an-array' })?.cwes).toEqual([]);
+  });
+
+  it('drops a cwes entry that is not a CWE identifier', () => {
+    const record = toKevRecord({
+      cveID: 'CVE-2026-0001',
+      dateAdded: '2026-01-01',
+      dueDate: '2026-01-22',
+      cwes: ['CWE-20', 'not a cwe', '', 'CWE-79'],
+    });
+    expect(record?.cwes).toEqual(['CWE-20', 'CWE-79']);
+  });
+
+  it('returns null for a record whose identity or deadline fields are not in the advertised shape', () => {
+    const dates = { dateAdded: '2026-01-01', dueDate: '2026-01-22' };
+    expect(toKevRecord({ cveID: 'CVE-2026-1', ...dates })).toBeNull();
+    expect(toKevRecord({ cveID: 'not-a-cve', ...dates })).toBeNull();
+    expect(toKevRecord({ cveID: 'CVE-2026-0001', dueDate: '2026-01-22' })).toBeNull();
+    expect(
+      toKevRecord({ cveID: 'CVE-2026-0001', dateAdded: '2026-01-01', dueDate: 'soon' }),
+    ).toBeNull();
   });
 
   it('carries notesCommentary when the notes field opens with prose', () => {
     const record = toKevRecord({
-      cveID: 'CVE-2026-1',
-      notes: 'Exploited in the wild.; https://nvd.nist.gov/vuln/detail/CVE-2026-1',
+      cveID: 'CVE-2026-0001',
+      dateAdded: '2026-01-01',
+      dueDate: '2026-01-22',
+      notes: 'Exploited in the wild.; https://nvd.nist.gov/vuln/detail/CVE-2026-0001',
     });
     expect(record?.notesCommentary).toBe('Exploited in the wild.');
   });

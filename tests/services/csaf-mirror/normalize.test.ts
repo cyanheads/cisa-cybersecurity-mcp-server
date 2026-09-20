@@ -12,6 +12,7 @@ import {
   buildAttribution,
   computeMaxCvss,
   flattenProductTree,
+  isCsafSourcePath,
   normalizeAdvisory,
   normalizeAdvisoryId,
   PRODUCT_ROW_CAP,
@@ -20,6 +21,7 @@ import {
   toFtsMatch,
   toMirrorRow,
 } from '@/services/csaf-mirror/normalize.js';
+import { MAX_SEARCH_TEXT_LENGTH } from '@/services/search-text.js';
 import {
   buildOversizedAdvisory,
   FULL_ADVISORY,
@@ -262,6 +264,50 @@ describe('normalizeAdvisory — whole document', () => {
     expect(normalizeAdvisory(null, 'nowhere.json')).toBeNull();
     expect(normalizeAdvisory('not an object', 'nowhere.json')).toBeNull();
   });
+
+  it('ignores an off-host self reference and composes the cisa.gov URL instead', () => {
+    const doc = normalizeAdvisory(
+      {
+        document: {
+          title: 'Off-host self reference',
+          tracking: { id: 'ICSA-26-260-09' },
+          references: [
+            {
+              category: 'self',
+              url: 'https://attacker.example/news-events/ics-advisories/icsa-26-260-09',
+            },
+          ],
+        },
+      },
+      '2026/icsa-26-260-09.json',
+    );
+
+    expect(doc?.advisory.url).toBe(
+      'https://www.cisa.gov/news-events/ics-advisories/icsa-26-260-09',
+    );
+  });
+
+  it('keeps a self reference served from cisa.gov', () => {
+    const doc = normalizeAdvisory(
+      {
+        document: {
+          title: 'Legacy self reference path',
+          tracking: { id: 'ICSA-16-231-01-0' },
+          references: [
+            {
+              category: 'self',
+              url: 'https://www.cisa.gov/news-events/ics-advisories/icsa-16-231-01-0-legacy',
+            },
+          ],
+        },
+      },
+      '2016/icsa-16-231-01-0.json',
+    );
+
+    expect(doc?.advisory.url).toBe(
+      'https://www.cisa.gov/news-events/ics-advisories/icsa-16-231-01-0-legacy',
+    );
+  });
 });
 
 describe('toMirrorRow', () => {
@@ -301,12 +347,53 @@ describe('parseChangesCsv', () => {
   });
 
   it('skips blank lines and ignores a row with no comma', () => {
-    const rows = parseChangesCsv('\n"a.json","2026-01-01T00:00:00Z"\n\nmalformed-line-no-comma\n');
-    expect(rows).toEqual([{ path: 'a.json', timestamp: '2026-01-01T00:00:00Z' }]);
+    const rows = parseChangesCsv(
+      '\n"2026/icsa-26-001-01.json","2026-01-01T00:00:00Z"\n\nmalformed-line-no-comma\n',
+    );
+    expect(rows).toEqual([{ path: '2026/icsa-26-001-01.json', timestamp: '2026-01-01T00:00:00Z' }]);
   });
 
   it('returns an empty array for an empty manifest', () => {
     expect(parseChangesCsv('')).toEqual([]);
+  });
+
+  it('drops a manifest row whose path escapes the distribution directory', () => {
+    const rows = parseChangesCsv(
+      [
+        '"../../../../.github/workflows/release.json","2026-01-01T00:00:00Z"',
+        '"2026/../../../etc/passwd.json","2026-01-01T00:00:00Z"',
+        '"2026/icsa-26-001-01.json","2026-01-01T00:00:00Z"',
+      ].join('\n'),
+    );
+    expect(rows).toEqual([{ path: '2026/icsa-26-001-01.json', timestamp: '2026-01-01T00:00:00Z' }]);
+  });
+
+  it('drops a manifest row carrying a scheme, a query, or a fragment', () => {
+    const rows = parseChangesCsv(
+      [
+        '"https://evil.example/payload.json","2026-01-01T00:00:00Z"',
+        '"2026/icsa-26-001-01.json?token=leak","2026-01-01T00:00:00Z"',
+        '"2026/icsa-26-001-01.json#frag","2026-01-01T00:00:00Z"',
+      ].join('\n'),
+    );
+    expect(rows).toEqual([]);
+  });
+});
+
+describe('isCsafSourcePath', () => {
+  it('accepts the year/filename.json shape every distribution publishes', () => {
+    expect(isCsafSourcePath('2026/icsa-26-260-07.json')).toBe(true);
+    expect(isCsafSourcePath('2019/icsma-19-253-02.json')).toBe(true);
+    expect(isCsafSourcePath('2026/va-26-260-01.json')).toBe(true);
+  });
+
+  it('rejects traversal, extra segments, and non-JSON names', () => {
+    expect(isCsafSourcePath('../2026/icsa-26-260-07.json')).toBe(false);
+    expect(isCsafSourcePath('2026/../icsa-26-260-07.json')).toBe(false);
+    expect(isCsafSourcePath('2026/sub/icsa-26-260-07.json')).toBe(false);
+    expect(isCsafSourcePath('icsa-26-260-07.json')).toBe(false);
+    expect(isCsafSourcePath('2026/icsa-26-260-07.json.asc')).toBe(false);
+    expect(isCsafSourcePath('')).toBe(false);
   });
 });
 
@@ -323,6 +410,15 @@ describe('toFtsMatch', () => {
 
   it('returns an empty string for input with no searchable tokens', () => {
     expect(toFtsMatch('   ')).toBe('');
+  });
+
+  it('rejects a query past the search-text ceiling rather than building the expression', () => {
+    const oversized = 'siemens '.repeat(MAX_SEARCH_TEXT_LENGTH);
+    expect(() => toFtsMatch(oversized)).toThrow(/characters/);
+  });
+
+  it('accepts a query exactly at the ceiling', () => {
+    expect(() => toFtsMatch('a'.repeat(MAX_SEARCH_TEXT_LENGTH))).not.toThrow();
   });
 });
 

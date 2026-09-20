@@ -11,6 +11,7 @@
 import type { MirrorRow } from '@cyanheads/mcp-ts-core/mirror';
 import { deriveCvssV2Severity, deriveCvssV3Severity } from '@/reference/cvss.js';
 import { extractSectors, SECTOR_NOTE_TITLE } from '@/reference/sectors.js';
+import { assertSearchTextLength } from '@/services/search-text.js';
 import type {
   AdvisoryAcknowledgment,
   AdvisoryHeader,
@@ -51,6 +52,26 @@ export const ADVISORY_ID_INPUT_PATTERN =
 export const PRODUCT_ROW_CAP = 200;
 
 /**
+ * The shape of a document path inside a distribution directory: a four-digit
+ * year, one filename, `.json`. Every distribution publishes exactly this —
+ * `2026/icsa-26-260-07.json`, `2019/icsma-19-253-02.json`, `2026/va-26-260-01.json`.
+ *
+ * Paths arrive from `changes.csv` and from archive entry names, both of which
+ * are upstream text rather than anything this server composed. A path is
+ * appended to the distribution base to build the fetch URL of the document and
+ * the `csafUrl` every advisory response carries, so one carrying `../`, a
+ * second directory, a query, or a fragment would point both at something other
+ * than the advisory it claims to be. Anything off this shape is not addressable
+ * as an advisory and is dropped.
+ */
+const CSAF_SOURCE_PATH = /^\d{4}\/[A-Za-z0-9][A-Za-z0-9._-]*\.json$/;
+
+/** Whether a repository-relative path is addressable as an advisory document. */
+export function isCsafSourcePath(path: string): boolean {
+  return CSAF_SOURCE_PATH.test(path);
+}
+
+/**
  * Normalize a caller-supplied advisory ID: trim, strip a trailing `.json`, and
  * uppercase. Each step is one-to-one and meaning-preserving — the document spells
  * the ID uppercase and the filename spells it lowercase, so both must resolve.
@@ -65,6 +86,22 @@ export function normalizeAdvisoryId(input: string): string {
 /** The series prefix an advisory ID carries. */
 export function advisorySeries(advisoryId: string): AdvisorySeries {
   return advisoryId.toUpperCase().startsWith('ICSMA') ? 'ICSMA' : 'ICSA';
+}
+
+/** Whether a URL is an https advisory page served by cisa.gov itself. */
+function isCisaAdvisoryUrl(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase();
+  return (
+    parsed.protocol === 'https:' &&
+    (host === 'cisa.gov' || host.endsWith('.cisa.gov')) &&
+    parsed.pathname.includes('/news-events/ics')
+  );
 }
 
 /** The cisa.gov web path for an advisory, by series. */
@@ -266,9 +303,10 @@ function readNotes(value: unknown): AdvisoryNote[] {
     if (!isRecord(note)) continue;
     const text = str(note.text);
     if (!text) continue;
+    const title = str(note.title);
     notes.push({
       category: str(note.category) ?? 'other',
-      ...(str(note.title) ? { title: str(note.title) as string } : {}),
+      ...(title ? { title } : {}),
       text,
     });
   }
@@ -287,9 +325,10 @@ function readReferences(value: unknown): AdvisoryReference[] {
     if (!isRecord(entry)) continue;
     const url = str(entry.url);
     if (!url) continue;
+    const summary = str(entry.summary);
     references.push({
       category: str(entry.category) ?? 'external',
-      ...(str(entry.summary) ? { summary: str(entry.summary) as string } : {}),
+      ...(summary ? { summary } : {}),
       url,
     });
   }
@@ -301,10 +340,12 @@ function readAcknowledgments(value: unknown): AdvisoryAcknowledgment[] {
   const acknowledgments: AdvisoryAcknowledgment[] = [];
   for (const entry of value) {
     if (!isRecord(entry)) continue;
+    const organization = str(entry.organization);
+    const summary = str(entry.summary);
     acknowledgments.push({
-      ...(str(entry.organization) ? { organization: str(entry.organization) as string } : {}),
+      ...(organization ? { organization } : {}),
       names: strings(entry.names),
-      ...(str(entry.summary) ? { summary: str(entry.summary) as string } : {}),
+      ...(summary ? { summary } : {}),
     });
   }
   return acknowledgments;
@@ -315,11 +356,12 @@ function readRevisionHistory(value: unknown): AdvisoryRevision[] {
   const revisions: AdvisoryRevision[] = [];
   for (const entry of value) {
     if (!isRecord(entry)) continue;
+    const legacyVersion = str(entry.legacy_version);
     revisions.push({
       number: str(entry.number) ?? '',
       date: str(entry.date) ?? '',
       summary: str(entry.summary) ?? '',
-      ...(str(entry.legacy_version) ? { legacyVersion: str(entry.legacy_version) as string } : {}),
+      ...(legacyVersion ? { legacyVersion } : {}),
     });
   }
   return revisions;
@@ -373,8 +415,11 @@ export function normalizeAdvisory(raw: unknown, sourcePath: string): NormalizedA
   const revisionHistory = readRevisionHistory(tracking.revision_history);
 
   const csafUrl = `${CSAF_OT_BASE}/${sourcePath}`;
+  /* The self reference is the advisory's own web version, and the advisory is
+   * upstream text — so the host is checked rather than assumed. Off cisa.gov it
+   * is not the page this field promises, and the ID composes the real one. */
   const selfWeb = references.find(
-    (reference) => reference.category === 'self' && reference.url.includes('/news-events/ics'),
+    (reference) => reference.category === 'self' && isCisaAdvisoryUrl(reference.url),
   );
   const url = selfWeb?.url ?? advisoryWebUrl(advisoryId);
 
@@ -404,22 +449,19 @@ export function normalizeAdvisory(raw: unknown, sourcePath: string): NormalizedA
     noteByTitle(documentNotes, 'overview') ??
     documentNotes.find((note) => note.category === 'summary')?.text;
 
+  const riskEvaluation = noteByTitle(documentNotes, 'risk evaluation');
+  const exploitability = noteByTitle(documentNotes, 'exploitability');
+  const countriesDeployed = noteByTitle(documentNotes, 'countries/areas deployed');
+  const headquarters = noteByTitle(documentNotes, 'company headquarters location');
+
   const summary: AdvisorySummary = {
-    ...(noteByTitle(documentNotes, 'risk evaluation')
-      ? { riskEvaluation: noteByTitle(documentNotes, 'risk evaluation') as string }
-      : {}),
-    ...(noteByTitle(documentNotes, 'exploitability')
-      ? { exploitability: noteByTitle(documentNotes, 'exploitability') as string }
-      : {}),
+    ...(riskEvaluation ? { riskEvaluation } : {}),
+    ...(exploitability ? { exploitability } : {}),
     ...(summaryText ? { summaryText } : {}),
     sectors: sectorsRaw ? extractSectors(sectorsRaw) : [],
     ...(sectorsRaw ? { sectorsRaw } : {}),
-    ...(noteByTitle(documentNotes, 'countries/areas deployed')
-      ? { countriesDeployed: noteByTitle(documentNotes, 'countries/areas deployed') as string }
-      : {}),
-    ...(noteByTitle(documentNotes, 'company headquarters location')
-      ? { headquarters: noteByTitle(documentNotes, 'company headquarters location') as string }
-      : {}),
+    ...(countriesDeployed ? { countriesDeployed } : {}),
+    ...(headquarters ? { headquarters } : {}),
   };
 
   const vulnerabilities: AdvisoryVulnerability[] = [];
@@ -437,20 +479,24 @@ export function normalizeAdvisory(raw: unknown, sourcePath: string): NormalizedA
       const restart = isRecord(remediation.restart_required)
         ? str(remediation.restart_required.category)
         : undefined;
+      const url = str(remediation.url);
       remediations.push({
         category: str(remediation.category) ?? 'other',
         details: str(remediation.details) ?? '',
-        ...(str(remediation.url) ? { url: str(remediation.url) as string } : {}),
+        ...(url ? { url } : {}),
         productIds: strings(remediation.product_ids),
         ...(restart ? { restartRequired: restart } : {}),
       });
     }
 
+    const cweId = cwe ? str(cwe.id) : undefined;
+    const cweName = cwe ? str(cwe.name) : undefined;
+    const vulnerabilityTitle = str(entry.title);
     vulnerabilities.push({
       cve: cve.toUpperCase(),
-      ...(cwe && str(cwe.id) ? { cweId: str(cwe.id) as string } : {}),
-      ...(cwe && str(cwe.name) ? { cweName: str(cwe.name) as string } : {}),
-      ...(str(entry.title) ? { title: str(entry.title) as string } : {}),
+      ...(cweId ? { cweId } : {}),
+      ...(cweName ? { cweName } : {}),
+      ...(vulnerabilityTitle ? { title: vulnerabilityTitle } : {}),
       scores: readScores(entry),
       remediations,
       productStatus: {
@@ -525,6 +571,9 @@ export interface ChangeRow {
  * use microsecond timestamps, the IT distribution is unquoted with second
  * precision — so both forms are accepted. The file is a full manifest rather than
  * an append-only log, which is what makes deletions detectable.
+ *
+ * Rows whose path is not addressable as an advisory document are dropped; see
+ * {@link isCsafSourcePath} for what that path is allowed to look like and why.
  */
 export function parseChangesCsv(text: string): ChangeRow[] {
   const rows: ChangeRow[] = [];
@@ -533,7 +582,7 @@ export function parseChangesCsv(text: string): ChangeRow[] {
     if (line === '') continue;
     const quoted = /^"([^"]*)"\s*,\s*"([^"]*)"$/.exec(line);
     if (quoted?.[1] && quoted[2]) {
-      rows.push({ path: quoted[1], timestamp: quoted[2] });
+      if (isCsafSourcePath(quoted[1])) rows.push({ path: quoted[1], timestamp: quoted[2] });
       continue;
     }
     const comma = line.indexOf(',');
@@ -543,7 +592,7 @@ export function parseChangesCsv(text: string): ChangeRow[] {
       .slice(comma + 1)
       .trim()
       .replace(/^"|"$/g, '');
-    if (path !== '' && timestamp !== '') rows.push({ path, timestamp });
+    if (isCsafSourcePath(path) && timestamp !== '') rows.push({ path, timestamp });
   }
   return rows;
 }
@@ -554,8 +603,12 @@ export function parseChangesCsv(text: string): ChangeRow[] {
  * operator (`-`, `*`, `:`, `NEAR`, `AND`, `OR`, `NOT`), so reserved syntax in
  * caller input cannot alter the query or raise a SQLite syntax error. Tokens are
  * AND-combined. Returns an empty string when the input has no searchable tokens.
+ *
+ * Length is checked first: the expression this builds is roughly the size of its
+ * input, and FTS5 parses the whole of it before any row is examined.
  */
 export function toFtsMatch(input: string): string {
+  assertSearchTextLength(input, 'q');
   return input
     .trim()
     .split(/\s+/)

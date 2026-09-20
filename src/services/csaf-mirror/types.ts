@@ -223,7 +223,6 @@ export interface CsafMirrorState {
   checkpoint: string | null;
   documentCount: number | null;
   lastCompletedAt: string | null;
-  path: string;
   ready: boolean;
   syncStatus: string;
 }

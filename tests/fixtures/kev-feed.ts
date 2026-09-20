@@ -81,12 +81,17 @@ export const KEV_RECORDS = [
   },
 ];
 
-export function buildKevFeedBody(): string {
+/**
+ * Serialize the fixture catalog. `extraRecords` appends raw entries the base set
+ * deliberately does not carry — the seam for malformed-upstream cases.
+ */
+export function buildKevFeedBody(extraRecords: unknown[] = []): string {
+  const vulnerabilities = [...KEV_RECORDS, ...extraRecords];
   return JSON.stringify({
     title: 'CISA Catalog of Known Exploited Vulnerabilities',
     catalogVersion: '2026.09.18',
     dateReleased: '2026-09-18T00:00:00.0000Z',
-    count: KEV_RECORDS.length,
-    vulnerabilities: KEV_RECORDS,
+    count: vulnerabilities.length,
+    vulnerabilities,
   });
 }

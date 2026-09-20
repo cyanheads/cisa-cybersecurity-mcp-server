@@ -121,11 +121,9 @@ function splitList(value: string | null): string[] {
 export class CsafMirrorService {
   private coverage: AdvisoryCoverage | undefined;
   private readonly mirror: Mirror;
-  private readonly path: string;
   private readonly store: MirrorStore;
 
   constructor(options: CsafMirrorOptions) {
-    this.path = options.mirrorPath;
     this.store = sqliteMirrorStore(advisoryStoreSpec(options.mirrorPath));
     this.mirror = defineMirror({
       name: 'cisa-ics-advisories',
@@ -163,7 +161,6 @@ export class CsafMirrorService {
         checkpoint: status.checkpoint ?? null,
         syncStatus: status.status,
         lastCompletedAt: status.completedAt ?? null,
-        path: this.path,
       };
     } catch {
       return {
@@ -172,7 +169,6 @@ export class CsafMirrorService {
         checkpoint: null,
         syncStatus: 'unavailable',
         lastCompletedAt: null,
-        path: this.path,
       };
     }
   }

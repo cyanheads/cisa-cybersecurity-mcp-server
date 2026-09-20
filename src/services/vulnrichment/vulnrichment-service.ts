@@ -16,12 +16,15 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { withRetry } from '@cyanheads/mcp-ts-core/utils';
-import { assertNotHtml, fetchUpstream } from '@/services/upstream-http.js';
+import { assertNotHtml, fetchUpstream, readUpstreamText } from '@/services/upstream-http.js';
 import { cveToVulnrichmentUrl } from './paths.js';
 import type { SsvcCvss, SsvcCwe, SsvcRecord, VulnrichmentState } from './types.js';
 
 /** Concurrent per-CVE fetches. The source publishes no rate limit; this is self-imposed. */
 const CONCURRENCY = 6;
+
+/** Ceiling on one CVE record. They run 3–15 KB; this is three orders above that. */
+const RECORD_MAX_BYTES = 16 * 1024 * 1024;
 
 /** Guidance strings, one per non-`ssvc` outcome. */
 const GUIDANCE = {
@@ -72,14 +75,17 @@ function readSsvc(metrics: unknown[]): {
       }
     }
 
+    const version = str(content.version);
+    const timestamp = str(content.timestamp);
+    const role = str(content.role);
     return {
       ...(values.Exploitation ? { exploitation: values.Exploitation } : {}),
       ...(values.Automatable ? { automatable: values.Automatable } : {}),
       /* The published key carries a space — "Technical Impact", not "TechnicalImpact". */
       ...(values['Technical Impact'] ? { technicalImpact: values['Technical Impact'] } : {}),
-      ...(str(content.version) ? { version: str(content.version) as string } : {}),
-      ...(str(content.timestamp) ? { timestamp: str(content.timestamp) as string } : {}),
-      ...(str(content.role) ? { role: str(content.role) as string } : {}),
+      ...(version ? { version } : {}),
+      ...(timestamp ? { timestamp } : {}),
+      ...(role ? { role } : {}),
     };
   }
   return null;
@@ -239,7 +245,11 @@ export class VulnrichmentService {
               sourceUrl,
             };
           }
-          const body = await response.text();
+          const body = await readUpstreamText(response, {
+            maxBytes: RECORD_MAX_BYTES,
+            service: 'CISA Vulnrichment',
+            url: sourceUrl,
+          });
           assertNotHtml(body, response.headers.get('content-type'), 'json', sourceUrl);
           return normalizeVulnrichment(cveId, sourceUrl, JSON.parse(body));
         },

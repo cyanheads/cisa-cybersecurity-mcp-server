@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { iterateTarGz } from '@/services/csaf-mirror/tar.js';
+import { iterateTarGz, MAX_TAR_ENTRY_BYTES } from '@/services/csaf-mirror/tar.js';
 import { buildTarGzResponse } from '../../fixtures/tar.js';
 
 async function collect(response: Response, include: (name: string) => boolean) {
@@ -56,5 +56,26 @@ describe('iterateTarGz', () => {
     const response = buildTarGzResponse([{ name: 'exact.json', data: 'x'.repeat(512) }]);
     const entries = await collect(response, (name) => name.endsWith('.json'));
     expect(entries[0]?.text).toBe('x'.repeat(512));
+  });
+
+  it('refuses to buffer an entry whose header declares a size past the ceiling', async () => {
+    /* The header lies: it claims gigabytes while a single byte follows it. */
+    const response = buildTarGzResponse([
+      { name: 'lying-header.json', data: 'x', declaredSize: MAX_TAR_ENTRY_BYTES + 1 },
+    ]);
+
+    await expect(collect(response, (name) => name.endsWith('.json'))).rejects.toThrow(
+      /declares .* bytes/,
+    );
+  });
+
+  it('skips a multi-megabyte non-matching entry and still yields the next one', async () => {
+    const response = buildTarGzResponse([
+      { name: 'skip-me.bin', data: 'x'.repeat(3_000_000) },
+      { name: 'keep-me.json', data: '{"kept":true}' },
+    ]);
+
+    const entries = await collect(response, (name) => name.endsWith('.json'));
+    expect(entries).toEqual([{ name: 'keep-me.json', text: '{"kept":true}' }]);
   });
 });

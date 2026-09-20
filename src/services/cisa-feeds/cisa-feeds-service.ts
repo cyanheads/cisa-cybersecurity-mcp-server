@@ -14,7 +14,7 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { withRetry, xmlParser } from '@cyanheads/mcp-ts-core/utils';
-import { assertNotHtml, fetchUpstream } from '@/services/upstream-http.js';
+import { assertNotHtml, fetchUpstream, readUpstreamText } from '@/services/upstream-http.js';
 import { advisoryIdFromLink, normalizePubDate, stripFeedHtml } from './normalize.js';
 import type { FeedId, FeedItem, FeedsState, FeedWindow } from './types.js';
 
@@ -30,6 +30,9 @@ export const UPSTREAM_WINDOW_SIZE = 30;
 
 /** Characters of stripped description text retained per item. */
 export const SUMMARY_CAP = 1200;
+
+/** Ceiling on a feed body. The largest is 531 KB; this is two orders above it. */
+const FEED_MAX_BYTES = 32 * 1024 * 1024;
 
 /** Options for {@link initCisaFeeds}. */
 export interface CisaFeedsOptions {
@@ -131,7 +134,11 @@ export class CisaFeedsService {
           timeoutMs: this.options.timeoutMs,
           signal: ctx.signal,
         });
-        const body = await response.text();
+        const body = await readUpstreamText(response, {
+          maxBytes: FEED_MAX_BYTES,
+          service: 'CISA advisories feed',
+          url,
+        });
         assertNotHtml(body, response.headers.get('content-type'), 'xml', url);
 
         const parsed = await xmlParser.parse<unknown>(body, ctx);

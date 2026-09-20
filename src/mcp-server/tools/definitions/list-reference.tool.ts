@@ -162,7 +162,6 @@ export const listReferenceTool = tool('cisa_list_reference', {
               .string()
               .nullable()
               .describe('When a full sync last completed, ISO 8601; null if never.'),
-            path: z.string().describe('Filesystem path to the SQLite index.'),
           })
           .describe('The local ICS advisory index.'),
         vulnrichment: z
@@ -315,7 +314,7 @@ export const listReferenceTool = tool('cisa_list_reference', {
           csafMirror.documentCount ?? 'no'
         } documents, sync status ${csafMirror.syncStatus}, checkpoint ${
           csafMirror.checkpoint ?? 'none'
-        }, last completed ${csafMirror.lastCompletedAt ?? 'never'}, path \`${csafMirror.path}\`.`,
+        }, last completed ${csafMirror.lastCompletedAt ?? 'never'}.`,
       );
       lines.push(
         `- **Vulnrichment** — mode ${vulnrichment.mode}, cache TTL ${vulnrichment.cacheTtlSeconds}s.`,

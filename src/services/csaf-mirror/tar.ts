@@ -20,6 +20,23 @@ export interface TarEntry {
 
 const BLOCK = 512;
 
+/**
+ * Ceiling on a single entry this reader will buffer. The header's size field is
+ * twelve octal digits, so a corrupt or hostile one can declare gigabytes and the
+ * reader would allocate for it before discovering the stream is shorter. The
+ * largest advisory in the corpus is 1.38 MB, so 64 MiB is far above anything the
+ * source publishes and far below a size that could exhaust the process.
+ *
+ * It bounds every entry this reader buffers — a document it is about to yield,
+ * and a long-name or pax header it has to read to name the next one. An entry
+ * the caller filtered out is never buffered at all: it is discarded in bounded
+ * chunks, whatever its header claims.
+ */
+export const MAX_TAR_ENTRY_BYTES = 64 * 1024 * 1024;
+
+/** Bytes discarded per read while skipping past an entry. */
+const DISCARD_CHUNK = 64 * 1024;
+
 /** Pull-based byte reader over a `ReadableStream`, with exact-length reads. */
 class ByteReader {
   private chunks: Uint8Array[] = [];
@@ -55,6 +72,21 @@ class ByteReader {
       this.size -= take;
     }
     return out;
+  }
+
+  /**
+   * Drop exactly `length` bytes, reading in bounded chunks so a header that
+   * declares gigabytes costs a loop rather than an allocation. Returns `false`
+   * at a short stream, which ends iteration the same way a short read does.
+   */
+  async discard(length: number): Promise<boolean> {
+    let remaining = length;
+    while (remaining > 0) {
+      const take = Math.min(remaining, DISCARD_CHUNK);
+      if ((await this.readExactly(take)) === null) return false;
+      remaining -= take;
+    }
+    return true;
   }
 
   /** Release the underlying reader. */
@@ -126,6 +158,11 @@ export async function* iterateTarGz(
       const padded = Math.ceil(size / BLOCK) * BLOCK;
 
       if (typeFlag === 'L' || typeFlag === 'x' || typeFlag === 'g') {
+        if (size > MAX_TAR_ENTRY_BYTES) {
+          throw new Error(
+            `CSAF archive metadata entry declares ${size} bytes, past the ${MAX_TAR_ENTRY_BYTES}-byte ceiling.`,
+          );
+        }
         const payload = await reader.readExactly(padded);
         if (!payload) return;
         const meaningful = payload.subarray(0, size);
@@ -139,11 +176,14 @@ export async function* iterateTarGz(
 
       const isRegular = typeFlag === '' || typeFlag === '0';
       if (!isRegular || !include(fullName)) {
-        if (padded > 0) {
-          const skipped = await reader.readExactly(padded);
-          if (!skipped) return;
-        }
+        if (padded > 0 && !(await reader.discard(padded))) return;
         continue;
+      }
+
+      if (size > MAX_TAR_ENTRY_BYTES) {
+        throw new Error(
+          `CSAF archive entry ${fullName} declares ${size} bytes, past the ${MAX_TAR_ENTRY_BYTES}-byte ceiling.`,
+        );
       }
 
       const payload = await reader.readExactly(padded);

@@ -26,8 +26,14 @@ import type {
   SyncPage,
 } from '@cyanheads/mcp-ts-core/mirror';
 import { logger, withRetry } from '@cyanheads/mcp-ts-core/utils';
-import { assertNotHtml, fetchUpstream } from '@/services/upstream-http.js';
-import { CSAF_OT_BASE, normalizeAdvisory, parseChangesCsv, toMirrorRow } from './normalize.js';
+import { assertNotHtml, fetchUpstream, readUpstreamText } from '@/services/upstream-http.js';
+import {
+  CSAF_OT_BASE,
+  isCsafSourcePath,
+  normalizeAdvisory,
+  parseChangesCsv,
+  toMirrorRow,
+} from './normalize.js';
 import {
   ADVISORIES_TABLE,
   ADVISORY_CVES_TABLE,
@@ -57,6 +63,12 @@ const CHANGES_ETAG_KEY = 'changes_csv_etag';
 
 /** Path segment that scopes the archive to the OT (ICS) distribution. */
 const OT_PREFIX = 'csaf_files/OT/white/';
+
+/** Ceiling on the manifest body. It is 228 KB today; this is two orders above it. */
+const MANIFEST_MAX_BYTES = 16 * 1024 * 1024;
+
+/** Ceiling on one advisory document. The largest in the corpus is 1.38 MB. */
+const DOCUMENT_MAX_BYTES = 16 * 1024 * 1024;
 
 /** A normalized document paired with the membership rows its junctions need. */
 interface IngestRecord {
@@ -212,7 +224,9 @@ async function* runInit(
   for await (const entry of iterateTarGz(response.body, include)) {
     if (signal.aborted) return;
     const sourcePath = entry.name.slice(entry.name.indexOf(OT_PREFIX) + OT_PREFIX.length);
-    if (!sourcePath.includes('/')) continue;
+    /* The entry name is upstream text and the path composes this document's
+     * fetch URL and its published `csafUrl`, so only the addressable shape rides. */
+    if (!isCsafSourcePath(sourcePath)) continue;
 
     let parsed: unknown;
     try {
@@ -258,7 +272,11 @@ async function* runRefresh(
         signal,
       });
       if (response.status === 304) return null;
-      const body = await response.text();
+      const body = await readUpstreamText(response, {
+        maxBytes: MANIFEST_MAX_BYTES,
+        service: 'CISA CSAF manifest',
+        url: CSAF_CHANGES_URL,
+      });
       assertNotHtml(body, response.headers.get('content-type'), 'text', CSAF_CHANGES_URL);
       return { response, manifest: parseChangesCsv(body) };
     },
@@ -317,7 +335,11 @@ async function* runRefresh(
           timeoutMs: options.timeoutMs,
           signal,
         });
-        const text = await doc.text();
+        const text = await readUpstreamText(doc, {
+          maxBytes: DOCUMENT_MAX_BYTES,
+          service: 'CISA CSAF document',
+          url,
+        });
         assertNotHtml(text, doc.headers.get('content-type'), 'json', url);
         return toIngestRecord(JSON.parse(text), path);
       },

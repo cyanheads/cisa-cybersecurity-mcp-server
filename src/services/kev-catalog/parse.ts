@@ -101,6 +101,15 @@ export function readDirective(requiredAction: string, notes: string): KevDirecti
   return null;
 }
 
+/**
+ * The shapes every KEV surface advertises for the three fields it is addressed
+ * and sorted by. Defined here rather than imported from the output schema, which
+ * imports this module.
+ */
+const CVE_ID = /^CVE-[0-9]{4}-[0-9]{4,19}$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const CWE_ID = /^CWE-[0-9]+$/;
+
 /** One raw record from the KEV feed, typed as the published schema describes it. */
 export interface RawKevRecord {
   cveID?: unknown;
@@ -122,12 +131,25 @@ function str(value: unknown): string {
 }
 
 /**
- * Map one raw feed record to the normalized domain record. Returns `null` when
- * the entry carries no CVE ID — the one field every downstream surface keys on.
+ * Map one raw feed record to the normalized domain record. Returns `null` for an
+ * entry this server cannot serve: no CVE ID in the pattern every surface
+ * addresses it by, or no `dateAdded` / `dueDate` in the calendar-date shape the
+ * deadline fields are declared as.
+ *
+ * The feed is upstream text, and these three fields are published under exactly
+ * these patterns on the surfaces that return them — so one entry that drifts off
+ * shape would fail validation for the whole page it lands on, taking a search
+ * down rather than itself. All three are required by the published KEV schema
+ * and present on every record in the live catalog; dropping one that is not
+ * costs an entry nothing can look up anyway.
  */
 export function toKevRecord(raw: RawKevRecord): KevRecord | null {
   const cveId = str(raw.cveID).toUpperCase();
-  if (cveId === '') return null;
+  if (!CVE_ID.test(cveId)) return null;
+
+  const dateAdded = str(raw.dateAdded);
+  const dueDate = str(raw.dueDate);
+  if (!ISO_DATE.test(dateAdded) || !ISO_DATE.test(dueDate)) return null;
 
   const notes = str(raw.notes);
   const requiredAction = str(raw.requiredAction);
@@ -138,14 +160,18 @@ export function toKevRecord(raw: RawKevRecord): KevRecord | null {
     vendorProject: str(raw.vendorProject),
     product: str(raw.product),
     vulnerabilityName: str(raw.vulnerabilityName),
-    dateAdded: str(raw.dateAdded),
+    dateAdded,
     shortDescription: str(raw.shortDescription),
     requiredAction,
-    dueDate: str(raw.dueDate),
+    dueDate,
     knownRansomwareCampaignUse:
       str(raw.knownRansomwareCampaignUse) === 'Known' ? 'Known' : 'Unknown',
     forensicTriage: str(raw.forensicTriage) === 'Yes' ? 'Yes' : 'No',
-    cwes: Array.isArray(raw.cwes) ? raw.cwes.filter((c): c is string => typeof c === 'string') : [],
+    /* `cwes` is optional upstream and published under this pattern; a member off
+     * it is dropped rather than carried into a result page it would invalidate. */
+    cwes: Array.isArray(raw.cwes)
+      ? raw.cwes.filter((cwe): cwe is string => typeof cwe === 'string' && CWE_ID.test(cwe))
+      : [],
     references: parsed.references,
     ...(parsed.commentary ? { notesCommentary: parsed.commentary } : {}),
     directive: readDirective(requiredAction, notes),

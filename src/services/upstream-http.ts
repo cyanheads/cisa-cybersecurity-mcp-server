@@ -57,6 +57,64 @@ export async function fetchUpstream(url: string, options: FetchUpstreamOptions):
   throw await httpErrorFromResponse(response, { service: options.service });
 }
 
+/** Options for {@link readUpstreamText}. */
+export interface ReadUpstreamTextOptions {
+  /** Ceiling on the decompressed body, in bytes. */
+  maxBytes: number;
+  /** Label used in the thrown error's message. */
+  service: string;
+  /** The URL being read, for the thrown error's message and data. */
+  url: string;
+}
+
+/**
+ * Buffer a response body as text, refusing once it passes `maxBytes`.
+ *
+ * `response.text()` has no ceiling: the request timeout bounds how long a body
+ * may take to arrive, not how large it may be, so an origin that streams without
+ * stopping is bounded only by the timeout multiplied by the link speed. Counting
+ * as the bytes arrive stops that at a declared size, and the ceiling is set per
+ * call site against the shape that source actually publishes.
+ *
+ * The count is of decompressed bytes. `fetchUpstream` requests gzip, so a
+ * `content-length` header describes the compressed body and cannot stand in.
+ */
+export async function readUpstreamText(
+  response: Response,
+  options: ReadUpstreamTextOptions,
+): Promise<string> {
+  if (!response.body) return '';
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parts: string[] = [];
+  let total = 0;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+
+      total += value.byteLength;
+      if (total > options.maxBytes) {
+        throw serviceUnavailable(
+          `${options.service} sent more than ${options.maxBytes} bytes for ${options.url}. The source is returning something other than the document this server expects there.`,
+          { reason: 'upstream_body_too_large', url: options.url, maxBytes: options.maxBytes },
+        );
+      }
+      parts.push(decoder.decode(value, { stream: true }));
+    }
+    parts.push(decoder.decode());
+  } finally {
+    await reader.cancel().catch(() => {
+      /* Already closed when the body ended cleanly; nothing to recover. */
+    });
+  }
+
+  return parts.join('');
+}
+
 /**
  * Reject an HTML error page served on a JSON or XML route. cisa.gov answers a
  * wrong path — and, transiently, a healthy one under load — with a ~46 KB Drupal

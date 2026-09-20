@@ -54,6 +54,12 @@ function buildHeader(name: string, size: number): Uint8Array {
 /** One file to place in the built archive. */
 export interface TarFixtureEntry {
   data: string;
+  /**
+   * Size written into the header in place of the content length — the seam for a
+   * malformed-header case, where what the header declares and what follows it
+   * disagree.
+   */
+  declaredSize?: number;
   name: string;
 }
 
@@ -62,7 +68,7 @@ export function buildTarGzResponse(entries: TarFixtureEntry[], init?: ResponseIn
   const parts: Uint8Array[] = [];
   for (const entry of entries) {
     const content = encoder.encode(entry.data);
-    parts.push(buildHeader(entry.name, content.length));
+    parts.push(buildHeader(entry.name, entry.declaredSize ?? content.length));
     parts.push(content);
     const remainder = content.length % BLOCK;
     if (remainder !== 0) parts.push(new Uint8Array(BLOCK - remainder));

@@ -22,13 +22,17 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { logger, withRetry } from '@cyanheads/mcp-ts-core/utils';
-import { assertNotHtml, fetchUpstream } from '@/services/upstream-http.js';
+import { assertSearchTextLength } from '@/services/search-text.js';
+import { assertNotHtml, fetchUpstream, readUpstreamText } from '@/services/upstream-http.js';
 import { daysBetween, type RawKevRecord, toKevRecord } from './parse.js';
 import type { KevCatalogState, KevDirective, KevRecord, KevSnapshot } from './types.js';
 
 /** The published KEV JSON feed. */
 export const KEV_FEED_URL =
   'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json';
+
+/** Ceiling on the feed body. It is 1.74 MB today; this leaves room to grow. */
+const FEED_MAX_BYTES = 64 * 1024 * 1024;
 
 /** Filters accepted by {@link KevCatalogService.search}. All AND together. */
 export interface KevSearchFilters {
@@ -67,14 +71,27 @@ function normalizeText(value: string): string {
 }
 
 /**
+ * Normalize a `nameContains` query into its match tokens, once per search rather
+ * than once per record: the query is normalized with an NFKD pass and two regex
+ * sweeps, and repeating that against all 1,716 records makes the cost of one call
+ * the length of the query times the size of the catalog.
+ *
+ * The length ceiling is what keeps the token count bounded — every token is then
+ * searched for in every record, so the two multiply.
+ */
+function queryTokens(query: string): string[] {
+  assertSearchTextLength(query, 'nameContains');
+  return normalizeText(query).split(/\s+/).filter(Boolean);
+}
+
+/**
  * Strict token match — every query token must appear in the haystack. No fuzzy
  * fallback: an LLM caller does not need typo tolerance, and a wrong KEV record is
  * worse than a miss.
  */
-function matchesTokens(haystack: string, query: string): boolean {
-  const hay = normalizeText(haystack);
-  const tokens = normalizeText(query).split(/\s+/).filter(Boolean);
+function matchesTokens(haystack: string, tokens: string[]): boolean {
   if (tokens.length === 0) return false;
+  const hay = normalizeText(haystack);
   return tokens.every((token) => hay.includes(token));
 }
 
@@ -161,8 +178,9 @@ export class KevCatalogService {
     const snapshot = await this.snapshot(ctx);
     const asOf = this.asOf();
     const source = sortBy === 'dueDate' ? snapshot.byDueDate : snapshot.byDateAdded;
+    const nameTokens = filters.nameContains ? queryTokens(filters.nameContains) : [];
 
-    const matched = source.filter((record) => this.matches(record, filters, asOf));
+    const matched = source.filter((record) => this.matches(record, filters, nameTokens, asOf));
     return order === 'asc' ? matched : matched.slice().reverse();
   }
 
@@ -202,7 +220,12 @@ export class KevCatalogService {
     });
   }
 
-  private matches(record: KevRecord, filters: KevSearchFilters, asOf: string): boolean {
+  private matches(
+    record: KevRecord,
+    filters: KevSearchFilters,
+    nameTokens: string[],
+    asOf: string,
+  ): boolean {
     if (
       filters.vendorProject &&
       !record.vendorProject.toLowerCase().includes(filters.vendorProject.toLowerCase())
@@ -214,7 +237,7 @@ export class KevCatalogService {
     }
     if (
       filters.nameContains &&
-      !matchesTokens(`${record.vulnerabilityName} ${record.shortDescription}`, filters.nameContains)
+      !matchesTokens(`${record.vulnerabilityName} ${record.shortDescription}`, nameTokens)
     ) {
       return false;
     }
@@ -267,7 +290,11 @@ export class KevCatalogService {
         this.lastCheckedAt = new Date().toISOString();
         if (response.status === 304) return;
 
-        const body = await response.text();
+        const body = await readUpstreamText(response, {
+          maxBytes: FEED_MAX_BYTES,
+          service: 'CISA KEV',
+          url: KEV_FEED_URL,
+        });
         assertNotHtml(body, response.headers.get('content-type'), 'json', KEV_FEED_URL);
         return buildSnapshot(body, response.headers.get('last-modified'));
       },

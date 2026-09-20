@@ -10,3 +10,16 @@
 /biome.json
 /tsconfig*.json
 /vitest.config.ts
+
+# The advisory index this server writes at the default CISA_CSAF_MIRROR_PATH.
+# It grows to the size of the corpus, is stale the moment it is packed, and a
+# bundle seeds its own on first run — so it must never travel inside one.
+/.mirror/
+
+# Build and machine leftovers: the incremental build map and .DS_Store both
+# carry absolute local paths and directory listings, and a previously packed
+# bundle sits in the same output directory as the one being packed.
+*.tsbuildinfo
+.DS_Store
+*.mcpb
+/coverage/

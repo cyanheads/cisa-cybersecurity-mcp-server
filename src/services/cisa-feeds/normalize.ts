@@ -5,6 +5,26 @@
  * @module services/cisa-feeds/normalize
  */
 
+import { ADVISORY_ID_PATTERN } from '@/services/csaf-mirror/normalize.js';
+
+/** The highest Unicode code point; `String.fromCodePoint` throws above it. */
+const MAX_CODE_POINT = 0x10ffff;
+
+/**
+ * Resolve one numeric character reference, leaving it verbatim when the value is
+ * not a code point. `String.fromCodePoint` throws a `RangeError` on anything
+ * outside 0–0x10FFFF, and a long enough run of digits parses to `Infinity` — so
+ * an upstream feed item carrying `&#1114112;` would otherwise throw out of a
+ * pure normalizer, fail the parse, exhaust the retries, and leave every caller
+ * of the feed tool with an unavailable feed until the item rolled out of the
+ * window.
+ */
+function fromCodePoint(raw: string, digits: string, radix: number): string {
+  const code = Number.parseInt(digits, radix);
+  if (!Number.isInteger(code) || code < 0 || code > MAX_CODE_POINT) return raw;
+  return String.fromCodePoint(code);
+}
+
 /** Named entities the feeds actually emit, plus the numeric forms. */
 function decodeEntities(value: string): string {
   return value
@@ -13,10 +33,8 @@ function decodeEntities(value: string): string {
     .replace(/&apos;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 10)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, code: string) =>
-      String.fromCodePoint(Number.parseInt(code, 16)),
-    )
+    .replace(/&#(\d+);/g, (raw, code: string) => fromCodePoint(raw, code, 10))
+    .replace(/&#x([0-9a-f]+);/gi, (raw, code: string) => fromCodePoint(raw, code, 16))
     .replace(/&amp;/g, '&');
 }
 
@@ -52,9 +70,17 @@ export function normalizePubDate(pubDate: string): string {
 /**
  * Extract the advisory ID from a feed item link, uppercased so it chains straight
  * into `cisa_get_advisory`. Returns `undefined` for a link that is not an ICS
- * advisory page.
+ * advisory page, and for one whose slug is not an advisory ID.
+ *
+ * The slug is whatever cisa.gov put in the URL — a landing page, a re-issue
+ * suffix, an older `ics-alert-` document — while the field this feeds is
+ * published under the advisory-ID pattern and is advertised as ready to pass to
+ * `cisa_get_advisory`. A slug that does not match cannot be looked up, and
+ * returning it would fail validation for the whole window rather than for itself.
  */
 export function advisoryIdFromLink(link: string): string | undefined {
   const match = /\/(?:ics-advisories|ics-medical-advisories)\/([a-z0-9-]+)/i.exec(link);
-  return match?.[1] ? match[1].toUpperCase() : undefined;
+  if (!match?.[1]) return undefined;
+  const advisoryId = match[1].toUpperCase();
+  return ADVISORY_ID_PATTERN.test(advisoryId) ? advisoryId : undefined;
 }
