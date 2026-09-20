@@ -51,10 +51,10 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="cisa-cybersecurity-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF) via MCP. Keyless. STDIO & Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.source=""
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/cisa-cybersecurity-mcp-server"
 
 # Copy dependency manifests
 COPY package.json bun.lock ./

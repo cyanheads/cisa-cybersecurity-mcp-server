@@ -21,7 +21,11 @@
     "cisa",
     "kev",
     "known-exploited-vulnerabilities",
-    "bod-26-04"
+    "bod-26-04",
+    "ssvc",
+    "csaf",
+    "ics-security",
+    "vulnerability-management"
   ],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
