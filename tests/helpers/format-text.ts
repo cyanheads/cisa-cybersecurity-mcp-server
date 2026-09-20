@@ -1,0 +1,18 @@
+/**
+ * @fileoverview Shared test helper for tool definition suites: extracts the
+ * `text` field of the first content block a tool's `format()` produces.
+ * Asserts the block array and its first entry both exist first, so callers
+ * never dereference past an optional-chaining short-circuit the way
+ * `(tool.format?.(result)?.[0] as { text: string }).text` does.
+ * @module tests/helpers/format-text
+ */
+
+import { expect } from 'vitest';
+
+/** Returns the `text` field of the first block, asserting it is present. */
+export function firstText(blocks: unknown[] | undefined): string {
+  expect(blocks).toBeDefined();
+  const block = blocks?.[0];
+  expect(block).toBeDefined();
+  return (block as { text: string }).text;
+}
