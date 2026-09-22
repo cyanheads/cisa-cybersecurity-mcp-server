@@ -23,8 +23,8 @@ Four keyless CISA datasets, all read-only, served over seven tools and two resou
 | `cisa_check_cve_status` | `kev-catalog`. Up to 200 CVE IDs, zero upstream requests. |
 | `cisa_search_kev` | `kev-catalog`. Filters AND together against the whole snapshot, never a page. |
 | `cisa_get_ssvc` | `vulnrichment` + `kev-catalog`. Computes the BOD 26-04 timeline from three published decision points plus the caller's `assetExposure`. |
-| `cisa_search_ics_advisories` | `csaf-mirror`. FTS5 plus indexed filters over the local index. |
-| `cisa_get_advisory` | `csaf-mirror`. `outlineOnOverflow` at `ADVISORY_OUTLINE_BUDGET` (24 KB), `selectSections` on the re-call. |
+| `cisa_search_ics_advisories` | `csaf-mirror` + `kev-catalog`. FTS5 plus indexed filters over the local index; KEV membership joins the in-memory snapshot and is awaited only under `inKev` — otherwise best-effort, so a KEV outage never fails an advisory search. |
+| `cisa_get_advisory` | `csaf-mirror`. `outlineOnOverflow` at `ADVISORY_OUTLINE_BUDGET` (24 KB), `selectSections` on the re-call, and `cves` narrowing `vulnerabilities` below the section level. |
 | `cisa_get_alerts` | `cisa-feeds`. A 30-item rolling window; the cap is upstream's, not a server choice. |
 | `cisa://kev/{cveId}` | `kev-catalog`. Same record shape `cisa_check_cve_status` returns. |
 | `cisa://advisory/{advisoryId}` | `csaf-mirror`. The same overflow treatment as the tool's no-`sections` call. |
@@ -36,7 +36,7 @@ No prompts: every workflow here is a direct lookup or a filtered search the tool
 | Service | Tier | Refresh |
 |:--------|:-----|:--------|
 | `kev-catalog` | In-memory process-level snapshot with derived indexes | `If-Modified-Since` poll on `CISA_KEV_REFRESH_CRON`. `If-None-Match` is deliberately unused — the origin serves an ETag and ignores it. |
-| `csaf-mirror` | `MirrorService` over embedded SQLite + FTS5 | One archive seeds it; refresh diffs `changes.csv` and fetches only the documents whose revision date moved. |
+| `csaf-mirror` | `MirrorService` over embedded SQLite + FTS5 | One archive seeds it; refresh diffs `changes.csv` and fetches only the documents whose revision date moved. An index whose recorded `INGEST_CONTENT_VERSION` is older re-ingests the archive in place on boot. |
 | `vulnrichment` | Per-CVE fetch with a `ctx.state` TTL cache | On demand. A 404 caches as a negative at one sixth of the TTL. |
 | `cisa-feeds` | Timer cache | Unconditional — the feeds serve no `etag` and no `last-modified`, so nothing can make a request conditional. |
 
@@ -45,6 +45,7 @@ No prompts: every workflow here is a direct lookup or a filtered search the tool
 - Boot never depends on the advisory corpus. KEV, SSVC, and alert tools serve from the first request; the index seeds in the background and reports `mirror_not_ready` until it lands.
 - An HTML body on a JSON or XML route is `ServiceUnavailable`, never `SerializationError` — cisa.gov serves a Drupal error page transiently, and a parse-error classification makes a recoverable outage look like a data-shape defect.
 - A not-yet-seeded index throws rather than returning an empty result: an empty page asserts that nothing matches.
+- Raise `INGEST_CONTENT_VERSION` (`src/services/csaf-mirror/ingest.ts`) whenever ingest would store different content for a document upstream has not revised — a row field, the stored document, a junction table. `refresh` never revisits an unchanged document, so without the bump the change never reaches an existing index. A new auxiliary table also needs a migration and a raised store-spec `version`.
 - A computed BOD 26-04 timeline and CISA's assigned KEV due date are two separate facts, reported side by side and never reconciled.
 - No DHS seal, CISA logo, or implied endorsement on any surface. Advisory responses always carry `url`, `csafUrl`, and `attribution` — the CSAF repository declares no license and many advisories republish vendor text.
 
@@ -53,7 +54,7 @@ No prompts: every workflow here is a direct lookup or a filtered search the tool
 ```sh
 bun run mirror:init      # full build from the repository archive; idempotent
 bun run mirror:refresh   # incremental, driven by the changes.csv diff
-bun run mirror:verify    # readiness, status, checkpoint, count, SQLite integrity; non-zero on failure
+bun run mirror:verify    # readiness, status, checkpoint, count, content version, SQLite integrity; non-zero on failure
 ```
 
 ---
@@ -429,7 +430,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run test:coverage` | Run tests with Istanbul coverage |
 | `bun run mirror:init` | Full out-of-band build of the ICS advisory index; idempotent |
 | `bun run mirror:refresh` | Incremental advisory refresh, driven by the `changes.csv` diff |
-| `bun run mirror:verify` | Index health — readiness, status, checkpoint, count, SQLite integrity. Non-zero exit on failure |
+| `bun run mirror:verify` | Index health — readiness, status, checkpoint, count, content version (stale is a warning), SQLite integrity. Non-zero exit on failure |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
