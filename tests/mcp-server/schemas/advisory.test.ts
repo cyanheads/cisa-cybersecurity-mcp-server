@@ -1,12 +1,18 @@
 /**
  * @fileoverview Tests for the shared advisory output schema helpers and
- * markdown renderers — `isEmptySection`, `presentSections`, and the seven
- * section renderers `cisa_get_advisory` and the resource both use.
+ * markdown renderers — `isEmptySection`, `presentSections`, the shared outline
+ * extractor and its CVE listing, and the section renderers `cisa_get_advisory`
+ * and the resource both use.
  * @module tests/mcp-server/schemas/advisory.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
 import {
+  AdvisoryOutlineSectionSchema,
+  advisoryCves,
+  cvesNarrowingHint,
+  extractAdvisorySections,
   isEmptySection,
   presentSections,
   renderAdvisoryAcknowledgments,
@@ -16,6 +22,7 @@ import {
   renderAdvisoryRevisions,
   renderAdvisorySummary,
   renderAdvisoryVulnerabilities,
+  renderOutlineCves,
 } from '@/mcp-server/schemas/advisory.js';
 import { normalizeAdvisory } from '@/services/csaf-mirror/normalize.js';
 import { FULL_ADVISORY, SPARSE_ADVISORY } from '../../fixtures/csaf-documents.js';
@@ -68,6 +75,70 @@ describe('presentSections', () => {
   });
 });
 
+describe('extractAdvisorySections / advisoryCves', () => {
+  /* SPARSE_ADVISORY with its second vulnerability entry repeating the first CVE. */
+  const repeated = {
+    ...SPARSE_ADVISORY,
+    vulnerabilities: [
+      SPARSE_ADVISORY.vulnerabilities[1],
+      SPARSE_ADVISORY.vulnerabilities[0],
+      { ...SPARSE_ADVISORY.vulnerabilities[1], title: 'A second entry for the same CVE' },
+    ],
+  };
+
+  it('sizes every carried section, lists CVE IDs on vulnerabilities only, and skips empty sections', () => {
+    const doc = normalizeAdvisory(SPARSE_ADVISORY, '2014/icsa-14-035-01.json');
+    if (!doc) throw new Error('expected a normalized document');
+    const sections = extractAdvisorySections(doc);
+    expect(sections.map((section) => section.name)).toEqual(presentSections(doc));
+    for (const section of sections) {
+      expect(section.bytes).toBe(JSON.stringify(doc[section.name as keyof typeof doc]).length);
+      if (section.name === 'vulnerabilities') {
+        expect(section.cves).toEqual(['CVE-2014-0001', 'CVE-2014-0002']);
+      } else {
+        expect(section).not.toHaveProperty('cves');
+      }
+    }
+  });
+
+  it('lists each CVE once, in first-appearance order, when entries repeat a CVE', () => {
+    const doc = normalizeAdvisory(repeated, '2014/icsa-14-035-01.json');
+    if (!doc) throw new Error('expected a normalized document');
+    expect(doc.vulnerabilities).toHaveLength(3);
+    expect(advisoryCves(doc)).toEqual(['CVE-2014-0002', 'CVE-2014-0001']);
+  });
+
+  it('survives the outline schema with its CVE list intact — the framework element alone would strip it', () => {
+    const doc = normalizeAdvisory(SPARSE_ADVISORY, '2014/icsa-14-035-01.json');
+    if (!doc) throw new Error('expected a normalized document');
+    const parsed = z.array(AdvisoryOutlineSectionSchema).parse(extractAdvisorySections(doc));
+    expect(parsed.find((section) => section.name === 'vulnerabilities')?.cves).toEqual([
+      'CVE-2014-0001',
+      'CVE-2014-0002',
+    ]);
+  });
+});
+
+describe('cvesNarrowingHint / renderOutlineCves', () => {
+  const sections = [
+    { name: 'vulnerabilities', bytes: 30_000, cves: ['CVE-2026-0001', 'CVE-2026-0002'] },
+    { name: 'products', bytes: 900 },
+  ];
+
+  it('points at cves only when the vulnerabilities section alone overflows the budget', () => {
+    expect(cvesNarrowingHint(sections, 24_000)).toContain('30000 bytes; pass cves');
+    expect(cvesNarrowingHint(sections, 30_000)).toBe('');
+    expect(cvesNarrowingHint([{ name: 'products', bytes: 90_000 }], 24_000)).toBe('');
+  });
+
+  it('renders the vulnerabilities CVE IDs, and nothing for an outline without them', () => {
+    expect(renderOutlineCves(sections)).toEqual([
+      '**CVE IDs in the vulnerabilities section (2):** CVE-2026-0001, CVE-2026-0002',
+    ]);
+    expect(renderOutlineCves([{ name: 'products', bytes: 900 }])).toEqual([]);
+  });
+});
+
 describe('renderAdvisoryHeader', () => {
   it('renders identity, dates, and attribution', () => {
     const doc = normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json');
@@ -106,6 +177,19 @@ describe('renderAdvisoryProducts', () => {
     expect(lines).toContain('Widget Controller X200');
     expect(lines).toContain('CSAFPID-0001');
     expect(lines).toContain('Truncated:** no');
+  });
+
+  it('describes a capped document from an older index build as awaiting re-ingest, not as re-callable', () => {
+    const lines = renderAdvisoryProducts({
+      vendorCount: 1,
+      productCount: 585,
+      shownProducts: 200,
+      truncated: true,
+      vendors: [],
+    }).join('\n');
+    expect(lines).toContain('**Truncated:** yes');
+    expect(lines).toContain('re-ingest');
+    expect(lines).not.toContain('request the products section alone');
   });
 });
 

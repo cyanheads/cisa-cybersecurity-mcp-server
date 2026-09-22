@@ -114,8 +114,18 @@ export const AdvisoryProductsSchema = z
           .describe('One vendor and its products.'),
       )
       .describe('Vendors flattened out of the CSAF product tree.'),
-    truncated: z.boolean().optional().describe('True when the flattened version rows were capped.'),
-    shownProducts: z.number().int().describe('Flattened version rows actually returned.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True only on a copy stored by an older index build that capped product rows; the index re-ingests on its next start and then returns every row. Absent otherwise.',
+      ),
+    shownProducts: z
+      .number()
+      .int()
+      .describe(
+        'Flattened version rows returned — equal to productCount except on a truncated copy.',
+      ),
   })
   .describe('Affected products, flattened from the CSAF product tree.');
 
@@ -231,6 +241,24 @@ export const AdvisoryAcknowledgmentSchema = z
   .describe('One acknowledgment entry.');
 
 /**
+ * One outline entry. The framework's element schema is strip-mode and carries
+ * only `name` and `bytes`, so reusing it verbatim would silently drop `cves` from
+ * both surfaces; this extends it instead.
+ */
+export const AdvisoryOutlineSectionSchema = OUTLINE_VARIANT.shape.sections.element
+  .extend({
+    cves: z
+      .array(z.string().describe('One CVE identifier.'))
+      .optional()
+      .describe(
+        'On the vulnerabilities section only: the CVE IDs it holds, in document order. Pass any of them in cves to cisa_get_advisory to read just those entries.',
+      ),
+  })
+  .describe('One section this advisory carries, with its serialized byte size.');
+
+type OutlineSection = z.infer<typeof AdvisoryOutlineSectionSchema>;
+
+/**
  * The document-or-outline output fields shared by `cisa_get_advisory` and the
  * `cisa://advisory/{advisoryId}` resource. The tool adds `found`/`guidance` for
  * its miss arm; the resource throws on a miss, so it uses the shape as-is.
@@ -261,13 +289,11 @@ export const AdvisoryDocumentOutputShape = {
     .optional()
     .describe('Acknowledgment entries.'),
   sections: z
-    .array(
-      OUTLINE_VARIANT.shape.sections.element.describe(
-        'One section this advisory carries, with its serialized byte size.',
-      ),
-    )
+    .array(AdvisoryOutlineSectionSchema)
     .optional()
-    .describe('Outline arm — the sections available, largest first, with their byte sizes.'),
+    .describe(
+      'Outline arm — the sections available, largest first, with their byte sizes and, for vulnerabilities, its CVE IDs.',
+    ),
   outlineNotice: OUTLINE_VARIANT.shape.notice
     .optional()
     .describe('Outline arm — how to call cisa_get_advisory for specific sections.'),
@@ -282,8 +308,38 @@ export function isEmptySection(value: unknown): boolean {
 }
 
 /** The section names an advisory actually carries, in declaration order. */
-export function presentSections(doc: NormalizedAdvisory): string[] {
+export function presentSections(doc: NormalizedAdvisory): (typeof ADVISORY_SECTIONS)[number][] {
   return ADVISORY_SECTIONS.filter((section) => !isEmptySection(doc[section]));
+}
+
+/** The distinct CVE IDs an advisory's vulnerabilities section holds, in document order. */
+export function advisoryCves(doc: NormalizedAdvisory): string[] {
+  return [...new Set(doc.vulnerabilities.map((vulnerability) => vulnerability.cve))];
+}
+
+/**
+ * The outline extractor the tool and the resource share: one entry per section
+ * the advisory actually carries — the same set `unknown_section` validates
+ * against — sized by its serialized length. The vulnerabilities entry also lists
+ * its CVE IDs, because a caller cannot choose a `cves` subset without them.
+ */
+export function extractAdvisorySections(doc: NormalizedAdvisory): OutlineSection[] {
+  return presentSections(doc).map((section) => ({
+    name: section,
+    bytes: JSON.stringify(doc[section]).length,
+    ...(section === 'vulnerabilities' ? { cves: advisoryCves(doc) } : {}),
+  }));
+}
+
+/**
+ * The sentence an outline notice adds when the vulnerabilities section alone
+ * overflows `budget` — `sections` cannot bring it under, `cves` can. Empty
+ * otherwise.
+ */
+export function cvesNarrowingHint(sections: readonly OutlineSection[], budget: number): string {
+  const vulnerabilities = sections.find((section) => section.name === 'vulnerabilities');
+  if (!vulnerabilities || vulnerabilities.bytes <= budget) return '';
+  return `The vulnerabilities section alone is ${vulnerabilities.bytes} bytes; pass cves with IDs from its listed CVEs to cisa_get_advisory to read only those entries.`;
 }
 
 // ── Renderers ───────────────────────────────────────────────────────────────
@@ -295,6 +351,17 @@ type Vulnerability = z.infer<typeof AdvisoryVulnerabilitySchema>;
 type Revision = z.infer<typeof AdvisoryRevisionSchema>;
 type Reference = z.infer<typeof AdvisoryReferenceSchema>;
 type Acknowledgment = z.infer<typeof AdvisoryAcknowledgmentSchema>;
+
+/**
+ * Render the CVE IDs an outline's vulnerabilities entry lists — the part of the
+ * outline the framework's `formatOutline` does not know about.
+ */
+export function renderOutlineCves(sections: readonly OutlineSection[]): string[] {
+  const cves = sections.find((section) => section.cves)?.cves;
+  return cves
+    ? [`**CVE IDs in the vulnerabilities section (${cves.length}):** ${cves.join(', ')}`]
+    : [];
+}
 
 /** Render the advisory header block. */
 export function renderAdvisoryHeader(advisory: Header): string[] {
@@ -330,7 +397,11 @@ export function renderAdvisoryProducts(products: Products): string[] {
   const lines = [
     '## Affected products',
     `**Vendors:** ${products.vendorCount} · **Products:** ${products.productCount} · **Shown:** ${products.shownProducts}`,
-    `**Truncated:** ${products.truncated ? 'yes — request the products section alone for the rest' : 'no'}`,
+    `**Truncated:** ${
+      products.truncated
+        ? 'yes — this copy was stored by an older index build that capped product rows; the index re-ingests every advisory on its next start, after which all rows are returned'
+        : 'no'
+    }`,
   ];
   for (const vendor of products.vendors) {
     lines.push(`### ${vendor.name}`);

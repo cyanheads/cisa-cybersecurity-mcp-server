@@ -9,6 +9,10 @@
  * listing of what is available plus a re-call contract, and the re-call is
  * stateless — the index lookup is deterministic, so the handler re-reads the row
  * and projects it.
+ *
+ * `vulnerabilities` is one section, and on the largest advisories it alone is
+ * several hundred kilobytes. `cves` is the sub-section selector for it: the
+ * outline lists the section's CVE IDs, and a re-call names the ones it wants.
  * @module mcp-server/tools/definitions/get-advisory.tool
  */
 
@@ -19,7 +23,9 @@ import {
   ADVISORY_OUTLINE_BUDGET,
   ADVISORY_SECTIONS,
   AdvisoryDocumentOutputShape,
-  isEmptySection,
+  advisoryCves,
+  cvesNarrowingHint,
+  extractAdvisorySections,
   presentSections,
   renderAdvisoryAcknowledgments,
   renderAdvisoryHeader,
@@ -28,12 +34,15 @@ import {
   renderAdvisoryRevisions,
   renderAdvisorySummary,
   renderAdvisoryVulnerabilities,
+  renderOutlineCves,
 } from '@/mcp-server/schemas/advisory.js';
+import { CveIdInputSchema } from '@/mcp-server/schemas/kev-record.js';
 import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
 import {
   ADVISORY_ID_INPUT_PATTERN,
   normalizeAdvisoryId,
 } from '@/services/csaf-mirror/normalize.js';
+import type { NormalizedAdvisory } from '@/services/csaf-mirror/types.js';
 
 const MISS_GUIDANCE =
   'No advisory with that ID is in the index. IDs look like ICSA-26-260-07 or ICSMA-26-253-02, with an optional revision suffix. Call cisa_search_ics_advisories to find the right ID, or cisa_list_reference with topic advisory_id_formats for the format.';
@@ -41,7 +50,7 @@ const MISS_GUIDANCE =
 export const getAdvisoryTool = tool('cisa_get_advisory', {
   title: 'cisa_get_advisory',
   description:
-    "Read one CISA industrial control system advisory in full: affected products flattened from the CSAF product tree into vendor, product, and version ranges; per-CVE CVSS score, vector, and CWE; remediations with their category and vendor instructions; critical-infrastructure sectors; and the revision history. Large advisories return a section outline instead of the whole document — re-call with the sections you need. Republished vendor advisories carry the originating vendor's text; every response reports the source URL and attribution. Find advisory IDs with cisa_search_ics_advisories.",
+    "Read one CISA industrial control system advisory in full: affected products flattened from the CSAF product tree into vendor, product, and version ranges; per-CVE CVSS score, vector, and CWE; remediations with their category and vendor instructions; critical-infrastructure sectors; and the revision history. Large advisories return a section outline instead of the whole document, listing each section's size and the CVE IDs the vulnerabilities section holds — re-call with the sections you need, or with cves to read only those vulnerability entries. Republished vendor advisories carry the originating vendor's text; every response reports the source URL and attribution. Find advisory IDs with cisa_search_ics_advisories.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -56,6 +65,16 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       .optional()
       .describe(
         'Sections to return. Omit for the whole document, or for its outline when the document overflows the inline budget.',
+      ),
+    cves: z
+      .array(
+        CveIdInputSchema.describe(
+          'One CVE identifier the advisory covers, e.g. CVE-2023-3935. Case and surrounding whitespace are normalized.',
+        ),
+      )
+      .optional()
+      .describe(
+        'Narrow the vulnerabilities section to these CVE IDs; the outline lists the ones the advisory holds. Alone, it selects the vulnerabilities section; with sections, that list must include "vulnerabilities".',
       ),
   }),
 
@@ -81,9 +100,38 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       recovery:
         'Call this tool without sections to get the outline of the sections this advisory actually has, then request those by name.',
     },
+    {
+      reason: 'cves_need_vulnerabilities_section',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'cves is set but sections does not include "vulnerabilities", so there is nothing for cves to narrow.',
+      recovery:
+        'Add "vulnerabilities" to sections, or omit sections so cves selects the vulnerabilities section on its own.',
+    },
+    {
+      reason: 'unknown_cve',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A cves entry names a CVE this advisory does not cover.',
+      recovery:
+        'Call this tool without cves to see which CVE IDs the advisory holds — the outline lists them — then pass only those; to find the advisory that covers a CVE, call cisa_search_ics_advisories with cve.',
+    },
   ],
 
   async handler(input, ctx) {
+    const cves = input.cves && input.cves.length > 0 ? [...new Set(input.cves)] : undefined;
+    const requested =
+      input.sections && input.sections.length > 0
+        ? input.sections
+        : cves
+          ? (['vulnerabilities'] as const)
+          : undefined;
+    if (cves && requested && !requested.includes('vulnerabilities')) {
+      throw ctx.fail(
+        'cves_need_vulnerabilities_section',
+        `cves narrows the vulnerabilities section, but sections requests only ${requested.join(', ')}.`,
+        { ...ctx.recoveryFor('cves_need_vulnerabilities_section') },
+      );
+    }
+
     const mirror = getCsafMirror();
     if (!(await mirror.ready())) {
       throw ctx.fail(
@@ -100,9 +148,9 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       return { found: false, guidance: MISS_GUIDANCE };
     }
 
-    if (input.sections && input.sections.length > 0) {
+    if (requested) {
       const available = presentSections(doc);
-      const missing = input.sections.filter((section) => !available.includes(section));
+      const missing = requested.filter((section) => !available.includes(section));
       if (missing.length > 0) {
         throw ctx.fail(
           'unknown_section',
@@ -110,22 +158,28 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
           { ...ctx.recoveryFor('unknown_section') },
         );
       }
-      return {
-        found: true,
-        kind: 'full' as const,
-        ...selectSections(doc as unknown as Record<string, unknown>, input.sections, {
-          alwaysKeep: ['advisory'],
-        }),
-      };
+      const selected = selectSections(doc as unknown as Record<string, unknown>, [...requested], {
+        alwaysKeep: ['advisory'],
+      }) as Partial<NormalizedAdvisory>;
+      if (cves) {
+        const covered = new Set(advisoryCves(doc));
+        const unknown = cves.filter((cve) => !covered.has(cve));
+        if (unknown.length > 0) {
+          throw ctx.fail(
+            'unknown_cve',
+            `${advisoryId} does not cover ${unknown.join(', ')}; its vulnerabilities section holds ${covered.size} CVE${covered.size === 1 ? '' : 's'}.`,
+            { ...ctx.recoveryFor('unknown_cve') },
+          );
+        }
+        const wanted = new Set(cves);
+        selected.vulnerabilities = doc.vulnerabilities.filter((entry) => wanted.has(entry.cve));
+      }
+      return { found: true, kind: 'full' as const, ...selected };
     }
 
     const result = outlineOnOverflow(doc as unknown as Record<string, unknown>, {
       budget: ADVISORY_OUTLINE_BUDGET,
-      /* Only sections the advisory actually carries — the same set `unknown_section` validates against. */
-      extract: (document) =>
-        Object.entries(document)
-          .filter(([, value]) => !isEmptySection(value))
-          .map(([name, value]) => ({ name, bytes: JSON.stringify(value)?.length ?? 0 })),
+      extract: () => extractAdvisorySections(doc),
     });
 
     ctx.log.info('Read advisory from the index', { advisoryId, kind: result.kind });
@@ -133,7 +187,8 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       /* `outlineNotice` rather than `notice`: a bare `notice` key reads as
        * agent-facing enrichment, and this one is the outline arm's own payload. */
       const { notice, ...outline } = result;
-      return { found: true, ...outline, outlineNotice: notice };
+      const hint = cvesNarrowingHint(outline.sections, ADVISORY_OUTLINE_BUDGET);
+      return { found: true, ...outline, outlineNotice: hint ? `${notice} ${hint}` : notice };
     }
     return { found: true, ...result };
   },
@@ -168,6 +223,8 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
           notice: result.outlineNotice ?? '',
         }) as Array<{ type: 'text'; text: string }>),
       );
+      const cveLines = renderOutlineCves(result.sections);
+      if (cveLines.length > 0) blocks.push({ type: 'text', text: cveLines.join('\n') });
     }
     return blocks;
   },

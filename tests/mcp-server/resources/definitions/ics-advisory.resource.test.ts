@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests for the `cisa://advisory/{advisoryId}` resource — the
  * mirror_not_ready ServiceUnavailable throw, notFound for a missing ID, the
- * outline-arm rename to `outlineNotice`, `list()`, and `complete()`.
+ * outline-arm rename to `outlineNotice`, the outline's vulnerabilities CVE
+ * listing through the output schema, `list()`, and `complete()`.
  * @module tests/mcp-server/resources/definitions/ics-advisory.resource.test
  */
 
@@ -21,12 +22,13 @@ import { CSAF_ARCHIVE_URL } from '@/services/csaf-mirror/ingest.js';
 import { buildOversizedAdvisory, FULL_ADVISORY } from '../../../fixtures/csaf-documents.js';
 import { buildTarGzResponse } from '../../../fixtures/tar.js';
 
-/* `resource()`'s ResourceDefinition types `params` as optional (the generic
- * interface field), even though this definition always supplies one; and
- * `list()`'s declared signature takes a `ListExtra` the implementation
- * ignores. Both are compile-time-only frictions, not runtime behavior. */
+/* `resource()`'s ResourceDefinition types `params` and `output` as optional (the
+ * generic interface fields), even though this definition always supplies both;
+ * and `list()`'s declared signature takes a `ListExtra` the implementation
+ * ignores. All are compile-time-only frictions, not runtime behavior. */
 const advisoryParams = icsAdvisoryResource.params as NonNullable<typeof icsAdvisoryResource.params>;
 const listExtra = {} as Parameters<NonNullable<typeof icsAdvisoryResource.list>>[0];
+const advisoryOutput = icsAdvisoryResource.output as NonNullable<typeof icsAdvisoryResource.output>;
 
 async function seedMirror(entries: Array<{ name: string; data: string }>) {
   const http = createFetchMock([
@@ -146,6 +148,36 @@ describe('cisa://advisory/{advisoryId} resource', () => {
       expect((result as Record<string, unknown>).notice).toBeUndefined();
       expect(result.vulnerabilities).toBeUndefined();
       expect(result.outlineNotice).toContain('cisa_get_advisory');
+    });
+
+    it('through the declared output schema, each outline section keeps its name and byte size', async () => {
+      const ctx = createMockContext();
+      const params = advisoryParams.parse({ advisoryId: 'ICSA-26-003-01' });
+      const parsed = advisoryOutput.parse(await icsAdvisoryResource.handler(params, ctx)) as {
+        sections: Array<Record<string, unknown>>;
+      };
+      const doc = await getCsafMirror().getAdvisory('ICSA-26-003-01');
+      const vulnerabilities = parsed.sections.find((section) => section.name === 'vulnerabilities');
+      expect(vulnerabilities?.bytes).toBe(JSON.stringify(doc?.vulnerabilities).length);
+      for (const section of parsed.sections) {
+        expect(typeof section.name).toBe('string');
+        expect(typeof section.bytes).toBe('number');
+      }
+    });
+
+    it('lists the vulnerabilities section’s CVE IDs through the output schema and points at cves', async () => {
+      const ctx = createMockContext();
+      const params = advisoryParams.parse({ advisoryId: 'ICSA-26-003-01' });
+      const parsed = advisoryOutput.parse(await icsAdvisoryResource.handler(params, ctx)) as {
+        outlineNotice: string;
+        sections: Array<{ name: string; cves?: string[] }>;
+      };
+      const vulnerabilities = parsed.sections.find((section) => section.name === 'vulnerabilities');
+      expect(vulnerabilities?.cves).toEqual(
+        Array.from({ length: 40 }, (_, index) => `CVE-2026-${10000 + index}`),
+      );
+      expect(parsed.sections.filter((section) => section.cves)).toHaveLength(1);
+      expect(parsed.outlineNotice).toContain('pass cves with IDs from its listed CVEs');
     });
   });
 });

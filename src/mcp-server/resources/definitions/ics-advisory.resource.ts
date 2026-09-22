@@ -5,8 +5,9 @@
  *
  * Nothing about reading an advisory through a resource template makes a 1.38 MB,
  * 585-product document cheaper to hand back whole, and a resource client has no
- * `sections` parameter to opt out with — so a caller who lands on the outline arm
- * follows up with `cisa_get_advisory` to name the sections it needs.
+ * `sections` or `cves` parameter to opt out with — so a caller who lands on the
+ * outline arm follows up with `cisa_get_advisory` to name the sections, or the
+ * vulnerability CVE IDs, it needs. The outline lists both.
  * @module mcp-server/resources/definitions/ics-advisory.resource
  */
 
@@ -16,7 +17,8 @@ import { outlineOnOverflow } from '@cyanheads/mcp-ts-core/utils';
 import {
   ADVISORY_OUTLINE_BUDGET,
   AdvisoryDocumentOutputShape,
-  isEmptySection,
+  cvesNarrowingHint,
+  extractAdvisorySections,
 } from '@/mcp-server/schemas/advisory.js';
 import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
 import {
@@ -71,10 +73,7 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
 
     const result = outlineOnOverflow(doc as unknown as Record<string, unknown>, {
       budget: ADVISORY_OUTLINE_BUDGET,
-      extract: (document) =>
-        Object.entries(document)
-          .filter(([, value]) => !isEmptySection(value))
-          .map(([name, value]) => ({ name, bytes: JSON.stringify(value)?.length ?? 0 })),
+      extract: () => extractAdvisorySections(doc),
     });
     if (result.kind === 'outline') {
       /*
@@ -86,9 +85,10 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
       const example = smallest
         ? ` — e.g. sections: ["${smallest.name}"] (${smallest.bytes} bytes)`
         : '';
+      const hint = cvesNarrowingHint(outline.sections, ADVISORY_OUTLINE_BUDGET);
       return {
         ...outline,
-        outlineNotice: `Advisory too large to inline against a ${ADVISORY_OUTLINE_BUDGET}-byte budget; this is its section outline. Call cisa_get_advisory with advisoryId "${advisoryId}" and sections naming the sections you need${example}. A selection returns whatever it names, so sum the listed sizes before requesting several.`,
+        outlineNotice: `Advisory too large to inline against a ${ADVISORY_OUTLINE_BUDGET}-byte budget; this is its section outline. Call cisa_get_advisory with advisoryId "${advisoryId}" and sections naming the sections you need${example}. A selection returns whatever it names, so sum the listed sizes before requesting several.${hint ? ` ${hint}` : ''}`,
       };
     }
     return result;
