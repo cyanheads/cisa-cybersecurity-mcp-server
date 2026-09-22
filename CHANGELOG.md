@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-09-22
+
+Adds cwe and inKev search filters and cves-narrowed advisory reads; removes the 200-product cap, fixes silent search-filter widening, and resolves more sector aliases.
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-09-20
 
 The public hosted endpoint at https://cisa-cybersecurity.caseyjhand.com/mcp is now published in server.json remotes and documented in the README.

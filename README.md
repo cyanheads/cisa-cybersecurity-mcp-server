@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cisa-cybersecurity-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cisa-cybersecurity-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cisa-cybersecurity-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cisa-cybersecurity-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cisa-cybersecurity-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cisa-cybersecurity-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-CISA's open vulnerability outputs, made queryable: the Known Exploited Vulnerabilities catalog and the federal remediation deadlines it carries, the SSVC decision points CISA publishes per CVE in Vulnrichment, the full CSAF corpus of industrial control system advisories back to 2010, and CISA's current publication feeds. Check a scan's worth of CVE IDs against KEV in one call, find what is overdue for a vendor, work out what BOD 26-04 implies for an asset you own, and search or read ICS advisories by vendor, product, CVE, CVSS, or sector. Every source is keyless and read-only. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+CISA's open vulnerability outputs, made queryable: the Known Exploited Vulnerabilities catalog and the federal remediation deadlines it carries, the SSVC decision points CISA publishes per CVE in Vulnrichment, the full CSAF corpus of industrial control system advisories back to 2010, and CISA's current publication feeds. Check a scan's worth of CVE IDs against KEV in one call, find what is overdue for a vendor, work out what BOD 26-04 implies for an asset you own, and search or read ICS advisories by vendor, product, CVE, CWE, CVSS, sector, or whether they cover an exploited vulnerability. Every source is keyless and read-only. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
@@ -39,8 +39,8 @@ CISA's open vulnerability outputs, made queryable: the Known Exploited Vulnerabi
 | `cisa_check_cve_status` | Check up to 200 CVE IDs against the KEV catalog in one call — remediation deadlines, overdue status, ransomware and forensic-triage flags, and the directive each entry cites |
 | `cisa_search_kev` | Search the KEV catalog by vendor, product, CWE, date added, due date, overdue status, ransomware linkage, forensic-triage tier, or directive |
 | `cisa_get_ssvc` | Fetch the SSVC decision points CISA publishes per CVE and compute the BOD 26-04 remediation timeline they imply for a stated asset exposure |
-| `cisa_search_ics_advisories` | Search the ICS advisory corpus by vendor, product, CVE, CVSS range, severity, sector, series, or free text over titles and product names |
-| `cisa_get_advisory` | Read one ICS advisory in full — affected products with version ranges, per-CVE CVSS and CWE, remediations, sectors, and revision history |
+| `cisa_search_ics_advisories` | Search the ICS advisory corpus by vendor, product, CVE, CWE, KEV membership, CVSS range, severity, sector, series, or free text over titles and product names |
+| `cisa_get_advisory` | Read one ICS advisory in full — affected products with version ranges, per-CVE CVSS and CWE, remediations, sectors, and revision history — or just the vulnerability entries for the CVEs you name |
 | `cisa_get_alerts` | List what CISA has published recently from its advisory, alert, or ICS advisory feed |
 
 ### Resources
@@ -70,6 +70,7 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 - `directive` is three-state — `BOD 26-04`, `BOD 22-01`, or `null` for the entries citing neither; it is never inferred from an entry's age
 - A CVE that is not in KEV is a normal result, not an error
 - Echoes the catalog snapshot that answered the call and the `asOf` date `overdue` and `daysUntilDue` were computed against
+- For the reverse direction — which ICS advisories cover a CVE — use `cisa_search_ics_advisories` with `cve`, or `inKev` for every advisory covering a KEV CVE
 
 ---
 
@@ -96,12 +97,13 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 ### `cisa_search_ics_advisories` <sub>tool</sub>
 
-- Full-text `q` over advisory titles, vendor names, and product names — tokens are AND-combined and FTS5 operators in the input are neutralized rather than honored
-- Filters: `vendor`, `product`, `cve`, `cvssMin` / `cvssMax`, `severity` (`NONE`–`CRITICAL`), `sector` (the sixteen canonical names plus the `Multiple` sentinel), `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` = CISA-authored, `other` = republished vendor advisory), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`
+- Full-text `q` over advisory titles, vendor names, and product names — tokens are AND-combined, FTS5 operators in the input are neutralized rather than honored, and a `q` with no word or number in it is an error rather than a match-everything
+- Filters: `vendor` and `product` (case-insensitive substrings, `%` and `_` matched literally), `cve`, `cwe` (exact, against every vulnerability entry), `inKev` (`true` = covers at least one CVE in the KEV catalog, `false` = covers none), `cvssMin` / `cvssMax`, `severity` (`NONE`–`CRITICAL`), `sector` (the sixteen canonical names plus the `Multiple` sentinel), `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` = CISA-authored, `other` = republished vendor advisory), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`
 - Sort by `revised` (default), `published`, `maxCvss`, or `relevance` (requires `q`); up to 50 per page (default 20) with an opaque cursor
 - Coverage notices fire on the filters that have gaps: sector notes begin in 2017, and some advisories score only in CVSS v2 where the band is derived rather than published
-- Results carry `advisoryId` for `cisa_get_advisory`, the CVE set, the cisa.gov `url`, the raw `csafUrl`, and an `attribution` string
-- Typed errors: `mirror_not_ready` (retryable), `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`
+- Results carry `advisoryId` for `cisa_get_advisory`, the first twenty CVEs, `kevCves` — every CVE the advisory covers that is in KEV, from its full CVE list — the cisa.gov `url`, the raw `csafUrl`, and an `attribution` string
+- KEV membership is best-effort unless you ask for it: without `inKev`, a KEV catalog that has not loaded leaves `kevCves` out and says so rather than failing the search; with `inKev`, the search waits for the catalog and echoes the KEV `catalogVersion` it used as `kevCatalogVersion` in `appliedFilters`
+- Typed errors: `mirror_not_ready` (retryable), `catalog_unavailable` (retryable, `inKev` only), `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
 
 ---
 
@@ -109,10 +111,11 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 - `advisoryId` is case-insensitive and accepts both real suffix forms (a single letter `a`–`f`, or a numeric `-N`); a trailing `.json` is stripped
 - Seven addressable sections: `advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`
-- A document over the 24 KB inline budget returns a complete section outline with per-section sizes instead of the whole record — re-call with `sections` to pull what you need; the re-call is stateless
-- The `products` arm caps at 200 flattened version rows with the cap disclosed, since a single advisory can carry 585 products
+- A document over the 24 KB inline budget returns a complete section outline with per-section sizes, plus the CVE IDs the `vulnerabilities` section holds, instead of the whole record — re-call with `sections` to pull what you need; the re-call is stateless
+- `cves` narrows the `vulnerabilities` section to the named entries — one CVE out of the 352 in the largest section is a few kilobytes instead of 905 KB. Alone it selects that section; with `sections`, the list must include `vulnerabilities`
+- The `products` arm carries every flattened version row — all 585 for the largest advisory — so `sections: ["products"]` always returns the whole list
 - Products keep their CSAF product IDs, so a CVE maps to the exact affected version ranges
-- Typed errors: `mirror_not_ready` (retryable), `unknown_section`. An ID that is not in the index returns `found: false` with guidance
+- Typed errors: `mirror_not_ready` (retryable), `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`. An ID that is not in the index returns `found: false` with guidance
 
 ---
 
@@ -138,7 +141,7 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 ### `cisa://advisory/{advisoryId}` <sub>resource</sub>
 
 - One flattened advisory as `application/json`, carrying the same 24 KB outline-on-overflow treatment `cisa_get_advisory` applies on a call with no `sections`
-- A resource template has no `sections` parameter, so follow an outline up with `cisa_get_advisory` to request named sections
+- A resource template has no `sections` or `cves` parameter, so follow an outline up with `cisa_get_advisory` to request named sections or vulnerability entries — the outline lists the CVE IDs to choose from
 - Listing returns the 30 most recently revised advisories; `advisoryId` completes from the index, up to 100 suggestions
 
 ## Features
@@ -271,12 +274,14 @@ bun install
 
 It seeds itself. On first run the server fetches one repository archive in the background and builds the index in about ten seconds, leaving roughly 55 MB at `CISA_CSAF_MIRROR_PATH` (`.mirror/csaf.sqlite3` by default). Nothing else waits on it: the KEV, SSVC, and alert tools serve from the first request, and until the index is ready the two ICS tools report that state through a retryable `mirror_not_ready` error rather than an empty result. `cisa_list_reference` with topic `sources` reports the progress.
 
+An index built by an older server version rebuilds itself the same way: on the next start the server re-ingests the archive in the background, over the existing index, which keeps answering queries from its current rows until the rebuild finishes. No manual step is needed; `mirror:verify` reports when an index is due for one.
+
 Under HTTP transport the index refreshes itself on a cron. Three scripts cover explicit control — a stdio deployment, a container, a CI gate:
 
 ```sh
 bun run mirror:init      # full build, idempotent, safe to re-run after an interrupt
 bun run mirror:refresh   # incremental — fetches only the documents whose revision date moved
-bun run mirror:verify    # readiness, sync status, checkpoint, count, SQLite integrity; exits non-zero on failure
+bun run mirror:verify    # readiness, sync status, checkpoint, count, content version, SQLite integrity; exits non-zero on failure
 ```
 
 Set `CISA_CSAF_MIRROR_AUTO_INIT=false` where seeding runs out of band.
@@ -293,7 +298,7 @@ Every variable is optional; the server runs correctly with none of them set.
 |:---|:---|:---|
 | `CISA_KEV_REFRESH_CRON` | Cron for the KEV conditional-refresh poll. HTTP transport only; empty disables the in-process schedule. | `*/30 * * * *` |
 | `CISA_CSAF_MIRROR_PATH` | Filesystem path to the ICS advisory SQLite index. | `.mirror/csaf.sqlite3` |
-| `CISA_CSAF_MIRROR_AUTO_INIT` | Seed the advisory index in the background at startup when it has never synced. | `true` |
+| `CISA_CSAF_MIRROR_AUTO_INIT` | Seed the advisory index in the background at startup when it has never synced, and re-ingest it when an older server version built it. | `true` |
 | `CISA_CSAF_REFRESH_CRON` | Cron for the incremental advisory refresh. HTTP transport only; empty disables it. | `17 */6 * * *` |
 | `CISA_VULNRICHMENT_CACHE_TTL_SECONDS` | TTL for a cached SSVC record. Negative results use one sixth of this. | `21600` |
 | `CISA_FEED_CACHE_TTL_SECONDS` | TTL for a parsed RSS feed window. | `900` |
