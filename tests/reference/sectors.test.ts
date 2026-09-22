@@ -72,4 +72,39 @@ describe('extractSectors', () => {
   it('returns an empty array when nothing in the note resolves to a canonical name', () => {
     expect(extractSectors('Some Completely Unrelated Text')).toEqual([]);
   });
+
+  describe('short-form sector notes', () => {
+    it.each([
+      ['Transportation', 'Transportation Systems'],
+      ['Water', 'Water and Wastewater Systems'],
+      ['Healthcare', 'Healthcare and Public Health'],
+      ['Healthcare, Public Health', 'Healthcare and Public Health'],
+      ['Health, Public Health', 'Healthcare and Public Health'],
+    ] as const)('resolves "%s" to %s', (note, canonical) => {
+      expect(extractSectors(note)).toEqual([canonical]);
+    });
+
+    it('leaves the ambiguous "Critical Facilities" unresolved', () => {
+      expect(extractSectors('Critical Facilities')).toEqual([]);
+    });
+
+    it('does not double-match a short form inside a longer canonical name already consumed', () => {
+      expect(extractSectors('Transportation Systems')).toEqual(['Transportation Systems']);
+      expect(extractSectors('Water and Wastewater Systems, Transportation Systems')).toEqual([
+        'Transportation Systems',
+        'Water and Wastewater Systems',
+      ]);
+      expect(
+        extractSectors('Healthcare and Public Health, Water and Wastewater Systems, Energy'),
+      ).toEqual(['Energy', 'Healthcare and Public Health', 'Water and Wastewater Systems']);
+    });
+
+    it('resolves short forms mixed with canonical names in one note', () => {
+      expect(extractSectors('Energy, Water, Transportation')).toEqual([
+        'Energy',
+        'Transportation Systems',
+        'Water and Wastewater Systems',
+      ]);
+    });
+  });
 });

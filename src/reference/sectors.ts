@@ -43,7 +43,12 @@ export const SECTOR_FILTER_VALUES: readonly SectorName[] = [...CANONICAL_SECTORS
 
 /**
  * Surface spellings that resolve to a canonical name — generator-version drift,
- * punctuation variants, and the two upstream typos observed across the corpus.
+ * punctuation variants, the upstream typos observed across the corpus, and the
+ * one-to-one short forms (`Water`, `Transportation`, `Healthcare`). A short form
+ * cannot steal a match inside the longer canonical name it abbreviates, because
+ * matching runs longest-first and consumes each hit. `Critical Facilities` is
+ * deliberately absent: it could mean Commercial, Government, or Critical
+ * Manufacturing, and no one-to-one reading exists.
  */
 const SECTOR_ALIASES: ReadonlyArray<readonly [string, SectorName]> = [
   ['Government Services and Facilities', 'Government Facilities'],
@@ -56,6 +61,11 @@ const SECTOR_ALIASES: ReadonlyArray<readonly [string, SectorName]> = [
   ['Critical Manuacturing', 'Critical Manufacturing'],
   ['Critical Manufacturer', 'Critical Manufacturing'],
   ['Critical Manufaturing', 'Critical Manufacturing'],
+  ['Healthcare, Public Health', 'Healthcare and Public Health'],
+  ['Health, Public Health', 'Healthcare and Public Health'],
+  ['Healthcare', 'Healthcare and Public Health'],
+  ['Transportation', 'Transportation Systems'],
+  ['Water', 'Water and Wastewater Systems'],
   ['Multiple Sectors', 'Multiple'],
   ['Multiple', 'Multiple'],
 ];
@@ -74,8 +84,9 @@ function fold(value: string): string {
 /**
  * Extract the canonical sector set from an advisory's sector note. Returns the
  * names in canonical order (with `Multiple` last when present) and an empty array
- * when nothing in the note resolves — 5 documents of 3,201 fail entirely on
- * upstream typos, and an empty set is the honest answer for those.
+ * when nothing in the note resolves — 1 document of the 3,197 that carry a note
+ * (`Critical Facilities`) resolves to nothing, and an empty set is the honest
+ * answer for it.
  */
 export function extractSectors(raw: string): SectorName[] {
   let remaining = fold(raw);
