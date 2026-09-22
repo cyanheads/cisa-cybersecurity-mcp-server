@@ -23,7 +23,9 @@ const ServerConfigSchema = z.object({
   csafMirrorAutoInit: z
     .stringbool()
     .default(true)
-    .describe('Seed the advisory mirror in the background at startup when it has never synced.'),
+    .describe(
+      'Seed the advisory mirror in the background at startup when it has never synced, and re-ingest it when an older ingest-content version built it.',
+    ),
   csafRefreshCron: z
     .string()
     .default('17 */6 * * *')

@@ -6,7 +6,8 @@
  *
  * Boot never depends on the ICS advisory corpus: the KEV, SSVC, and alert tools
  * serve from the first request, and the advisory index seeds itself in the
- * background when it has never completed a sync.
+ * background when it has never completed a sync — or re-ingests in place, still
+ * serving its existing rows, when an older ingest-content version built it.
  * @module index
  */
 
@@ -25,7 +26,7 @@ await createApp({
   title: 'cisa-cybersecurity-mcp-server',
   websiteUrl: 'https://github.com/cyanheads/cisa-cybersecurity-mcp-server',
   instructions:
-    'This server serves four CISA datasets, all keyless and all read-only. Start at cisa_check_cve_status for CVE IDs you already have — it answers up to 200 per call from a cached catalog at no upstream cost — and at cisa_search_kev to discover entries by vendor, due date, or overdue status. cisa_get_ssvc adds the SSVC decision points CISA publishes per CVE and computes the BOD 26-04 remediation timeline they imply for an asset exposure you supply; that computation is CISA\'s published decision logic applied to CISA\'s published inputs, not a compliance determination. ICS advisories are served from a local index of the full CSAF corpus back to 2010 — search it with cisa_search_ics_advisories, read one with cisa_get_advisory. The index seeds itself on first run; until it finishes, the two ICS tools report that state and every other tool works normally. For what CISA published most recently, cisa_get_alerts reads a 30-item rolling window of its advisory, alert, or ICS advisory feed with no history beyond that window — reach for cisa_search_ics_advisories instead for ICS advisory history. cisa_list_reference decodes the vocabulary the rest of the surface takes as input and reports what data this server currently holds. The KEV catalog records additions but no per-record modification timestamp, so "what changed" questions are answerable for additions only.',
+    'This server serves four CISA datasets, all keyless and all read-only. Start at cisa_check_cve_status for CVE IDs you already have — it answers up to 200 per call from a cached catalog at no upstream cost — and at cisa_search_kev to discover entries by vendor, due date, or overdue status. cisa_get_ssvc adds the SSVC decision points CISA publishes per CVE and computes the BOD 26-04 remediation timeline they imply for an asset exposure you supply; that computation is CISA\'s published decision logic applied to CISA\'s published inputs, not a compliance determination. ICS advisories are served from a local index of the full CSAF corpus back to 2010 — search it with cisa_search_ics_advisories, which can also narrow to the advisories covering a KEV-listed CVE, and read one with cisa_get_advisory. The index seeds itself on first run; until it finishes, the two ICS tools report that state and every other tool works normally. For what CISA published most recently, cisa_get_alerts reads a 30-item rolling window of its advisory, alert, or ICS advisory feed with no history beyond that window — reach for cisa_search_ics_advisories instead for ICS advisory history. cisa_list_reference decodes the vocabulary the rest of the surface takes as input and reports what data this server currently holds. The KEV catalog records additions but no per-record modification timestamp, so "what changed" questions are answerable for additions only.',
 
   /* No handler returns ctx.requestInput, so nothing needs a durable session. */
   sessionMode: 'stateless',
@@ -56,10 +57,12 @@ await createApp({
     /* Start the KEV load without awaiting it — a request arriving first awaits the same promise. */
     kev.primeInBackground();
 
+    /* Seeds a never-synced index, or re-ingests one an older ingest-content
+     * version built, on both transports. Neither blocks boot. */
     if (config.csafMirrorAutoInit) {
       void mirror.autoInit().catch((error: unknown) => {
         logger.warning(
-          `ICS advisory index seeding failed; the two ICS tools report mirror_not_ready until it succeeds: ${
+          `ICS advisory index seed or re-ingest failed; a never-seeded index reports mirror_not_ready, an existing one keeps serving its current rows, and the next start retries: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );

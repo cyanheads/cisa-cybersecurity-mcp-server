@@ -54,7 +54,7 @@
         },
         {
           "name": "CISA_CSAF_MIRROR_AUTO_INIT",
-          "description": "Seed the ICS advisory index in the background at startup when it has never completed a sync. Accepts true or false; set false where seeding runs out of band.",
+          "description": "Seed the ICS advisory index in the background at startup when it has never completed a sync, and re-ingest it in place when an older server version built it. Accepts true or false; set false where seeding runs out of band.",
           "format": "string",
           "isRequired": false,
           "default": "true"
@@ -160,7 +160,7 @@
         },
         {
           "name": "CISA_CSAF_MIRROR_AUTO_INIT",
-          "description": "Seed the ICS advisory index in the background at startup when it has never completed a sync. Accepts true or false; set false where seeding runs out of band.",
+          "description": "Seed the ICS advisory index in the background at startup when it has never completed a sync, and re-ingest it in place when an older server version built it. Accepts true or false; set false where seeding runs out of band.",
           "format": "string",
           "isRequired": false,
           "default": "true"

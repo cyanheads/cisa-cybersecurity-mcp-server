@@ -52,7 +52,7 @@
     "cisa_csaf_mirror_auto_init": {
       "type": "string",
       "title": "Seed the advisory index at startup",
-      "description": "true or false. When true and the index has never completed a sync, it seeds itself in the background at startup. Leave blank for true.",
+      "description": "true or false. When true, an index that has never completed a sync seeds itself in the background at startup, and one an older server version built re-ingests in place. Leave blank for true.",
       "required": false,
       "default": ""
     },
