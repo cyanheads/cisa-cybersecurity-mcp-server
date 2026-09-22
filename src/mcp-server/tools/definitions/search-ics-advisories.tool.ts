@@ -1,6 +1,13 @@
 /**
  * @fileoverview `cisa_search_ics_advisories` — filtered and full-text search over
  * the local index of the CSAF ICS advisory corpus.
+ *
+ * KEV membership joins the in-memory KEV snapshot to the index's CVE junction.
+ * It is best-effort unless the caller asks about KEV: `inKev` waits on the
+ * snapshot and fails retryably without it, but a search without `inKev` reads
+ * only a snapshot already in memory — a KEV outage never fails, and never
+ * stalls, an advisory search that did not ask about KEV. Such a result omits
+ * `kevCves` and says so.
  * @module mcp-server/tools/definitions/search-ics-advisories.tool
  */
 
@@ -13,13 +20,14 @@ import { SECTOR_FILTER_VALUES } from '@/reference/sectors.js';
 import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
 import { ADVISORY_ID_PATTERN } from '@/services/csaf-mirror/normalize.js';
 import type { AdvisorySearchFilters } from '@/services/csaf-mirror/types.js';
+import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 
 const MAX_PAGE_SIZE = 50;
 
 export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
   title: 'cisa_search_ics_advisories',
   description:
-    'Search the CISA industrial control system advisory corpus — 3,926 CSAF 2.0 documents covering PLC, HMI, SCADA, building-automation, and medical-device products from 2010 onward. Filter by vendor, product, CVE, CVSS range, severity band, critical-infrastructure sector, advisory series, publication date, or revision date, and run full-text search over advisory titles and product names. Sector filtering reaches only advisories that carry a sector note, which begins in 2017; the response reports how many documents a sector filter can never match. Returns advisory IDs for cisa_get_advisory, the CVEs each advisory covers, and the source URL and attribution every advisory response carries.',
+    'Search the CISA industrial control system advisory corpus — 3,926 CSAF 2.0 documents covering PLC, HMI, SCADA, building-automation, and medical-device products from 2010 onward. Filter by vendor, product, CVE, CWE, CVSS range, severity band, critical-infrastructure sector, advisory series, publication date, revision date, or whether an advisory covers a CVE in the CISA Known Exploited Vulnerabilities catalog, and run full-text search over advisory titles and product names. Sector filtering reaches only advisories that carry a sector note, which begins in 2017; the response reports how many documents a sector filter can never match. Returns advisory IDs for cisa_get_advisory, the CVEs each advisory covers and which of them are in KEV, and the source URL and attribution every advisory response carries.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -28,21 +36,40 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       .min(2)
       .optional()
       .describe(
-        'Full-text search over advisory titles, vendor names, and product names. Tokens are AND-combined; FTS5 operators in the input are neutralized rather than honored.',
+        'Full-text search over advisory titles, vendor names, and product names. Tokens are AND-combined; FTS5 operators in the input are neutralized rather than honored, and a token with no letter or digit is ignored. Needs at least one word or number.',
       ),
     vendor: z
       .string()
       .min(2)
       .optional()
       .describe(
-        'Case-insensitive substring of a vendor label. Vendor names are unnormalized upstream — the same company appears under several spellings — so this is substring, not exact.',
+        'Case-insensitive substring of a vendor label, matched literally — % and _ are ordinary characters. Vendor names are unnormalized upstream — the same company appears under several spellings — so this is substring, not exact.',
       ),
-    product: z.string().min(2).optional().describe('Case-insensitive substring of a product name.'),
+    product: z
+      .string()
+      .min(2)
+      .optional()
+      .describe(
+        'Case-insensitive substring of a product name, matched literally — % and _ are ordinary characters.',
+      ),
     cve: z
       .string()
       .regex(/^CVE-[0-9]{4}-[0-9]{4,19}$/)
       .optional()
       .describe('Exact CVE membership. The corpus covers 12,321 distinct CVEs.'),
+    cwe: z
+      .string()
+      .regex(/^CWE-[0-9]+$/)
+      .optional()
+      .describe(
+        'Exact CWE identifier, e.g. CWE-787, matched against every vulnerability entry in the advisory. A parent class does not match its children.',
+      ),
+    inKev: z
+      .boolean()
+      .optional()
+      .describe(
+        'true selects advisories covering at least one CVE in the CISA Known Exploited Vulnerabilities catalog; false selects advisories covering none. Checked against every CVE an advisory covers, not only the twenty listed per result.',
+      ),
     cvssMin: z
       .number()
       .min(0)
@@ -141,6 +168,12 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
               .array(z.string().describe('One CVE identifier.'))
               .describe('Up to twenty CVEs; cveCount carries the full count.'),
             cveCount: z.number().int().describe('Distinct CVEs the advisory covers.'),
+            kevCves: z
+              .array(z.string().describe('One CVE identifier.'))
+              .optional()
+              .describe(
+                'Every CVE this advisory covers that is in the KEV catalog, drawn from its full CVE list rather than the twenty in cves. Empty when none is; absent when KEV membership could not be evaluated.',
+              ),
             maxCvss: z
               .object({
                 score: z.number().describe('Highest CVSS base score in the advisory.'),
@@ -208,7 +241,12 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       .string()
       .optional()
       .describe('Disclosure of derived-band and no-score coverage under a score filter.'),
-    notice: z.string().optional().describe('Guidance when nothing matched.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when nothing matched, when a page was capped, when KEV membership was not evaluated, or when a cwe result may be incomplete.',
+      ),
   },
 
   enrichmentTrailer: {
@@ -257,6 +295,23 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       recovery:
         'Add a q value to sort by relevance, or choose a different sortBy such as revised, published, or maxCvss.',
     },
+    {
+      reason: 'empty_search_text',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'q contains no word or number once quotes and punctuation are removed, so there is nothing to search for.',
+      recovery:
+        'Put at least one word or number in q, such as a vendor, product, or title term, or omit q to search by filters alone.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'catalog_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'inKev is set, no KEV catalog snapshot is held, and the fetch from cisa.gov failed.',
+      retryable: true,
+      recovery:
+        'The KEV catalog snapshot is not loaded yet; retry in a few seconds, drop inKev to search without it, or call cisa_list_reference with topic sources to see the catalog state.',
+      thrownBy: 'service',
+    },
   ],
 
   async handler(input, ctx) {
@@ -302,12 +357,18 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       );
     }
 
+    const catalog = getKevCatalog();
+    const kev = input.inKev === undefined ? catalog.currentSnapshot() : await catalog.snapshot(ctx);
+    const kevCves = kev ? new Set(kev.byId.keys()) : undefined;
+
     const offset = input.cursor ? decodeCursor(input.cursor, ctx).offset : 0;
     const filters: AdvisorySearchFilters = {
       q: input.q,
       vendor: input.vendor,
       product: input.product,
       cve: input.cve,
+      cwe: input.cwe,
+      inKev: input.inKev,
       cvssMin: input.cvssMin,
       cvssMax: input.cvssMax,
       severity: input.severity,
@@ -324,14 +385,17 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       offset,
     };
 
-    const page = await mirror.search(filters, ctx);
+    const page = await mirror.search(filters, ctx, kevCves);
     const state = await mirror.state();
     const hasMore = offset + page.items.length < page.total;
+    /* Until the ingest-content re-ingest lands, advisory_cwes may be empty or partial. */
+    const cweMayBeIncomplete = input.cwe !== undefined && (await mirror.contentState()).stale;
 
     const applied: Record<string, string> = {};
     for (const [key, value] of Object.entries(filters)) {
       if (value !== undefined) applied[key] = String(value);
     }
+    if (input.inKev !== undefined && kev) applied.kevCatalogVersion = kev.catalogVersion;
 
     ctx.enrich({
       appliedFilters: applied,
@@ -356,11 +420,38 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       });
     }
 
-    if (page.items.length >= input.limit && hasMore) {
-      ctx.enrich.truncated({ shown: page.items.length, cap: input.limit });
+    /* `notice` is last-wins across enrich calls, `truncated()` included, so every
+     * notice source is collected here and written once. */
+    const notices: string[] = [];
+    const zeroHit = page.total === 0 ? zeroHitNotice(input, cweMayBeIncomplete) : '';
+    if (zeroHit) notices.push(zeroHit);
+    if (cweMayBeIncomplete) {
+      notices.push(
+        'This cwe result may be incomplete: the advisory index was built before CWE membership was recorded and has not been re-ingested since, so an advisory it has not re-ingested cannot match. The server re-ingests such an index in the background when it starts, and cisa_list_reference with topic sources shows sync status in_progress while that runs; repeat the search once it finishes, when this notice no longer appears.',
+      );
     }
-    if (page.total === 0) {
-      ctx.enrich.notice(zeroHitNotice(input));
+    if (!kevCves && page.items.length > 0) {
+      notices.push(
+        'KEV membership was not evaluated: the KEV catalog snapshot has not loaded yet, so these results carry no kevCves. Retry in a few seconds, or pass the listed CVEs to cisa_check_cve_status.',
+      );
+    }
+    const truncated = page.items.length >= input.limit && hasMore;
+    if (truncated) {
+      const shown = page.items.length;
+      ctx.enrich.truncated({
+        shown,
+        cap: input.limit,
+        ...(notices.length > 0
+          ? {
+              guidance: [
+                `Results capped at ${input.limit}; showing ${shown}. Raise the cap or narrow with filters.`,
+                ...notices,
+              ].join(' '),
+            }
+          : {}),
+      });
+    } else if (notices.length > 0) {
+      ctx.enrich.notice(notices.join(' '));
     }
 
     ctx.log.info('Searched the ICS advisory index', {
@@ -398,6 +489,13 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       lines.push(
         `**CVEs (${advisory.cveCount}):** ${advisory.cves.length > 0 ? advisory.cves.join(', ') : 'none listed'}`,
       );
+      if (advisory.kevCves) {
+        lines.push(
+          `**In KEV (${advisory.kevCves.length}):** ${
+            advisory.kevCves.length > 0 ? advisory.kevCves.join(', ') : 'none of its CVEs'
+          }`,
+        );
+      }
       if (advisory.maxCvss) {
         lines.push(
           `**Max CVSS:** ${advisory.maxCvss.score} ${advisory.maxCvss.severity} (v${advisory.maxCvss.version}${
@@ -418,13 +516,23 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
   },
 });
 
-/** Compose the zero-hit notice from whichever filter most plausibly explains the miss. */
-function zeroHitNotice(input: {
-  cve?: string | undefined;
-  sector?: string | undefined;
-  series?: string | undefined;
-  vendor?: string | undefined;
-}): string {
+/**
+ * Compose the zero-hit notice from whichever filter most plausibly explains the
+ * miss. A `cwe` miss on an index still re-ingesting gets no confident fragment,
+ * and no generic fallback either — the incomplete-index notice beside it is the
+ * honest explanation. Empty when nothing else applies.
+ */
+function zeroHitNotice(
+  input: {
+    cve?: string | undefined;
+    cwe?: string | undefined;
+    inKev?: boolean | undefined;
+    sector?: string | undefined;
+    series?: string | undefined;
+    vendor?: string | undefined;
+  },
+  cweMayBeIncomplete: boolean,
+): string {
   const fragments: string[] = [];
   if (input.vendor) {
     fragments.push(
@@ -446,7 +554,17 @@ function zeroHitNotice(input: {
       'No ICS advisory covers that CVE. The corpus covers 12,321 distinct CVEs; call cisa_check_cve_status to see whether it is in KEV instead.',
     );
   }
-  if (fragments.length === 0) {
+  if (input.cwe && !cweMayBeIncomplete) {
+    fragments.push(
+      'No ICS advisory lists that CWE on any of its vulnerabilities. CWE IDs match exactly — a parent class such as CWE-20 does not match its children. Call cisa_search_kev with the same cwe to check the KEV side.',
+    );
+  }
+  if (input.inKev === true) {
+    fragments.push(
+      'Few ICS advisories cover a CVE in the KEV catalog, so inKev narrows sharply. Drop another filter, or drop inKev to see advisories regardless of KEV status.',
+    );
+  }
+  if (fragments.length === 0 && !cweMayBeIncomplete) {
     fragments.push(
       'No advisory matches. Relax the narrowest filter, or call cisa_list_reference with topic sectors or advisory_id_formats for the value vocabulary.',
     );
