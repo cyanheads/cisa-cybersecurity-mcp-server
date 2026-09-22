@@ -8,6 +8,7 @@
  * @module services/csaf-mirror/normalize
  */
 
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { MirrorRow } from '@cyanheads/mcp-ts-core/mirror';
 import { deriveCvssV2Severity, deriveCvssV3Severity } from '@/reference/cvss.js';
 import { extractSectors, SECTOR_NOTE_TITLE } from '@/reference/sectors.js';
@@ -47,9 +48,6 @@ export const ADVISORY_ID_PATTERN = /^ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[a-z]|-\d+)?$
  */
 export const ADVISORY_ID_INPUT_PATTERN =
   /^\s*ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[a-z]|-\d+)?(?:\.json)?\s*$/i;
-
-/** Flattened version rows kept in an advisory's products arm. */
-export const PRODUCT_ROW_CAP = 200;
 
 /**
  * The shape of a document path inside a distribution directory: a four-digit
@@ -146,10 +144,11 @@ interface FlattenState {
  * a vulnerability entry references, so it is kept — it is how a caller maps a CVE
  * to the exact affected versions.
  *
- * `productCount` counts every leaf in the tree; the returned vendor structure is
- * capped at {@link PRODUCT_ROW_CAP} version rows, because a single advisory can
- * carry 585 products and the section outline treats `products` as one indivisible
- * section.
+ * Every leaf is kept. `products` is one indivisible section of the outline, so a
+ * cap here would drop rows that no re-call can reach, and the product names past
+ * it would fall out of the search index too. The largest advisory (585 products)
+ * already overflows the inline budget, so its size only affects the
+ * `sections: ["products"]` re-call.
  */
 export function flattenProductTree(productTree: unknown): AdvisoryProducts {
   const vendors = new Map<
@@ -157,7 +156,6 @@ export function flattenProductTree(productTree: unknown): AdvisoryProducts {
     Map<string, { family?: string; versions: AdvisoryVersionRow[] }>
   >();
   let productCount = 0;
-  let shownProducts = 0;
 
   const walk = (branches: unknown, state: FlattenState): void => {
     if (!Array.isArray(branches)) return;
@@ -176,23 +174,20 @@ export function flattenProductTree(productTree: unknown): AdvisoryProducts {
       const productId = product ? str(product.product_id) : undefined;
       if (productId) {
         productCount += 1;
-        if (shownProducts < PRODUCT_ROW_CAP) {
-          shownProducts += 1;
-          const vendorName = next.vendor ?? 'Unspecified';
-          const productLabel = next.productName ?? str(product?.name) ?? name ?? 'Unspecified';
-          const value = [name || (str(product?.name) ?? ''), ...next.suffixes]
-            .filter(Boolean)
-            .join(' ');
+        const vendorName = next.vendor ?? 'Unspecified';
+        const productLabel = next.productName ?? str(product?.name) ?? name ?? 'Unspecified';
+        const value = [name || (str(product?.name) ?? ''), ...next.suffixes]
+          .filter(Boolean)
+          .join(' ');
 
-          const products = vendors.get(vendorName) ?? new Map();
-          vendors.set(vendorName, products);
-          const entry = products.get(productLabel) ?? {
-            ...(next.family ? { family: next.family } : {}),
-            versions: [],
-          };
-          products.set(productLabel, entry);
-          entry.versions.push({ kind: category || 'product', value, productId });
-        }
+        const products = vendors.get(vendorName) ?? new Map();
+        vendors.set(vendorName, products);
+        const entry = products.get(productLabel) ?? {
+          ...(next.family ? { family: next.family } : {}),
+          versions: [],
+        };
+        products.set(productLabel, entry);
+        entry.versions.push({ kind: category || 'product', value, productId });
       }
 
       walk(branch.branches, next);
@@ -219,8 +214,7 @@ export function flattenProductTree(productTree: unknown): AdvisoryProducts {
     vendorCount: flattened.length,
     productCount,
     vendors: flattened,
-    shownProducts,
-    ...(productCount > shownProducts ? { truncated: true } : {}),
+    shownProducts: productCount,
   };
 }
 
@@ -598,22 +592,45 @@ export function parseChangesCsv(text: string): ChangeRow[] {
 }
 
 /**
+ * A character the index's `unicode61` tokenizer keeps as part of a token —
+ * letters, numbers, and private-use code points. Everything else separates.
+ */
+const FTS_TOKEN_CHARACTER = /[\p{L}\p{N}\p{Co}]/u;
+
+/**
  * Build an FTS5 `MATCH` expression from caller free text. Each token is stripped
  * of embedded quotes and wrapped in double quotes, which neutralizes every FTS5
  * operator (`-`, `*`, `:`, `NEAR`, `AND`, `OR`, `NOT`), so reserved syntax in
  * caller input cannot alter the query or raise a SQLite syntax error. Tokens are
- * AND-combined. Returns an empty string when the input has no searchable tokens.
+ * AND-combined.
+ *
+ * A token with no letter or digit is dropped: the tokenizer reads it as nothing,
+ * and FTS5 answers an empty phrase in an AND chain by matching no row, so
+ * `siemens --` would otherwise return zero advisories. Input that leaves no
+ * token at all throws `empty_search_text` — dropping the `MATCH` clause instead
+ * would answer the whole corpus under a filter the caller believes applied.
  *
  * Length is checked first: the expression this builds is roughly the size of its
  * input, and FTS5 parses the whole of it before any row is examined.
  */
 export function toFtsMatch(input: string): string {
   assertSearchTextLength(input, 'q');
-  return input
+  const tokens = input
     .trim()
     .split(/\s+/)
-    .map((token) => token.replace(/"/g, '').trim())
-    .filter((token) => token.length > 0)
-    .map((token) => `"${token}"`)
-    .join(' AND ');
+    .map((token) => token.replace(/"/g, ''))
+    .filter((token) => FTS_TOKEN_CHARACTER.test(token));
+  if (tokens.length === 0) {
+    throw validationError(
+      'q contains no searchable word — after quotes and punctuation are removed, nothing is left to match.',
+      {
+        reason: 'empty_search_text',
+        field: 'q',
+        recovery: {
+          hint: 'Put at least one word or number in q, such as a vendor, product, or title term, or omit q to search by filters alone.',
+        },
+      },
+    );
+  }
+  return tokens.map((token) => `"${token}"`).join(' AND ');
 }

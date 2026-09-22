@@ -67,7 +67,11 @@ export interface AdvisoryVendor {
   products: AdvisoryProduct[];
 }
 
-/** Products block, capped at a fixed number of flattened version rows. */
+/**
+ * Products block — every flattened version row. `truncated` is never written by
+ * current ingest; it survives only on documents stored by an older build that
+ * capped rows, until the ingest-content re-ingest replaces them.
+ */
 export interface AdvisoryProducts {
   productCount: number;
   shownProducts: number;
@@ -174,7 +178,14 @@ export interface AdvisorySearchResult {
   attribution: string;
   csafUrl: string;
   cveCount: number;
+  /** The first twenty CVEs, alphabetically; `cveCount` carries the full count. */
   cves: string[];
+  /**
+   * Every CVE the advisory covers that is in the KEV set the search was given —
+   * from its complete membership, not the `cves` preview. Absent when no KEV set
+   * was given.
+   */
+  kevCves?: string[];
   maxCvss?: AdvisoryMaxCvss;
   productCount: number;
   published: string;
@@ -195,6 +206,13 @@ export interface AdvisorySearchFilters {
   cve?: string | undefined;
   cvssMax?: number | undefined;
   cvssMin?: number | undefined;
+  /** Exact CWE membership, e.g. `CWE-787`, matched case-insensitively through `advisory_cwes`. */
+  cwe?: string | undefined;
+  /**
+   * `true` keeps advisories covering at least one CVE in the KEV set passed to
+   * `search()`; `false` keeps those covering none. Requires that set.
+   */
+  inKev?: boolean | undefined;
   limit: number;
   offset: number;
   order: 'asc' | 'desc';
@@ -216,6 +234,21 @@ export interface AdvisorySearchFilters {
 export interface AdvisorySearchPage {
   items: AdvisorySearchResult[];
   total: number;
+}
+
+/**
+ * Which ingest build the index content comes from. A `stale` index still serves
+ * every row it holds, but rows may lack what the current ingest derives — until
+ * the background re-ingest completes, the `advisory_cwes` junction may be empty or
+ * partial, so a zero-hit `cwe` search is not proof that nothing matches.
+ */
+export interface IngestContentState {
+  /** The content version this build's ingest writes. */
+  current: number;
+  /** `true` when `stored` is absent or lower than `current`. */
+  stale: boolean;
+  /** The version the last completed full ingest recorded; `null` when none was recorded. */
+  stored: number | null;
 }
 
 /** What `cisa_list_reference` topic `sources` reports about the mirror tier. */

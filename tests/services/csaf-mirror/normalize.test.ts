@@ -5,6 +5,7 @@
  * @module tests/services/csaf-mirror/normalize.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
 import {
   advisorySeries,
@@ -15,7 +16,6 @@ import {
   isCsafSourcePath,
   normalizeAdvisory,
   normalizeAdvisoryId,
-  PRODUCT_ROW_CAP,
   parseChangesCsv,
   readScores,
   toFtsMatch,
@@ -74,18 +74,77 @@ describe('flattenProductTree', () => {
     ]);
   });
 
-  it('caps flattened version rows at PRODUCT_ROW_CAP and discloses truncation', () => {
-    const branches = Array.from({ length: PRODUCT_ROW_CAP + 5 }, (_, index) => ({
+  it('keeps every flattened version row of a 585-leaf, multi-level tree — no cap, no truncation flag', () => {
+    /* Three vendors, each vendor → product_family → product_name → product_version,
+     * sized to the largest advisory in the corpus (585 leaves). */
+    const vendorSizes = [300, 200, 85];
+    let id = 0;
+    const tree = {
+      branches: vendorSizes.map((size, vendorIndex) => ({
+        category: 'vendor',
+        name: `Vendor ${vendorIndex}`,
+        branches: [
+          {
+            category: 'product_family',
+            name: `Family ${vendorIndex}`,
+            branches: Array.from({ length: size }, (_, productIndex) => {
+              const productId = `CSAFPID-${id++}`;
+              return {
+                category: 'product_name',
+                name: `V${vendorIndex} Product ${productIndex}`,
+                branches: [
+                  {
+                    category: 'product_version',
+                    name: `1.${productIndex}`,
+                    product: {
+                      name: `V${vendorIndex} Product ${productIndex} 1.${productIndex}`,
+                      product_id: productId,
+                    },
+                  },
+                ],
+              };
+            }),
+          },
+        ],
+      })),
+    };
+
+    const result = flattenProductTree(tree);
+    expect(result.productCount).toBe(585);
+    expect(result.shownProducts).toBe(585);
+    expect(result.truncated).toBeUndefined();
+    expect(result.vendorCount).toBe(3);
+    expect(result.vendors.map((vendor) => vendor.products.length)).toEqual(vendorSizes);
+
+    /* The last leaf — past any former row cap — is reachable with its full path. */
+    const last = result.vendors[2]?.products[84];
+    expect(last).toEqual({
+      name: 'V2 Product 84',
+      family: 'Family 2',
+      versions: [{ kind: 'product_version', value: '1.84', productId: 'CSAFPID-584' }],
+    });
+    const productIds = result.vendors.flatMap((vendor) =>
+      vendor.products.flatMap((product) => product.versions.map((version) => version.productId)),
+    );
+    expect(new Set(productIds).size).toBe(585);
+  });
+
+  it('indexes every product name in productsText, including those past row 200', () => {
+    const branches = Array.from({ length: 250 }, (_, index) => ({
       category: 'product_name',
       name: `Product ${index}`,
       product: { name: `Product ${index}`, product_id: `CSAFPID-${index}` },
     }));
-    const tree = { branches: [{ category: 'vendor', name: 'BigVendor', branches }] };
-
-    const result = flattenProductTree(tree);
-    expect(result.productCount).toBe(PRODUCT_ROW_CAP + 5);
-    expect(result.shownProducts).toBe(PRODUCT_ROW_CAP);
-    expect(result.truncated).toBe(true);
+    const raw = {
+      ...FULL_ADVISORY,
+      product_tree: { branches: [{ category: 'vendor', name: 'BigVendor', branches }] },
+    };
+    const doc = normalizeAdvisory(raw, '2026/icsa-26-260-07.json');
+    if (!doc) throw new Error('expected a normalized document');
+    const row = toMirrorRow(doc, '2026/icsa-26-260-07.json');
+    expect(row.productCount).toBe(250);
+    expect(String(row.productsText).split(' | ')).toHaveLength(250);
+    expect(row.productsText).toContain('Product 249');
   });
 
   it('returns an empty products block for a non-object product tree', () => {
@@ -408,8 +467,33 @@ describe('toFtsMatch', () => {
     );
   });
 
-  it('returns an empty string for input with no searchable tokens', () => {
-    expect(toFtsMatch('   ')).toBe('');
+  it.each([
+    ['whitespace', '   '],
+    ['bare quotes', '""'],
+    ['quotes and whitespace', ' "" "" '],
+    ['punctuation only', '-- !! /'],
+  ])('throws empty_search_text when %s leaves no searchable token', (_label, input) => {
+    let thrown: unknown;
+    try {
+      toFtsMatch(input);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'empty_search_text', field: 'q', recovery: { hint: expect.any(String) } },
+    });
+  });
+
+  it('drops a token with no letter or digit instead of letting it zero out the AND', () => {
+    /* FTS5's unicode61 tokenizer reads `--` as no token at all, and an empty
+     * phrase in an AND chain matches nothing. */
+    expect(toFtsMatch('siemens -- s7')).toBe('"siemens" AND "s7"');
+    expect(toFtsMatch('s7-1500 «»')).toBe('"s7-1500"');
+  });
+
+  it('keeps non-ASCII letters and digits as searchable tokens', () => {
+    expect(toFtsMatch('Schneider Électrique ２')).toBe('"Schneider" AND "Électrique" AND "２"');
   });
 
   it('rejects a query past the search-text ceiling rather than building the expression', () => {

@@ -6,7 +6,7 @@
  *
  * The generic `mirror.query()` cannot express two of this surface's filters —
  * substring matching over the unnormalized vendor and product labels, and exact
- * membership in the CVE and sector junction tables — so the read path goes
+ * membership in the CVE, sector, and CWE junction tables — so the read path goes
  * through the raw-handle escape hatch. Scanning a delimited text column for
  * either is both slow and wrong: `Water` is a substring of `Wastewater`.
  *
@@ -27,12 +27,13 @@ import {
 } from '@cyanheads/mcp-ts-core/mirror';
 import type { SeverityBand } from '@/reference/cvss.js';
 import type { SectorName } from '@/reference/sectors.js';
-import { createCsafIngester } from './ingest.js';
+import { createCsafIngester, INGEST_CONTENT_VERSION, readIngestContentVersion } from './ingest.js';
 import { toFtsMatch } from './normalize.js';
 import {
   ADVISORIES_FTS,
   ADVISORIES_TABLE,
   ADVISORY_CVES_TABLE,
+  ADVISORY_CWES_TABLE,
   ADVISORY_SECTORS_TABLE,
   advisoryStoreSpec,
 } from './schema.js';
@@ -42,6 +43,7 @@ import type {
   AdvisorySearchResult,
   AdvisorySeries,
   CsafMirrorState,
+  IngestContentState,
   NormalizedAdvisory,
 } from './types.js';
 
@@ -118,6 +120,15 @@ function splitList(value: string | null): string[] {
   return value ? value.split(' | ').filter((part) => part.trim() !== '') : [];
 }
 
+/**
+ * Escape `\`, `%`, and `_` for a `LIKE … ESCAPE '\'` pattern, so caller text
+ * matches literally — `Siem_ns` must not match `Siemens`, and a vendor label
+ * that really contains an underscore still has to match on it.
+ */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
+}
+
 export class CsafMirrorService {
   private coverage: AdvisoryCoverage | undefined;
   private readonly mirror: Mirror;
@@ -173,9 +184,27 @@ export class CsafMirrorService {
     }
   }
 
-  /** Seed the index in the background when it has never completed a sync. */
+  /** Which ingest build the index content comes from — see {@link IngestContentState}. */
+  async contentState(): Promise<IngestContentState> {
+    const stored = readIngestContentVersion(await this.store.raw());
+    return {
+      current: INGEST_CONTENT_VERSION,
+      stored,
+      stale: stored === null || stored < INGEST_CONTENT_VERSION,
+    };
+  }
+
+  /**
+   * Boot-time index maintenance, run in the background on every transport. Seeds
+   * an index that has never completed a sync, and re-ingests one whose content
+   * an older ingest built. The re-ingest is a full `init` over the populated
+   * index: it upserts in place, so `ready()` stays true and every existing row
+   * keeps serving until its replacement lands, and the new content version is
+   * recorded only once the whole archive has been applied. An interrupted
+   * re-ingest leaves the version stale, so the next boot runs it again.
+   */
   async autoInit(): Promise<void> {
-    if (await this.ready()) return;
+    if ((await this.ready()) && !(await this.contentState()).stale) return;
     await this.mirror.runSync({ mode: 'init', signal: AbortSignal.timeout(3_600_000) });
   }
 
@@ -205,25 +234,38 @@ export class CsafMirrorService {
     return this.coverage;
   }
 
-  /** Search the index. Filters AND together and are applied against the whole corpus. */
-  async search(filters: AdvisorySearchFilters, ctx: Context): Promise<AdvisorySearchPage> {
+  /**
+   * Search the index. Filters AND together and are applied against the whole
+   * corpus.
+   *
+   * `kevCves` is the KEV catalog's CVE set. When it is passed, every result
+   * carries `kevCves` — drawn from the advisory's complete `advisory_cves`
+   * membership, not the capped preview — and `filters.inKev` is evaluated in
+   * SQL against it, so paging and the total stay correct. The set is bound as
+   * one JSON array read through `json_each`: a single parameter, no
+   * bound-variable ceiling, and no connection-scoped temp table.
+   */
+  async search(
+    filters: AdvisorySearchFilters,
+    ctx: Context,
+    kevCves?: ReadonlySet<string>,
+  ): Promise<AdvisorySearchPage> {
     const handle = await this.store.raw();
     const where: string[] = [];
     const params: SqlValue[] = [];
 
-    const match = filters.q ? toFtsMatch(filters.q) : '';
-    const useFts = match !== '';
-    if (useFts) {
+    const useFts = Boolean(filters.q);
+    if (filters.q) {
       where.push(`${ADVISORIES_FTS} MATCH ?`);
-      params.push(match);
+      params.push(toFtsMatch(filters.q));
     }
     if (filters.vendor) {
-      where.push('LOWER(a.vendorsText) LIKE ?');
-      params.push(`%${filters.vendor.toLowerCase()}%`);
+      where.push("LOWER(a.vendorsText) LIKE ? ESCAPE '\\'");
+      params.push(`%${escapeLike(filters.vendor.toLowerCase())}%`);
     }
     if (filters.product) {
-      where.push('LOWER(a.productsText) LIKE ?');
-      params.push(`%${filters.product.toLowerCase()}%`);
+      where.push("LOWER(a.productsText) LIKE ? ESCAPE '\\'");
+      params.push(`%${escapeLike(filters.product.toLowerCase())}%`);
     }
     if (filters.cve) {
       where.push(`a.advisoryId IN (SELECT advisoryId FROM ${ADVISORY_CVES_TABLE} WHERE cve = ?)`);
@@ -234,6 +276,17 @@ export class CsafMirrorService {
         `a.advisoryId IN (SELECT advisoryId FROM ${ADVISORY_SECTORS_TABLE} WHERE sector = ?)`,
       );
       params.push(filters.sector);
+    }
+    if (filters.cwe) {
+      where.push(`a.advisoryId IN (SELECT advisoryId FROM ${ADVISORY_CWES_TABLE} WHERE cweId = ?)`);
+      params.push(filters.cwe.toUpperCase());
+    }
+    if (filters.inKev !== undefined) {
+      if (!kevCves) throw new Error('search(): the inKev filter needs the KEV CVE set.');
+      where.push(
+        `a.advisoryId ${filters.inKev ? 'IN' : 'NOT IN'} (SELECT advisoryId FROM ${ADVISORY_CVES_TABLE} WHERE cve IN (SELECT value FROM json_each(?)))`,
+      );
+      params.push(JSON.stringify([...kevCves]));
     }
     if (filters.cvssMin !== undefined) {
       where.push('a.maxCvss >= ?');
@@ -309,7 +362,7 @@ export class CsafMirrorService {
 
     return {
       total: totalRow?.n ?? 0,
-      items: rows.map((row) => this.toSearchResult(row, cveMap.get(row.advisoryId) ?? [])),
+      items: rows.map((row) => this.toSearchResult(row, cveMap.get(row.advisoryId) ?? [], kevCves)),
     };
   }
 
@@ -344,12 +397,13 @@ export class CsafMirrorService {
     const handle = await this.store.raw();
     const rows = handle
       .prepare<{ advisoryId: string }>(
-        `SELECT advisoryId FROM ${ADVISORIES_TABLE} WHERE advisoryId LIKE ? ORDER BY advisoryId LIMIT ?`,
+        `SELECT advisoryId FROM ${ADVISORIES_TABLE} WHERE advisoryId LIKE ? ESCAPE '\\' ORDER BY advisoryId LIMIT ?`,
       )
-      .all(`${prefix.toUpperCase()}%`, limit);
+      .all(`${escapeLike(prefix.toUpperCase())}%`, limit);
     return rows.map((row) => row.advisoryId);
   }
 
+  /** Every CVE of each page advisory, alphabetically — the preview is cut from it later. */
   private readCves(
     handle: Awaited<ReturnType<MirrorStore['raw']>>,
     advisoryIds: string[],
@@ -366,12 +420,16 @@ export class CsafMirrorService {
     for (const row of rows) {
       const list = map.get(row.advisoryId) ?? [];
       map.set(row.advisoryId, list);
-      if (list.length < CVE_PREVIEW) list.push(row.cve);
+      list.push(row.cve);
     }
     return map;
   }
 
-  private toSearchResult(row: SearchRow, cves: string[]): AdvisorySearchResult {
+  private toSearchResult(
+    row: SearchRow,
+    cves: string[],
+    kevCves: ReadonlySet<string> | undefined,
+  ): AdvisorySearchResult {
     const version = row.maxCvssVersion ?? '';
     return {
       advisoryId: row.advisoryId,
@@ -380,8 +438,9 @@ export class CsafMirrorService {
       vendors: splitList(row.vendorsText).slice(0, VENDOR_PREVIEW),
       vendorCount: row.vendorCount ?? 0,
       productCount: row.productCount ?? 0,
-      cves,
+      cves: cves.slice(0, CVE_PREVIEW),
       cveCount: row.cveCount ?? 0,
+      ...(kevCves ? { kevCves: cves.filter((cve) => kevCves.has(cve)) } : {}),
       ...(row.maxCvss !== null && row.maxCvssSeverity
         ? {
             maxCvss: {

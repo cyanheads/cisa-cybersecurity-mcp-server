@@ -1,13 +1,14 @@
 /**
  * @fileoverview Mirror store schema for the ICS advisory index. One
  * MirrorService-owned table (`ics_advisories`) with an FTS5 index over the
- * searchable text and secondary indexes on the filterable columns, plus three
- * auxiliary tables created by a migration.
+ * searchable text and secondary indexes on the filterable columns, plus four
+ * auxiliary tables created by migrations.
  *
- * The junction tables exist because exact CVE and sector membership cannot be
- * answered by scanning a delimited text column: it is both slow and wrong —
+ * The junction tables exist because exact CVE, sector, and CWE membership cannot
+ * be answered by scanning a delimited text column: it is both slow and wrong —
  * `Water` is a substring of `Wastewater`. `mirror_meta` holds the `changes.csv`
- * ETag between refresh runs, which the framework's own sync state has no field
+ * ETag between refresh runs and the ingest-content version the index was last
+ * fully built with, neither of which the framework's own sync state has a field
  * for.
  * @module services/csaf-mirror/schema
  */
@@ -25,6 +26,9 @@ export const ADVISORY_CVES_TABLE = 'advisory_cves';
 
 /** Junction table for exact sector membership. */
 export const ADVISORY_SECTORS_TABLE = 'advisory_sectors';
+
+/** Junction table for exact CWE membership, one row per distinct CWE an advisory's vulnerabilities carry. */
+export const ADVISORY_CWES_TABLE = 'advisory_cwes';
 
 /** Key/value table for ingest state the framework's sync state has no field for. */
 export const MIRROR_META_TABLE = 'mirror_meta';
@@ -60,16 +64,39 @@ CREATE TABLE IF NOT EXISTS ${MIRROR_META_TABLE} (
 };
 
 /**
- * The store spec. `document` holds the normalized advisory JSON rather than the
- * raw CSAF, so the flattening, sector extraction, and CVSS computation run once
- * at ingest instead of on every read.
+ * The CWE junction. An upgraded index gets the empty table here; its rows arrive
+ * with the ingest-content re-ingest the version bump in `ingest.ts` triggers,
+ * because a migration cannot re-derive them without re-reading every document.
+ */
+const cweJunction: Migration = {
+  version: 2,
+  up(handle: SqliteHandle): void {
+    handle.exec(`
+CREATE TABLE IF NOT EXISTS ${ADVISORY_CWES_TABLE} (
+  advisoryId TEXT NOT NULL,
+  cweId TEXT NOT NULL,
+  PRIMARY KEY (advisoryId, cweId)
+);
+CREATE INDEX IF NOT EXISTS ${ADVISORY_CWES_TABLE}_cwe_idx ON ${ADVISORY_CWES_TABLE}(cweId);
+`);
+  },
+};
+
+/**
+ * The store spec. `version` must cover the highest migration: the runner applies
+ * only a migration with `stored < migration.version <= version`, so an entry
+ * added without raising it never runs, on a fresh database or an existing one.
+ *
+ * `document` holds the normalized advisory JSON rather than the raw CSAF, so the
+ * flattening, sector extraction, and CVSS computation run once at ingest instead
+ * of on every read.
  */
 export function advisoryStoreSpec(path: string): SqliteMirrorStoreSpec {
   return {
     path,
     table: ADVISORIES_TABLE,
     primaryKey: 'advisoryId',
-    version: 1,
+    version: 2,
     columns: {
       advisoryId: 'TEXT',
       series: 'TEXT',
@@ -103,6 +130,6 @@ export function advisoryStoreSpec(path: string): SqliteMirrorStoreSpec {
       { columns: ['publisherCategory'] },
       { columns: ['sourcePath'] },
     ],
-    migrations: [auxiliaryTables],
+    migrations: [auxiliaryTables, cweJunction],
   };
 }

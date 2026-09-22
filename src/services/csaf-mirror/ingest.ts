@@ -11,10 +11,16 @@
  * the manifest is a full listing rather than an append-only log, a document
  * dropped upstream is detectable and emitted as a tombstone.
  *
- * The two junction tables are maintained here, written just before each page is
+ * The three junction tables are maintained here, written just before each page is
  * yielded. A page interrupted between the junction write and the upsert leaves a
  * junction row for an advisory the main table does not yet carry — harmless,
  * because every read joins from the main table — and the next run replaces it.
+ *
+ * A completed `init` records {@link INGEST_CONTENT_VERSION} in `mirror_meta`.
+ * `refresh` only reprocesses documents whose upstream revision date moved, so a
+ * change to what ingest derives from an unchanged document would otherwise never
+ * reach an existing index; the service compares the recorded version and re-runs
+ * `init` in place when it is older.
  * @module services/csaf-mirror/ingest
  */
 
@@ -37,6 +43,7 @@ import {
 import {
   ADVISORIES_TABLE,
   ADVISORY_CVES_TABLE,
+  ADVISORY_CWES_TABLE,
   ADVISORY_SECTORS_TABLE,
   MIRROR_META_TABLE,
 } from './schema.js';
@@ -61,6 +68,21 @@ const REFRESH_CONCURRENCY = 6;
 /** `mirror_meta` key holding the ETag of the last successfully applied manifest. */
 const CHANGES_ETAG_KEY = 'changes_csv_etag';
 
+/**
+ * What the current ingest derives from an unchanged upstream document. Raise it
+ * whenever normalization changes a stored row, the stored document, or a junction
+ * table for a document upstream has not revised — an index built at a lower
+ * version re-ingests in the background on its next boot.
+ *
+ * 1 — every product row stored and indexed (no 200-row cap), short-form sector
+ *     aliases, and the `advisory_cwes` junction. An index with no recorded
+ *     version predates versioning and counts as older.
+ */
+export const INGEST_CONTENT_VERSION = 1;
+
+/** `mirror_meta` key holding the content version of the last completed `init`. */
+const CONTENT_VERSION_KEY = 'ingest_content_version';
+
 /** Path segment that scopes the archive to the OT (ICS) distribution. */
 const OT_PREFIX = 'csaf_files/OT/white/';
 
@@ -74,6 +96,7 @@ const DOCUMENT_MAX_BYTES = 16 * 1024 * 1024;
 interface IngestRecord {
   advisoryId: string;
   cves: string[];
+  cwes: string[];
   revised: string;
   row: MirrorRow;
   sectors: string[];
@@ -95,6 +118,13 @@ function toIngestRecord(parsed: unknown, sourcePath: string): IngestRecord | nul
     advisoryId: doc.advisory.advisoryId,
     revised: doc.advisory.revised,
     cves: [...new Set(doc.vulnerabilities.map((vulnerability) => vulnerability.cve))],
+    cwes: [
+      ...new Set(
+        doc.vulnerabilities.flatMap((vulnerability) =>
+          vulnerability.cweId ? [vulnerability.cweId.toUpperCase()] : [],
+        ),
+      ),
+    ],
     sectors: doc.summary.sectors,
     row: toMirrorRow(doc, sourcePath),
   };
@@ -106,19 +136,25 @@ function writeJunctions(handle: SqliteHandle, records: IngestRecord[]): void {
   const deleteSectors = handle.prepare(
     `DELETE FROM ${ADVISORY_SECTORS_TABLE} WHERE advisoryId = ?`,
   );
+  const deleteCwes = handle.prepare(`DELETE FROM ${ADVISORY_CWES_TABLE} WHERE advisoryId = ?`);
   const insertCve = handle.prepare(
     `INSERT OR IGNORE INTO ${ADVISORY_CVES_TABLE} (advisoryId, cve) VALUES (?, ?)`,
   );
   const insertSector = handle.prepare(
     `INSERT OR IGNORE INTO ${ADVISORY_SECTORS_TABLE} (advisoryId, sector) VALUES (?, ?)`,
   );
+  const insertCwe = handle.prepare(
+    `INSERT OR IGNORE INTO ${ADVISORY_CWES_TABLE} (advisoryId, cweId) VALUES (?, ?)`,
+  );
 
   handle.transaction(() => {
     for (const record of records) {
       deleteCves.run(record.advisoryId);
       deleteSectors.run(record.advisoryId);
+      deleteCwes.run(record.advisoryId);
       for (const cve of record.cves) insertCve.run(record.advisoryId, cve);
       for (const sector of record.sectors) insertSector.run(record.advisoryId, sector);
+      for (const cwe of record.cwes) insertCwe.run(record.advisoryId, cwe);
     }
   });
 }
@@ -126,16 +162,23 @@ function writeJunctions(handle: SqliteHandle, records: IngestRecord[]): void {
 /** Drop the junction rows of advisories that disappeared upstream. */
 function deleteJunctions(handle: SqliteHandle, advisoryIds: string[]): void {
   if (advisoryIds.length === 0) return;
-  const deleteCves = handle.prepare(`DELETE FROM ${ADVISORY_CVES_TABLE} WHERE advisoryId = ?`);
-  const deleteSectors = handle.prepare(
-    `DELETE FROM ${ADVISORY_SECTORS_TABLE} WHERE advisoryId = ?`,
+  const deletes = [ADVISORY_CVES_TABLE, ADVISORY_SECTORS_TABLE, ADVISORY_CWES_TABLE].map((table) =>
+    handle.prepare(`DELETE FROM ${table} WHERE advisoryId = ?`),
   );
   handle.transaction(() => {
     for (const advisoryId of advisoryIds) {
-      deleteCves.run(advisoryId);
-      deleteSectors.run(advisoryId);
+      for (const statement of deletes) statement.run(advisoryId);
     }
   });
+}
+
+/**
+ * The content version the index was last fully built with, or `null` when none
+ * was ever recorded — a never-seeded index, or one built before versioning.
+ */
+export function readIngestContentVersion(handle: SqliteHandle): number | null {
+  const value = readMeta(handle, CONTENT_VERSION_KEY);
+  return value === undefined ? null : Number(value);
 }
 
 function readMeta(handle: SqliteHandle, key: string): string | undefined {
@@ -251,6 +294,16 @@ async function* runInit(
   }
 
   if (batch.length > 0) yield emitPage(handle, batch, maxRevised);
+  if (signal.aborted) return;
+  if (total === 0) {
+    /* Recording the content version here would mark whatever an existing index
+     * holds as current without having re-derived any of it. */
+    throw new Error('CSAF repository archive yielded no OT advisory documents.');
+  }
+
+  /* The runner applies a page before resuming the generator, so every page is
+   * already written when this line runs. */
+  writeMeta(handle, CONTENT_VERSION_KEY, String(INGEST_CONTENT_VERSION));
   logger.info(`ICS advisory mirror init: ${total} advisories normalized.`);
 }
 
