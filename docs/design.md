@@ -13,7 +13,7 @@ Upstream shapes in this document were verified against the live sources on 2026-
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `cisa_list_reference` | Decode the vocabulary the rest of the surface takes as input: BOD 26-04 remediation timelines, KEV field meanings, SSVC decision-point values, critical-infrastructure sector names, advisory ID formats, CVSS severity bands, and live data provenance. | `topic` | `readOnlyHint`, `openWorldHint: false` |
-| `cisa_check_cve_status` | Check up to 200 CVE IDs against the CISA Known Exploited Vulnerabilities catalog in one call, returning federal remediation deadlines, overdue status, ransomware and forensic-triage flags, and the directive each entry cites. | `cveIds[]` | `readOnlyHint` |
+| `cisa_check_cve_status` | Check up to 200 CVE IDs against the CISA Known Exploited Vulnerabilities catalog in one call, returning federal remediation deadlines, overdue status, ransomware and forensic-triage flags, and the directive each entry cites. | `cveIds[]`, `detail` | `readOnlyHint` |
 | `cisa_search_kev` | Search the KEV catalog by vendor, product, CWE, date added, due date, overdue status, ransomware use, forensic-triage tier, or directive. | filters, `sortBy`, `limit`, `cursor` | `readOnlyHint` |
 | `cisa_get_ssvc` | Fetch the SSVC decision points CISA publishes per CVE — Exploitation, Automatable, Technical Impact — and compute the BOD 26-04 remediation timeline they imply for a stated asset exposure. | `cveIds[]`, `assetExposure` | `readOnlyHint` |
 | `cisa_search_ics_advisories` | Search the CISA industrial control system advisory corpus by vendor, product, CVE, CWE, KEV membership, CVSS range, severity, sector, series, or free text over advisory titles and product names. | `q`, filters, `sortBy`, `limit`, `cursor` | `readOnlyHint` |
@@ -82,6 +82,8 @@ Every tool traces to at least one of these: 1 → `cisa_check_cve_status`; 2, 3 
 
 `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json`
 
+Measured on catalog `2026.09.18` (1,716 entries) unless a row names another version. Every count here drifts with each release; none of them belongs in a tool or field description.
+
 | Property | Observed |
 |:---|:---|
 | Size | 1,735,385 bytes raw; 191,922 bytes with `Accept-Encoding: gzip` (`content-encoding: gzip`, `vary: Accept-Encoding`) |
@@ -91,7 +93,7 @@ Every tool traces to at least one of these: 1 → `cisa_check_cve_status`; 2, 3 
 | `knownRansomwareCampaignUse` | `Known` 360 / `Unknown` 1,356 |
 | `forensicTriage` | `Yes` 58 / `No` 1,658 |
 | `cwes` | Empty array on 175 records; up to 4 entries; pattern `^CWE-([0-9])+$` |
-| `notes` | Never empty. `;`-delimited. 100% carry an `https://nvd.nist.gov/vuln/detail/<CVE>` URL. Median 2 URLs, max 11. 116 records open with prose. Labeled segments observed: `BOD 26-04:` (99), `Forensics Triage Requirements:` (99), `CISA Mitigation Instructions:` (13), `Additional References:` (3) |
+| `notes` | Never empty. `;`-delimited. 100% carry an `https://nvd.nist.gov/vuln/detail/<CVE>` URL. Median 2 URLs, max 11. 116 records open with prose. Labeled segments observed: `BOD 26-04:` (99), `Forensics Triage Requirements:` (99), `CISA Mitigation Instructions:` (13), `Additional References:` (3). On catalog `2026.09.24` (1,723 entries), URLs also appear outside the lone-URL and `Label: URL` shapes — 52 entries join URLs with commas, and 160 entries gain or correct a reference under the full parse: comma runs (`url, url`, `url,url`, a trailing comma), URLs inside prose (`please see: <url>`, `(<url>)`, `<url> and <url>`, prose continuing after the URL), a `;` inside one URL (CVE-2023-4911's gitweb link), and trailing `",`, `"`, `.`, or an unbalanced `)`. The 15 ED 20-xx / 21-xx entries hold their NVD URL inside a prose segment |
 | Directive citation | `BOD 26-04` in `requiredAction`/`notes` on 99 records, `BOD 22-01` on 340, **neither on 1,277**, both on 0 |
 | `dueDate` − `dateAdded` | Under 26-04: 3 days ×76, 14 days ×23. Pre-26-04: 21 ×1,025, 14 ×254, 181 ×238, plus a tail |
 | Coverage | 472 distinct `dateAdded` values, oldest 2021-11-03; 283 distinct `vendorProject`, 694 distinct `product` |
@@ -133,7 +135,7 @@ Branch `develop`. **No license file, and none declared in repo metadata.**
 | `changes.csv` quoting | **Inconsistent across distributions:** OT and VA quote both fields and use microsecond timestamps (`"2026/icsa-26-260-07.json","2026-09-17T06:00:00.000000Z"`); IT is unquoted with second precision |
 | Checkpoint fidelity | `changes.csv` timestamp equals `document.tracking.current_release_date` byte for byte, on both fresh and legacy-converted documents |
 | Caching | `raw.githubusercontent.com` honors `If-None-Match` → `304`; `cache-control: max-age=300` |
-| Advisory IDs | `tracking.id` is uppercase (`ICSA-10-316-01A`); the filename is lowercase. Suffix forms: none (3,805), a letter `a`–`f` (120), and **one numeric form, `ICSA-16-231-01-0`** |
+| Advisory IDs | `tracking.id` is uppercase (`ICSA-10-316-01A`); the filename is lowercase. Suffix forms: none (3,805), a letter `A`–`F` (120: 88 A, 23 B, 6 C, one each of D–F), and **one numeric form, `ICSA-16-231-01-0`** |
 | Document sizes | min 4,373 / median 13,717 / p90 37,135 / p99 204,315 / **max 1,379,416** (`icsa-26-209-04.json`). 783 exceed 24 KB; 102 exceed 100 KB |
 | `document.publisher.category` | `coordinator` 2,863 (CISA-authored) / **`other` 1,063 (republished vendor advisories)** |
 | `document.aggregate_severity` | Present on only 52 of 3,926 |
@@ -233,11 +235,12 @@ Implement first. No service dependency beyond in-process state, no network call,
 
 **Description**
 
-> Check CVE IDs against the CISA Known Exploited Vulnerabilities catalog — up to 200 per call, served from a cached catalog snapshot at no upstream cost. Returns, per CVE, whether it is in KEV and if so the date added, the federal remediation due date, days remaining or days overdue, which binding operational directive the entry cites, the required action text, whether it is linked to ransomware campaigns, whether it falls in the three-day forensic-triage tier, CISA's own vendor and product labels, associated CWEs, and the reference URLs parsed from the entry's notes. A CVE that is not in KEV is a normal result, not an error. The CWE IDs returned chain directly into the cwe filter of cisa_search_kev and cisa_search_ics_advisories, and the parsed NVD reference gives the canonical record for scoring detail. For the reverse direction — which ICS advisories cover a CVE — pass it as cve to cisa_search_ics_advisories, or set inKev there to list the advisories covering any KEV CVE.
+> Check CVE IDs against the CISA Known Exploited Vulnerabilities catalog — up to 200 per call, served from a cached catalog snapshot at no upstream cost. Returns, per CVE, whether it is in KEV and if so the date added, the federal remediation due date, days remaining or days overdue, which binding operational directive the entry cites, the required action text, whether it is linked to ransomware campaigns, whether it falls in the three-day forensic-triage tier, CISA's own vendor and product labels, associated CWEs, and the reference URLs parsed from the entry's notes. A CVE that is not in KEV is a normal result, not an error. For a large batch, detail "summary" keeps only the triage fields — the deadline and overdue status, directive, ransomware and forensic-triage flags, and vendor and product labels — and drops the descriptive text, CWEs, and references, so a full batch stays compact. The CWE IDs returned chain directly into the cwe filter of cisa_search_kev and cisa_search_ics_advisories, and the parsed NVD reference gives the canonical record for scoring detail. For the reverse direction — which ICS advisories cover a CVE — pass it as cve to cisa_search_ics_advisories, or set inKev there to list the advisories covering any KEV CVE.
 
 | Param | Type | Maps to | Notes |
 |:---|:---|:---|:---|
-| `cveIds` | `z.array(z.string().regex(/^CVE-[0-9]{4}-[0-9]{4,19}$/)).min(1).max(200)` | local index lookup | Pattern is the one the published KEV schema declares. Input normalization: uppercase the `cve` prefix and trim surrounding whitespace — both are one-to-one and meaning-preserving. Nothing else is repaired. |
+| `cveIds` | `z.array(CveIdInputSchema).min(1).max(200)` — `z.string().trim().toUpperCase().regex(/^CVE-[0-9]{4}-[0-9]{4,19}$/)` | local index lookup | Pattern is the one the published KEV schema declares. The schema trims surrounding whitespace and uppercases before the pattern check — both one-to-one and meaning-preserving, and neither emits a JSON Schema keyword. Nothing else is repaired. |
+| `detail` | `z.enum(['full','summary']).default('full')` | output projection | `full` is the complete record and the default, byte-identical to the output before the parameter existed. `summary` keeps eleven fields per in-KEV record (Decision 24). Not-in-KEV results, the counts, and the `catalog`/`asOf` enrichment are the same under both. |
 
 **Output**
 
@@ -247,21 +250,21 @@ results[]:
   # present when inKev
   dateAdded, dueDate, daysUntilDue, overdue
   directive            'BOD 26-04' | 'BOD 22-01' | null
-  requiredAction, vulnerabilityName, shortDescription
+  requiredAction, vulnerabilityName, shortDescription        # full only
   vendorProject, product
   knownRansomwareCampaignUse   'Known' | 'Unknown'
   forensicTriage               'Yes' | 'No'
-  cwes[]
+  cwes[]                                                     # full only
   references[]: { kind: 'nvd'|'cisa'|'bod_guidance'|'forensic_triage'|'vendor'|'other',
-                  label?, url }
-  notesCommentary?     free prose from notes, when the entry opens with prose
-  kevUrl
+                  label?, url }                              # full only
+  notesCommentary?     prose segments of notes, verbatim     # full only
+  kevUrl                                                     # full only
 foundCount, notFoundCount
 ```
 
-`directive` is three-state on purpose: 1,277 of 1,716 entries cite no directive at all in their `requiredAction` or `notes`, and `null` is the honest value for those. Never infer 22-01 from an entry's age.
+`directive` is three-state on purpose: most entries (1,277 of 1,716 at catalog `2026.09.18`) cite no directive at all in their `requiredAction` or `notes`, and `null` is the honest value for those. Never infer 22-01 from an entry's age.
 
-`notes` parsing: split on `;`, trim. A segment matching `^<Label>:\s*<url>` yields `{ label, url }` with `kind` from the label (`BOD 26-04` → `bod_guidance`, `Forensics Triage Requirements` → `forensic_triage`, `CISA Mitigation Instructions` → `cisa`). A bare URL is classified by host (`nvd.nist.gov/vuln/detail/` → `nvd`, `*.cisa.gov` → `cisa`, else `vendor`). Non-URL text becomes `notesCommentary`.
+`notes` parsing (Decision 25): split on `;`, except a `;` that follows a URL with no space and does not open another URL — that one belongs to the URL (`…glibc.git;a=commitdiff;h=…`). A segment matching `^<Label>:\s*<url>` with a single URL yields `{ label, url }` with `kind` from the label (`BOD 26-04` → `bod_guidance`, `Forensics Triage Requirements` → `forensic_triage`, `CISA Mitigation Instructions` → `cisa`). From every other segment each URL becomes an unlabeled reference classified by host (`nvd.nist.gov/vuln/detail/` → `nvd`, `*.cisa.gov` → `cisa`, else `vendor`): comma runs split at a comma that opens another URL, and trailing `,` `.` `"` and an unbalanced `)` are trimmed. References keep notes order. A segment holding anything besides URLs, commas, and whitespace is also kept whole, URLs included, in `notesCommentary`.
 
 **Enrichment**
 
@@ -269,6 +272,7 @@ foundCount, notFoundCount
 |:---|:---|:---|
 | `catalog` | `echo` | Always — `{ catalogVersion, dateReleased, count, fetchedAt }` |
 | `asOf` | `echo` | Always — the UTC date `daysUntilDue` and `overdue` were computed against |
+| `summaryNote` | label `Detail` | Only under `detail: "summary"` — "summary — in-KEV results omit requiredAction, vulnerabilityName, shortDescription, cwes, references, notesCommentary, and kevUrl. Call again with detail "full" to restore them." |
 | `notice` | `notice` | When `foundCount === 0` — "None of the N CVE IDs supplied are in the KEV catalog. KEV lists only vulnerabilities CISA has confirmed are exploited in the wild; absence is not a statement about severity. Call cisa_get_ssvc for the SSVC decision points CISA publishes for CVEs regardless of KEV status." |
 
 **Errors**
@@ -287,17 +291,17 @@ foundCount, notFoundCount
 
 | Param | Type | Notes |
 |:---|:---|:---|
-| `vendorProject` | `z.string().min(2).optional()` | Case-insensitive substring match on CISA's own vendor label. 283 distinct values. |
-| `product` | `z.string().min(2).optional()` | Case-insensitive substring match. 694 distinct values. |
-| `nameContains` | `z.string().min(2).optional()` | Strict token match over `vulnerabilityName` + `shortDescription`: normalize both sides (lowercase, strip punctuation), require every query token to appear. No fuzzy fallback — an LLM caller does not need typo tolerance, and a wrong record is worse than a miss. |
-| `cwe` | `z.string().regex(/^CWE-[0-9]+$/).optional()` | Exact match against any member of `cwes[]`. |
-| `cveIdPrefix` | `z.string().regex(/^CVE-[0-9]{4}$/).optional()` | Year scope, e.g. `CVE-2026`. |
+| `vendorProject` | `z.string().min(2).optional()` | Case-insensitive substring match on CISA's own vendor label. |
+| `product` | `z.string().min(2).optional()` | Case-insensitive substring match on CISA's own product label. |
+| `nameContains` | `z.string().min(2).optional()` | Strict token match over `vulnerabilityName` + `shortDescription`: normalize both sides (lowercase, NFKD with combining marks stripped, every character outside `a-z0-9` becomes a separator), require every query token to appear. A value that leaves no token — punctuation, whitespace, only letters outside `a-z` — throws `empty_search_text` from the service after the length check (Decision 26). When some tokens survive, `queryTokens` also reports each word that lost a letter or digit to the fold (a word in another script, `ß`, digits outside 0-9), and the search runs on the survivors with a notice naming what was dropped and what was searched. No fuzzy fallback — an LLM caller does not need typo tolerance, and a wrong record is worse than a miss. |
+| `cwe` | `CweIdInputSchema.optional()` — `z.string().trim().toUpperCase().regex(/^CWE-[0-9]+$/)` | Exact match against any member of `cwes[]`. Case and surrounding whitespace normalize at the schema, so the service compares canonical values. |
+| `cveIdPrefix` | `z.string().trim().toUpperCase().regex(/^CVE-[0-9]{4}$/).optional()` | Year scope, e.g. `CVE-2026`; `cve-2026` is the same filter. |
 | `dateAddedFrom` / `dateAddedTo` | `z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()` | Inclusive. |
 | `dueBefore` / `dueAfter` | `z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()` | Inclusive. |
 | `overdue` | `z.boolean().optional()` | `dueDate` strictly before the echoed `asOf` date. |
-| `ransomware` | `z.boolean().optional()` | `true` selects `knownRansomwareCampaignUse === 'Known'` (360 entries). |
-| `forensicTriage` | `z.boolean().optional()` | `true` selects `forensicTriage === 'Yes'` (58 entries), the BOD 26-04 three-day forensic-triage tier. |
-| `directive` | `z.enum(['BOD 26-04','BOD 22-01','none']).optional()` | `none` selects entries citing neither (1,277 entries). |
+| `ransomware` | `z.boolean().optional()` | `true` selects `knownRansomwareCampaignUse === 'Known'`. |
+| `forensicTriage` | `z.boolean().optional()` | `true` selects `forensicTriage === 'Yes'`, the BOD 26-04 three-day forensic-triage tier. |
+| `directive` | `z.enum(['BOD 26-04','BOD 22-01','none']).optional()` | `none` selects entries citing neither. |
 | `sortBy` | `z.enum(['dueDate','dateAdded']).default('dateAdded')` | |
 | `order` | `z.enum(['asc','desc']).default('desc')` | |
 | `limit` | `z.number().int().min(1).max(100).default(25)` | |
@@ -317,17 +321,21 @@ All filters AND together. Every one is applied against the complete snapshot, ne
 | `asOf` | `echo` | Always — a server-applied default that changes what `overdue` and `daysUntilDue` mean |
 | `appliedFilters` | `echo` | Always — the filters as the server parsed them |
 | `snapshotCaveat` | `notice` | When `dateAddedFrom` is set — "Additions are queryable by dateAdded. The KEV feed carries no per-record modified timestamp, so an entry whose dueDate or requiredAction changed after it was added is indistinguishable from an unchanged one. This result covers additions in the window, not revisions." |
-| `notice` | `notice` | Zero hits. Composed from condition → fragment (below) |
+| `notice` | `notice` | Composed once, because `notice` is last-wins across enrich calls (`truncated()` included): the dropped-word notice when `nameContains` lost a word to the fold ("nameContains dropped the characters of "漏洞" outside the letters a-z and the digits 0-9 — … Searched for: siemens."), then the zero-hit fragments (below). A capped page prefixes the framework's cap sentence and passes the whole string as `truncated()`'s `guidance`. |
 
-Zero-hit notice fragments, each routing to a concrete next call:
+Zero-hit notice fragments (Decision 26). On a zero-hit result only, `KevCatalogService.filterCounts` makes one extra pass over the snapshot recording, per applied filter, the entries it matches alone and the entries that fail it and nothing else — what dropping it restores. Fragments key on those counts, the loaded snapshot, and the echoed `asOf`; the counts they print come from the snapshot:
 
 | Condition | Fragment |
 |:---|:---|
-| `vendorProject` or `product` set | "Vendor and product are CISA's own free-text labels, not CPE names — call cisa_list_reference with topic kev_fields for the value domain, or drop the filter and match on nameContains instead." |
-| `cwe` set | "No KEV entry carries that CWE. 175 of 1,716 entries carry an empty cwes array, so a CWE filter excludes them regardless of relevance." |
-| `directive: 'BOD 26-04'` with a date window before 2026 | "BOD 26-04 entries begin in 2026; earlier entries cite BOD 22-01 or no directive at all." |
-| `overdue: true` with a `dueAfter` in the future | "overdue and dueAfter are contradictory as given — relax one." |
-| No filter explains it | "No KEV entry matches. Relax the narrowest filter, or call cisa_check_cve_status if you already have specific CVE IDs." |
+| `vendorProject` or `product` matches nothing alone | "vendorProject=X matches no entry on its own. Vendor and product are CISA's own free-text labels, not CPE names — call cisa_list_reference with topic kev_fields for the value domain, or drop the filter and match on nameContains instead." — both unmatched: "vendorProject=X and product=Y each match no entry on their own. … or drop the filters …" |
+| `cwe` matches nothing alone | "No KEV entry carries CWE-X. N of M entries carry an empty cwes array, so a CWE filter excludes them regardless of relevance." — N and M from the snapshot |
+| Any other filter matches nothing alone | "cveIdPrefix=CVE-2099 matches no entry on its own — relax or drop it." |
+| Exactly one filter matches nothing alone, beside other filters | "Dropping cveIdPrefix restores N entries." — or, when the other filters also match nothing together, "Dropping cveIdPrefix alone restores nothing: the other filters match no entry together either." Every entry fails that filter, so its drop-one count is exactly what the rest match together |
+| `overdue: true` with `dueAfter` on or after `asOf` | "overdue and dueAfter are contradictory as given: overdue selects due dates before ASOF, and dueAfter=D excludes all of them — relax one." |
+| `directive` with a `dateAdded` window outside the dateAdded range of the entries citing it | "Entries citing BOD 26-04 were added from FIRST through LAST; the dateAdded window falls outside that range." — FIRST and LAST from the snapshot |
+| Every filter matches alone; at least one removal restores results | "Every filter matches entries on its own; dropping overdue restores N entries, dropping vendorProject restores M entries." |
+| Every filter matches alone; no single removal restores a result | "Every filter matches entries on its own, but no single filter explains the miss — only relaxing two or more of them together restores a result." |
+| No filter applied (an empty snapshot) | "The loaded KEV catalog snapshot holds no entries. Call cisa_list_reference with topic sources to check its state." |
 
 **Errors**
 
@@ -335,6 +343,7 @@ Zero-hit notice fragments, each routing to a concrete next call:
 |:---|:---|:---|:---|
 | `catalog_unavailable` | `ServiceUnavailable` (`retryable: true`) | No snapshot held and the fetch failed | `The KEV catalog snapshot is not loaded yet; retry in a few seconds, or call cisa_list_reference with topic sources to see the current catalog state.` |
 | `invalid_date_range` | `ValidationError` | A `From` bound is later than its `To` bound | `Swap the range bounds so the From date is not later than the To date, then call this tool again.` |
+| `empty_search_text` | `ValidationError` (thrown by `queryTokens`) | `nameContains` holds no letter a-z or digit 0-9 once case and accents are folded and punctuation is removed | `Put at least one word or number in nameContains that uses the letters a-z, accented or not, or the digits 0-9, such as a product or vulnerability term, or omit nameContains to search by the other filters alone.` |
 
 ---
 
@@ -346,7 +355,7 @@ Zero-hit notice fragments, each routing to a concrete next call:
 
 | Param | Type | Notes |
 |:---|:---|:---|
-| `cveIds` | `z.array(z.string().regex(/^CVE-[0-9]{4}-[0-9]{4,19}$/)).min(1).max(50)` | Cap 50, not 200: each CVE is a separate upstream file fetch. Fetched with a concurrency limit of 6 and `Promise.allSettled`. |
+| `cveIds` | `z.array(CveIdInputSchema).min(1).max(50)` | Case and whitespace normalize as in `cisa_check_cve_status`. Cap 50, not 200: each CVE is a separate upstream file fetch. Fetched with a concurrency limit of 6 and `Promise.allSettled`. |
 | `assetExposure` | `z.enum(['publicly_exposed','not_publicly_exposed','unknown']).default('unknown')` | The one decision point only the caller can answer. `unknown` returns both arms so the agent can see the spread without guessing. |
 
 `In the KEV` is read from this server's local KEV snapshot, never from the caller. `Automatable` and `Technical Impact` come from Vulnrichment. Those three plus `assetExposure` are the complete input set for the Table 1 lookup.
@@ -420,8 +429,8 @@ A partial failure is not an error: CVEs that fetched successfully return normall
 | `q` | `z.string().min(2).optional()` | Full text over `title`, `vendorsText`, `productsText`. Translated to an FTS5 `MATCH` expression: tokens are quoted and AND-joined, so reserved FTS5 syntax in caller input cannot alter the query. A token with no letter or digit is dropped, and a `q` left with no token throws `empty_search_text` from the service (Decision 20). |
 | `vendor` | `z.string().min(2).optional()` | Case-insensitive substring over the `vendorsText` column, with `\`, `%`, and `_` escaped under `LIKE … ESCAPE '\'` so they match literally (Decision 21). Vendor names are unnormalized upstream — `GE` and `General Electric (GE)` are distinct labels — so this is substring, not exact. |
 | `product` | `z.string().min(2).optional()` | Case-insensitive, literally-matched substring over `productsText`, escaped the same way. |
-| `cve` | `z.string().regex(/^CVE-[0-9]{4}-[0-9]{4,19}$/).optional()` | Exact membership in the advisory's CVE set, via an indexed junction table. |
-| `cwe` | `z.string().regex(/^CWE-[0-9]+$/).optional()` | Exact membership in `advisory_cwes`, the same shape as `cisa_search_kev`'s `cwe`; the service uppercases. On an index an older ingest built, a `cwe` result is disclosed as possibly incomplete (Decision 19). |
+| `cve` | `CveIdInputSchema.optional()` | Exact membership in the advisory's CVE set, via an indexed junction table. Case and surrounding whitespace normalize at the schema. |
+| `cwe` | `CweIdInputSchema.optional()` | Exact membership in `advisory_cwes`, the same schema as `cisa_search_kev`'s `cwe`; case and surrounding whitespace normalize at the schema, and ingest stores the uppercase form. On an index an older ingest built, a `cwe` result is disclosed as possibly incomplete (Decision 19). |
 | `inKev` | `z.boolean().optional()` | `true` keeps advisories covering at least one CVE in the KEV snapshot, `false` those covering none — evaluated in SQL over full `advisory_cves` membership, so paging and `totalCount` stay correct (Decision 22). |
 | `cvssMin` / `cvssMax` | `z.number().min(0).max(10).optional()` | Against the advisory's computed `maxCvss`. |
 | `severity` | `z.enum(['NONE','LOW','MEDIUM','HIGH','CRITICAL']).optional()` | Band of `maxCvss`. |
@@ -505,7 +514,7 @@ Zero-hit notice fragments:
 
 | Param | Type | Notes |
 |:---|:---|:---|
-| `advisoryId` | `z.string().regex(/^ICS(A\|MA)-\d{2}-\d{3}-\d{2}(?:[a-z]\|-\d+)?$/i)` | **Case-insensitive, and the suffix arm covers both real forms.** 120 advisories carry a letter suffix (`a`–`f` observed) and one carries a numeric suffix (`ICSA-16-231-01-0`). Input normalization: uppercase, trim, and strip a trailing `.json` — each is one-to-one and meaning-preserving. |
+| `advisoryId` | `AdvisoryIdInputSchema` — `z.string().overwrite(normalizeAdvisoryId).regex(/^ICS(A\|MA)-\d{2}-\d{3}-\d{2}(?:[A-Z]\|-\d+)?$/)` | **The suffix arm covers both real forms.** 120 advisories carry a letter suffix (`A`–`F` observed) and one carries a numeric suffix (`ICSA-16-231-01-0`). `normalizeAdvisoryId` trims, strips a trailing `.json`, and uppercases before the flag-free canonical pattern is checked, so every spelling the lowercase filename or a stray extension produces still resolves (Decision 11). |
 | `sections` | `z.array(z.enum(['advisory','summary','products','vulnerabilities','revisionHistory','references','acknowledgments'])).optional()` | Omit for the whole document, or the outline when it overflows. |
 | `cves` | `z.array(CveIdInputSchema).optional()` | Narrows `vulnerabilities` to the entries carrying these CVEs, in document order (Decision 23). Alone it selects `vulnerabilities`; with `sections`, the list must include it or the handler throws `cves_need_vulnerabilities_section`. An ID the advisory does not cover throws `unknown_cve` naming it. Case and whitespace normalize as in `cisa_check_cve_status`; duplicates collapse; an empty array behaves as omitted, like an empty `sections`. |
 
@@ -662,11 +671,11 @@ There is no upstream search, batch, or field-selection endpoint anywhere. Effici
 
 ### Tier 1 — KEV, in-memory, process-level
 
-1,716 records and 1.74 MB sit far below the mirror tier's floor, and the data is public and byte-identical for every tenant, so one process-level snapshot is shared — no `ctx.state`, no tenant scoping.
+The catalog — 1,716 records and 1.74 MB at catalog `2026.09.18` — sits far below the mirror tier's floor, and the data is public and byte-identical for every tenant, so one process-level snapshot is shared — no `ctx.state`, no tenant scoping.
 
 Held per refresh: the parsed records, the raw envelope metadata (`catalogVersion`, `dateReleased`, `count`), `fetchedAt`, the upstream `last-modified`, and derived indexes — `Map<cveId, record>`, plus sorted arrays by `dateAdded` and `dueDate`.
 
-**Refresh** uses `If-Modified-Since` with the stored `last-modified`, sent with `Accept-Encoding: gzip`. A no-change poll is a 304 with zero bytes; a change costs 192 KB on the wire. **`If-None-Match` is not used**: the origin serves an ETag but ignores it on conditional requests and returns the full 1.74 MB body every time. Scheduled via `schedulerService` in `setup()`, default `*/30 * * * *`. The catalog updates on business days, so 48 polls a day is ~2 changed fetches and 46 empty ones.
+**Refresh** uses `If-Modified-Since` with the stored `last-modified`, sent with `Accept-Encoding: gzip`. A no-change poll is a 304 with zero bytes; a change costs 192 KB on the wire. **`If-None-Match` is not used**: the origin serves an ETag but ignores it on conditional requests and returns the full body (1.74 MB at catalog `2026.09.18`) every time. Scheduled via `schedulerService` in `setup()`, default `*/30 * * * *`. The catalog updates on business days, so 48 polls a day is ~2 changed fetches and 46 empty ones.
 
 **Cold start** is single-flight: `setup()` kicks the first load off without awaiting it, and a request arriving before it lands awaits the same in-flight promise rather than starting a second fetch. The observed fetch is ~80 ms, so the first request blocks briefly rather than failing. If the load fails and no snapshot is held, the tools throw `catalog_unavailable`; if a snapshot is held, a failed refresh logs a warning and the previous snapshot keeps serving — a stale catalog beats no catalog, and `cisa_list_reference` topic `sources` exposes `lastCheckedAt` so the staleness is visible rather than silent.
 
@@ -771,8 +780,9 @@ As shipped in `createApp({ instructions })`:
 
 Required sparse-payload cases, one per external shape:
 
-- KEV record with `cwes: []` and a single-segment `notes` holding only the NVD URL (just over 100 of the 175 empty-`cwes` records look like this).
-- KEV record citing no directive at all (1,277 records) — `directive` must be `null`, not inferred.
+- KEV record with `cwes: []` and a single-segment `notes` holding only the NVD URL (just over 100 of the 175 empty-`cwes` records at catalog `2026.09.18` look like this).
+- KEV record citing no directive at all — `directive` must be `null`, not inferred.
+- KEV `notes` shapes beyond `url` and `Label: url`: comma runs, URLs inside prose, a `;` inside a URL, trailing punctuation — each URL a reference, the prose kept.
 - CSAF advisory with no sector note and `cvss_v2`-only scores (a pre-2017 converted advisory) — `sectors` empty, `severityDerived: true`.
 - CSAF advisory with a vulnerability object carrying no `scores[]` (431 exist) and one carrying no CVSS anywhere (2 documents).
 - CSAF advisory over the outline budget, asserting the outline arm and a subsequent `sections` selection.
@@ -810,14 +820,14 @@ Each step is independently testable; steps 2–5 need no SQLite at all.
 Inherent to the sources. None is solvable by this server, and each is stated in the tool description or output of the tool it affects.
 
 1. **KEV modifications are invisible.** The feed carries `dateAdded` but no per-record modified timestamp. A revised `dueDate` or `requiredAction` on an existing entry is indistinguishable from an unchanged one. A retained-snapshot diff would close this and is deliberately not in v1.
-2. **Most KEV entries cite no directive.** 1,277 of 1,716 name neither BOD 22-01 nor BOD 26-04; `directive` is `null` for them rather than inferred from age.
+2. **Most KEV entries cite no directive.** 1,277 of 1,716 at catalog `2026.09.18` name neither BOD 22-01 nor BOD 26-04; `directive` is `null` for them rather than inferred from age.
 3. **The KEV due date is not reproducible from published SSVC.** In a 24-CVE sample, 9 disagreed with Table 1 under a publicly-exposed assumption and 1 CVE had no enrichment record at all. The two facts are reported side by side and never reconciled.
 4. **Vulnrichment coverage is incomplete and can lag.** Not every CVE — including some in KEV — has a record, and a published `Exploitation` value can predate the KEV addition that contradicts it.
 5. **Advisory sector coverage begins in 2017.** 729 of 3,926 documents carry no sector note; a sector filter cannot reach them. The gap is disclosed on every filtered call.
 6. **No structured CVSS v4 in the advisory corpus.** 392 advisories score only in CVSS v2, where the upstream publishes no severity label and the band must be derived.
 7. **The RSS feeds have no history and no conditional GET.** Thirty items, no pagination, no date query, no ETag or Last-Modified — a timer-cached unconditional poll is the only available strategy.
 8. **Advisory vendor names are unnormalized.** 895 distinct vendor labels across 3,926 documents, with the same company under several spellings. Vendor filtering is substring matching, not an enum.
-9. **The KEV feed ignores `If-None-Match`.** Only `If-Modified-Since` yields a 304; a client that trusts the served ETag re-downloads 1.74 MB on every poll.
+9. **The KEV feed ignores `If-None-Match`.** Only `If-Modified-Since` yields a 304; a client that trusts the served ETag re-downloads the whole feed (1.74 MB at catalog `2026.09.18`) on every poll.
 10. **No Cloudflare Workers deployment.** The mirror needs embedded SQLite and a persistent filesystem; neither exists in an isolate. stdio, HTTP, Docker, and `.mcpb` are the supported surfaces.
 
 ---
@@ -832,7 +842,7 @@ The open question was whether shipping the SQLite driver locks the bundle to the
 *Residual risk, deliberately carried:* Node 24+ ships `node:sqlite`, and on Node 26.5.0 it exposes SQLite 3.53.4 with FTS5 and `bm25()` working — a zero-byte driver already inside the Node binary this server pins. The framework's `openSqliteHandle` has no arm for it, so adopting it is a framework change, not a server one. Worth filing upstream; not a blocker, since the prebuild finding removes the portability problem it would have solved.
 
 **3. KEV is an in-memory process-level index refreshed with `If-Modified-Since`, and an HTML body is a transient upstream failure.**
-1,716 records and 1.74 MB sit below the mirror tier's floor, and the data is public and byte-identical per tenant, so one shared snapshot with no tenant scoping is correct. Refresh every 30 min conditionally: a no-change poll is a 304 with zero bytes, a change costs 192 KB gzipped. **`If-None-Match` is deliberately unused** — the origin serves an ETag but ignores it on conditional requests and returns the full body, verified against the live ETag in strong, weak, and wildcard forms. Cold start is single-flight and blocking: `setup()` starts the load without awaiting it, and an early request awaits the same promise rather than racing a second fetch; the observed fetch is ~80 ms. A failed refresh with a snapshot in hand logs and keeps serving the old snapshot, with the staleness visible through `cisa_list_reference` topic `sources`; a failed first load throws `catalog_unavailable`, retryable. An HTML body on the JSON route — 46 KB from a Drupal error page — is classified `ServiceUnavailable`, never `SerializationError`: it signals a routing or availability problem the caller can retry past, and labelling it a parse error would make a recoverable outage read as a data-shape defect.
+1,716 records and 1.74 MB at catalog `2026.09.18` sit below the mirror tier's floor, and the data is public and byte-identical per tenant, so one shared snapshot with no tenant scoping is correct. Refresh every 30 min conditionally: a no-change poll is a 304 with zero bytes, a change costs 192 KB gzipped. **`If-None-Match` is deliberately unused** — the origin serves an ETag but ignores it on conditional requests and returns the full body, verified against the live ETag in strong, weak, and wildcard forms. Cold start is single-flight and blocking: `setup()` starts the load without awaiting it, and an early request awaits the same promise rather than racing a second fetch; the observed fetch is ~80 ms. A failed refresh with a snapshot in hand logs and keeps serving the old snapshot, with the staleness visible through `cisa_list_reference` topic `sources`; a failed first load throws `catalog_unavailable`, retryable. An HTML body on the JSON route — 46 KB from a Drupal error page — is classified `ServiceUnavailable`, never `SerializationError`: it signals a routing or availability problem the caller can retry past, and labelling it a parse error would make a recoverable outage read as a data-shape defect.
 
 **4. Vulnrichment is fetched per CVE on demand with a TTL cache, not mirrored.**
 The repository is ~343 MB against a corpus this server touches tens of records from per session — three orders of magnitude of cost for no gain. Path shape verified: `{YYYY}/{block}/{CVE-ID}.json` on branch **`develop`** (`main` 404s), where `block` is the CVE numeric part with its last three characters replaced by `xxx`. Normalized results cache under `ctx.state` at `ssvc/<CVE-ID>` for 6 h, best-effort in both directions so correctness never depends on the cache. A 404 caches as a negative for 1 h rather than indefinitely, because CISA enriches continuously. A miss is `{ found: false, guidance }` — a result the agent reasons about, not a throw — with distinct guidance for a 404, a record with no CISA-ADP container, and a CISA-ADP container carrying no SSVC metric.
@@ -856,7 +866,7 @@ KEV is a US Government work in the public domain under 17 U.S.C. §105 and Vulnr
 Three chaining points are load-bearing and each is stated where the agent reads it. `cisa_check_cve_status` says its returned CWE IDs chain into the `cwe` filter of both search tools, that the reverse direction — which ICS advisories cover a CVE — is `cisa_search_ics_advisories` with `cve` or `inKev`, and that the parsed NVD reference gives the canonical scoring record. `cisa_search_kev` says vendor and product are CISA's free-text labels rather than CPE names, so a CPE-shaped query belongs elsewhere. `cisa_check_cve_status` accepts a 200-CVE batch precisely so a CVE alias list from a dependency audit can be checked in one call, and says the call costs nothing upstream. No other server is named — the description tells the caller what the value is and what shape it takes, which is what a caller who installed only this server can act on.
 
 **11. The advisory ID pattern accepts `ICSMA` and both suffix forms.**
-The pattern carried in the brief, `^ICS[AM]-\d{2}-\d{3}-\d{2}[a-z]?$`, rejects every one of the 188 `ICSMA-` advisories — `ICS[AM]` matches a single character, so it spells `ICSA` or `ICSM`, never `ICSMA` — and rejects `ICSA-16-231-01-0`, a real document with a numeric rather than alphabetic revision suffix. The design uses `^ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[a-z]|-\d+)?$`, case-insensitive. Letter suffixes `a` through `f` are observed across 120 documents. Normalization uppercases and strips a trailing `.json`; both are one-to-one and meaning-preserving.
+The pattern carried in the brief, `^ICS[AM]-\d{2}-\d{3}-\d{2}[a-z]?$`, rejects every one of the 188 `ICSMA-` advisories — `ICS[AM]` matches a single character, so it spells `ICSA` or `ICSM`, never `ICSMA` — and rejects `ICSA-16-231-01-0`, a real document with a numeric rather than alphabetic revision suffix. The design uses `^ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[A-Z]|-\d+)?$`, with no flag: every pattern on this surface is advertised in JSON Schema, which carries no flags, and a `/i` pattern once told strict clients that `ICSA-10-316-01A` — a stored, emitted ID — was invalid, so they rejected whole search pages. The pattern matches the canonical uppercase form every stored and emitted ID takes; input tolerance lives in normalization, which trims, strips a trailing `.json`, and uppercases before the check. Letter suffixes `A` through `F` are observed across 120 documents. Every regex in an advertised schema is flag-free, which the surface smoke test enforces.
 
 **12. The mirror covers the OT distribution only.**
 `csaf_files/` holds three distributions: OT (3,926 `icsa-`/`icsma-` documents, the ICS corpus this server is for), IT (89 `va-` documents), and VA (3 `va-` documents, overlapping IT's paths). Mirroring IT and VA would broaden the server past the ICS scope its name and tool surface promise, for 92 documents whose recent members are already reachable through `cisa_get_alerts`. Adding them later is a `series` enum extension plus a second ingest source, not a redesign. The two `va-` distributions also overlap on path, which would need a distribution-qualified primary key — another reason not to take it on for 92 documents.
@@ -893,3 +903,15 @@ Dropping the `MATCH` clause for a whitespace or bare-quote `q` answered the whol
 
 **23. `cves` is the sub-section selector for `vulnerabilities`, and the outline lists the IDs to choose from.**
 The framework's `selectSections` stops at top-level keys by design and leaves sub-section selection to the server. `cves` narrows `vulnerabilities` to the named entries and is validated against the advisory's own CVE list, both errors thrown in the handler so their recovery hints reach the caller. Listing the CVE IDs in both outline arms is what makes the selector usable; it costs up to ~9.3 KB per surface on the 544-CVE advisory, still under the budget. The outline element extends the framework's strip-mode schema instead of reusing it — reused verbatim, the parse would silently drop `cves`. Narrowing `products` the same way is separate work.
+
+**24. `cisa_check_cve_status` shrinks a batch with a `detail: "summary"` projection, never a cap.**
+A scan-result check needs every requested CVE back, so capping the list would drop answers, and lowering the 200 maximum would remove the batch the tool exists for. `summary` keeps the eleven triage fields (`cveId`, `inKev`, dates, `daysUntilDue`, `overdue`, `directive`, vendor and product labels, the ransomware and forensic-triage flags) and reuses `KevRecordSchema`, whose dropped fields were already optional. Measured on catalog `2026.09.24` over the 200 most recently added CVEs: `structuredContent` 308,063 → 52,734 bytes, `content[]` 298,391 → 60,958 bytes. `full` stays the default and byte-identical; the "this is a summary" disclosure rides a `summaryNote` enrichment written only under `summary`, so it never touches `full` output on either surface.
+
+**25. Every URL in KEV `notes` becomes a reference; the prose around them stays whole.**
+Upstream puts URLs in `notes` comma-joined, inside prose, in parentheses, and once with a `;` inside the URL — shapes the original `url` / `Label: url` split never read, which left 15 ED-era entries with no reference at all. The parser now extracts every URL, keeps notes order, trims sentence punctuation, and leaves prose segments verbatim with their URLs, because stripping the URLs would strand `()` and `please see:`. Labels attach only to the exact `Label: url` shape. Against catalog `2026.09.24`: references 2,947 → 3,252, entries with no `nvd` reference 15 → 0, entries with `notesCommentary` 166 → 122, and no existing reference lost. The parse stays linear in the length of `notes`, because `notes` is upstream text parsed on every catalog load: the `;` rejoin carries whether the last segment ends in a URL rather than rescanning the growing segment, and the punctuation trim is one backward pass against a paren balance counted once.
+
+**26. The KEV zero-hit notice is computed from per-filter counts, and a `nameContains` with nothing to search is an error.**
+Choosing fragments by which filters were present blamed filters that matched on their own, such as the vendor-label and CWE fragments on any call that set them. On a zero-hit result only, one pass over the snapshot counts each filter alone and what dropping it would restore; the notice names the filter that matches nothing — and, when it is the only one, what dropping it restores, which is nothing when the other filters also miss together — or else the filters whose removal restores results and how many. The directive and `overdue`/`dueAfter` fragments read the snapshot and the echoed `asOf` rather than a fixed 2026 threshold or the wall clock. A `nameContains` that folds to no token throws `empty_search_text` from the service, mirroring Decision 20: an empty result would claim nothing matched when nothing was searched. One that folds only part of the query away — `漏洞 siemens` — searches the surviving tokens and says so in a notice naming the dropped words and the tokens searched: the results are unchanged, since folded record text can never contain the dropped characters, but a silent drop let a widened query read as if every word had matched.
+
+**27. Agent-facing text states no KEV count that changes with a catalog release.**
+Static descriptions and `cisa_list_reference` topic `kev_fields` had carried figures like "58 entries" and "of 1,716" that went wrong with the next release. They now say "most" or "some" or nothing, and runtime text that needs a figure computes it from the loaded snapshot — the empty-`cwes` count in the zero-hit notice, for one. `kev_fields` drops its figures rather than reading the snapshot so the tool stays free of service dependencies (Decision 16); topic `sources` already reports the live `count`. Counts in this document are labeled with the catalog version they were measured on.

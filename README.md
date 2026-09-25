@@ -29,19 +29,19 @@
 
 ## Overview
 
-CISA's open vulnerability outputs, made queryable: the Known Exploited Vulnerabilities catalog and the federal remediation deadlines it carries, the SSVC decision points CISA publishes per CVE in Vulnrichment, the full CSAF corpus of industrial control system advisories back to 2010, and CISA's current publication feeds. Check a scan's worth of CVE IDs against KEV in one call, find what is overdue for a vendor, work out what BOD 26-04 implies for an asset you own, and search or read ICS advisories by vendor, product, CVE, CWE, CVSS, sector, or whether they cover an exploited vulnerability. Every source is keyless and read-only. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+CISA's open vulnerability data: the Known Exploited Vulnerabilities catalog and its federal remediation deadlines, the SSVC decision points CISA publishes per CVE in Vulnrichment, the CSAF corpus of industrial control system advisories back to 2010, and CISA's publication feeds. Check a scan's worth of CVE IDs against KEV in one call, find what is overdue for a vendor, work out the BOD 26-04 timeline for an asset you own, and search or read ICS advisories. Every source is keyless. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
 | Tool | Description |
 |:---|:---|
-| `cisa_list_reference` | Decode the vocabulary the other tools take as input — BOD 26-04 timelines, KEV fields, SSVC values, sector names, ID formats, severity bands, and what data this server currently holds |
-| `cisa_check_cve_status` | Check up to 200 CVE IDs against the KEV catalog in one call — remediation deadlines, overdue status, ransomware and forensic-triage flags, and the directive each entry cites |
-| `cisa_search_kev` | Search the KEV catalog by vendor, product, CWE, date added, due date, overdue status, ransomware linkage, forensic-triage tier, or directive |
-| `cisa_get_ssvc` | Fetch the SSVC decision points CISA publishes per CVE and compute the BOD 26-04 remediation timeline they imply for a stated asset exposure |
-| `cisa_search_ics_advisories` | Search the ICS advisory corpus by vendor, product, CVE, CWE, KEV membership, CVSS range, severity, sector, series, or free text over titles and product names |
-| `cisa_get_advisory` | Read one ICS advisory in full — affected products with version ranges, per-CVE CVSS and CWE, remediations, sectors, and revision history — or just the vulnerability entries for the CVEs you name |
-| `cisa_get_alerts` | List what CISA has published recently from its advisory, alert, or ICS advisory feed |
+| `cisa_list_reference` | Decode the input vocabulary (BOD 26-04 timelines, KEV fields, SSVC values, sectors, ID formats, severity bands) and report what data the server holds |
+| `cisa_check_cve_status` | Check up to 200 CVE IDs against KEV in one call: deadlines, overdue status, ransomware and forensic-triage flags, cited directive |
+| `cisa_search_kev` | Search KEV by vendor, product, CWE, date added, due date, overdue status, ransomware linkage, forensic-triage tier, or directive |
+| `cisa_get_ssvc` | Fetch CISA's published SSVC decision points per CVE and compute the BOD 26-04 timeline for a stated asset exposure |
+| `cisa_search_ics_advisories` | Search ICS advisories by vendor, product, CVE, CWE, KEV membership, CVSS, severity, sector, series, dates, or free text |
+| `cisa_get_advisory` | Read one ICS advisory: affected product versions, per-CVE CVSS and CWE, remediations, sectors, revision history |
+| `cisa_get_alerts` | List CISA's latest items from its advisory, alert, or ICS advisory feed |
 
 ### Resources
 
@@ -56,92 +56,69 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 ### `cisa_list_reference` <sub>tool</sub>
 
-- One required `topic`: `directives`, `kev_fields`, `ssvc_values`, `sectors`, `advisory_id_formats`, `severity_bands`, or `sources`
-- `directives` returns all sixteen rows of BOD 26-04 Appendix A, Table 1 as data — row number, the four decision points, the timeline label in the directive's own wording, `remediationTimelineDays`, and `forensicTriageRequired` — plus the directive's supporting definitions and what it supersedes
-- `sources` reports what this server currently holds: the KEV snapshot's `catalogVersion` and last check, the advisory index's readiness, document count and sync status, the SSVC cache TTL, and the cached feed windows
-- Reads in-process state only and makes no network call, so it stays answerable while another tool is failing — which is why every recovery hint on this surface routes here
+- One required `topic`: `directives`, `kev_fields`, `ssvc_values`, `sectors`, `advisory_id_formats`, `severity_bands`, or `sources`; reads in-process state only, so it answers while other tools are failing
+- `directives` adds `timelineTable` (all 16 rows of BOD 26-04 Table 1, with `remediationTimelineDays` and `forensicTriageRequired`), `definitions`, and `supersedes`; `sources` reports the KEV `catalogVersion`, the advisory index's `ready` / `documentCount` / `syncStatus`, the SSVC cache TTL, and the cached feed windows
 
 ---
 
 ### `cisa_check_cve_status` <sub>tool</sub>
 
-- Up to 200 CVE IDs per call, answered from the cached catalog snapshot at zero upstream cost
-- Per CVE: `inKev`, and when present `dateAdded`, `dueDate`, `daysUntilDue`, `overdue`, `requiredAction`, `knownRansomwareCampaignUse`, `forensicTriage`, CISA's `vendorProject` / `product` labels, `cwes[]`, and `references[]` typed by `kind` (`nvd`, `cisa`, `bod_guidance`, `forensic_triage`, `vendor`, `other`)
-- `directive` is three-state — `BOD 26-04`, `BOD 22-01`, or `null` for the entries citing neither; it is never inferred from an entry's age
-- A CVE that is not in KEV is a normal result, not an error
-- Echoes the catalog snapshot that answered the call and the `asOf` date `overdue` and `daysUntilDue` were computed against
-- For the reverse direction — which ICS advisories cover a CVE — use `cisa_search_ics_advisories` with `cve`, or `inKev` for every advisory covering a KEV CVE
+- Up to 200 `cveIds` per call, answered from the cached KEV snapshot with no upstream request; a CVE outside KEV comes back `inKev: false`, not as an error
+- Per CVE: `dateAdded`, `dueDate`, `daysUntilDue`, `overdue`, `requiredAction`, `knownRansomwareCampaignUse`, `forensicTriage`, `cwes[]`, every URL in the entry's notes as `references[]` typed by `kind`, and a three-state `directive` (`BOD 26-04`, `BOD 22-01`, or `null`); the response echoes the `catalog` snapshot and the `asOf` date the deadlines were computed against
+- `detail: "summary"` trims each in-KEV record to the triage fields (dates, deadline status, directive, vendor and product labels, ransomware and forensic-triage flags), which keeps a full 200-CVE batch compact; `full` is the default
 
 ---
 
 ### `cisa_search_kev` <sub>tool</sub>
 
-- Filters AND together and apply to the whole snapshot, never a page: `vendorProject`, `product`, `nameContains`, `cwe`, `cveIdPrefix`, `dateAddedFrom` / `dateAddedTo`, `dueBefore` / `dueAfter`, `overdue`, `ransomware`, `forensicTriage`, and `directive` (`BOD 26-04` / `BOD 22-01` / `none`)
-- Sort by `dueDate` or `dateAdded`; up to 100 per page (default 25) with an opaque cursor, and `totalCount` reports matches before paging
-- `vendorProject` and `product` are CISA's own free-text labels, not CPE names — `cisa_list_reference` with topic `kev_fields` carries the value domain
-- Setting `dateAddedFrom` adds a caveat: the feed carries no per-record modified timestamp, so the result covers additions in the window, not revisions to existing entries
-- Typed errors: `catalog_unavailable` (retryable), `invalid_date_range`
+- Filters AND together over the whole snapshot: `vendorProject` and `product` (CISA's own labels, not CPE names), `nameContains`, `cwe`, `cveIdPrefix`, `dateAddedFrom` / `dateAddedTo`, `dueBefore` / `dueAfter`, `overdue`, `ransomware`, `forensicTriage`, `directive` (`BOD 26-04` / `BOD 22-01` / `none`); up to 100 per page (default 25) with an opaque `cursor`. `cwe` and `cveIdPrefix` normalize case and surrounding whitespace
+- Sorts by `dateAdded` (default) or `dueDate` and reports `totalCount` and `appliedFilters`; a zero-hit result names the filter that matches nothing on its own and what dropping it restores, or the filters whose removal restores results and how many
+- `nameContains` matches the letters a-z and the digits 0-9 after folding case and accents; any other letter or digit, such as a word in another script, is dropped, and the notice names it and the tokens actually searched
+- Typed errors: `catalog_unavailable` (retryable), `invalid_date_range`, `empty_search_text`
 
 ---
 
 ### `cisa_get_ssvc` <sub>tool</sub>
 
-- Up to 50 CVE IDs per call — lower than the KEV cap because each CVE needs its own live enrichment lookup rather than a cached batch check
-- Returns CISA's published `exploitation`, `automatable`, and `technicalImpact`, plus the CVSS score and CWEs CISA contributes where present
-- `assetExposure` (`publicly_exposed` / `not_publicly_exposed` / `unknown`) is the one BOD 26-04 decision point CISA cannot publish; `unknown` returns both arms rather than a guess
-- `bod2604.timelines[]` carries the Table 1 row, the label, `remediationTimelineDays` (`null` for the "Fix on system upgrade" rows), and `forensicTriageRequired`, under a fixed caveat that this is CISA's decision table applied to CISA's decision points and your stated exposure — not a compliance determination
-- `kevAssigned` reports CISA's own due date side by side, and `assignmentAgrees` surfaces a disagreement as a fact; the two are never reconciled
-- A CVE with no published enrichment returns `found: false` with guidance naming the outcome, not an error
+- Up to 50 `cveIds` per call, each a live Vulnrichment lookup, plus `assetExposure`: `publicly_exposed`, `not_publicly_exposed`, or `unknown` (default, returns both arms)
+- Per CVE: `found`, `exploitation`, `automatable`, `technicalImpact`, `cvss` and `cwes` where CISA published them, and `bod2604.timelines[]` (`tableRow`, `remediationTimelineDays`, `forensicTriageRequired`); a KEV entry adds `kevAssigned`, plus `assignmentAgrees` when an exposure was stated
+- A CVE with no enrichment is `found: false` with `guidance`; `enrichment_source_unavailable` (retryable) fires only when every fetch fails
 
 ---
 
 ### `cisa_search_ics_advisories` <sub>tool</sub>
 
-- Full-text `q` over advisory titles, vendor names, and product names — tokens are AND-combined, FTS5 operators in the input are neutralized rather than honored, and a `q` with no word or number in it is an error rather than a match-everything
-- Filters: `vendor` and `product` (case-insensitive substrings, `%` and `_` matched literally), `cve`, `cwe` (exact, against every vulnerability entry), `inKev` (`true` = covers at least one CVE in the KEV catalog, `false` = covers none), `cvssMin` / `cvssMax`, `severity` (`NONE`–`CRITICAL`), `sector` (the sixteen canonical names plus the `Multiple` sentinel), `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` = CISA-authored, `other` = republished vendor advisory), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`
-- Sort by `revised` (default), `published`, `maxCvss`, or `relevance` (requires `q`); up to 50 per page (default 20) with an opaque cursor
-- Coverage notices fire on the filters that have gaps: sector notes begin in 2017, and some advisories score only in CVSS v2 where the band is derived rather than published
-- Results carry `advisoryId` for `cisa_get_advisory`, the first twenty CVEs, `kevCves` — every CVE the advisory covers that is in KEV, from its full CVE list — the cisa.gov `url`, the raw `csafUrl`, and an `attribution` string
-- KEV membership is best-effort unless you ask for it: without `inKev`, a KEV catalog that has not loaded leaves `kevCves` out and says so rather than failing the search; with `inKev`, the search waits for the catalog and echoes the KEV `catalogVersion` it used as `kevCatalogVersion` in `appliedFilters`
-- Typed errors: `mirror_not_ready` (retryable), `catalog_unavailable` (retryable, `inKev` only), `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
+- Full-text `q` over titles, vendor names, and product names, plus `vendor`, `product`, `cve`, `cwe`, `inKev`, `cvssMin` / `cvssMax`, `severity`, `sector`, `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` / `other`), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`; sorts by `revised` (default), `published`, `maxCvss`, or `relevance` (needs `q`); up to 50 per page (default 20) with an opaque `cursor`. `cve` and `cwe` normalize case and surrounding whitespace
+- Results carry `advisoryId`, up to 20 `cves` with `cveCount`, `kevCves`, `maxCvss` with `severityDerived`, `sectors`, `url`, `csafUrl`, and `attribution`; without `inKev`, an unloaded KEV snapshot leaves `kevCves` out and says so rather than failing
+- Typed errors: `mirror_not_ready` and `catalog_unavailable` (retryable), `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
 
 ---
 
 ### `cisa_get_advisory` <sub>tool</sub>
 
-- `advisoryId` is case-insensitive and accepts both real suffix forms (a single letter `a`–`f`, or a numeric `-N`); a trailing `.json` is stripped
-- Seven addressable sections: `advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`
-- A document over the 24 KB inline budget returns a complete section outline with per-section sizes, plus the CVE IDs the `vulnerabilities` section holds, instead of the whole record — re-call with `sections` to pull what you need; the re-call is stateless
-- `cves` narrows the `vulnerabilities` section to the named entries — one CVE out of the 352 in the largest section is a few kilobytes instead of 905 KB. Alone it selects that section; with `sections`, the list must include `vulnerabilities`
-- The `products` arm carries every flattened version row — all 585 for the largest advisory — so `sections: ["products"]` always returns the whole list
-- Products keep their CSAF product IDs, so a CVE maps to the exact affected version ranges
-- Typed errors: `mirror_not_ready` (retryable), `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`. An ID that is not in the index returns `found: false` with guidance
+- `advisoryId` (optional revision suffix; case, surrounding whitespace, and a trailing `.json` are normalized, and every ID comes back in its uppercase form), optional `sections` (`advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`), and optional `cves` to narrow `vulnerabilities` to named entries
+- Returns `kind: "full"`, or `kind: "outline"` when a document read without `sections` exceeds the 24,000-byte budget: per-section byte sizes plus the CVE IDs in `vulnerabilities`, for a stateless re-call
+- An ID not in the index returns `found: false` with `guidance`; typed errors `mirror_not_ready` (retryable), `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`
 
 ---
 
 ### `cisa_get_alerts` <sub>tool</sub>
 
-- `feed` selects `advisories`, `alerts`, or `ics`; `limit` tops out at 30 because that is the upstream window, not a server choice
-- `since` filters within the fetched window and cannot reach back beyond it
-- Every response carries `window` (`itemCount`, `oldest`, `newest`, `upstreamWindowSize`) and a caveat that the feed has no history, no pagination, and no server-side date filter
-- `summary` is the item description with HTML stripped and entities decoded, capped at 1,200 characters with `summaryTruncated` flagging the cut
-- ICS items carry a parsed `advisoryId` that chains straight into `cisa_get_advisory`
-- Typed error: `feed_unavailable` (retryable)
+- `feed`: `advisories` (default), `alerts`, or `ics`; `limit` up to 30, the upstream window size; `since` (`YYYY-MM-DD`) filters within that window and cannot reach past it
+- Items carry `title`, `link`, `pubDate`, `summary` (HTML stripped, capped at 1,200 characters, flagged by `summaryTruncated`), and on ICS items an `advisoryId` for `cisa_get_advisory`; `window` reports `itemCount`, `oldest`, `newest`, and `upstreamWindowSize`. Typed error: `feed_unavailable` (retryable)
 
 ---
 
 ### `cisa://kev/{cveId}` <sub>resource</sub>
 
-- One KEV record as `application/json`, identical in shape to a `cisa_check_cve_status` result
+- One KEV record as `application/json`, the same shape as a `cisa_check_cve_status` result under the default `detail: "full"`; a CVE not in KEV is a not-found error
 - Listing returns the 30 most recently added entries; `cveId` completes from the snapshot, up to 100 suggestions
-- A CVE absent from the catalog is a not-found error, with the reminder that absence is not a statement about severity
 
 ---
 
 ### `cisa://advisory/{advisoryId}` <sub>resource</sub>
 
-- One flattened advisory as `application/json`, carrying the same 24 KB outline-on-overflow treatment `cisa_get_advisory` applies on a call with no `sections`
-- A resource template has no `sections` or `cves` parameter, so follow an outline up with `cisa_get_advisory` to request named sections or vulnerability entries — the outline lists the CVE IDs to choose from
+- One flattened advisory as `application/json`, with the same 24,000-byte outline-on-overflow as `cisa_get_advisory`; the template takes no `sections` or `cves`, so follow an outline up with the tool
 - Listing returns the 30 most recently revised advisories; `advisoryId` completes from the index, up to 100 suggestions
 
 ## Features
@@ -150,17 +127,16 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 CISA-specific:
 
-- No API key, no account, no registration — every source is a free, public, machine-readable file
-- No upstream source offers search, so every filter, sort, and full-text query runs locally: the KEV catalog as an in-memory snapshot kept current by a conditional-GET poll, the ICS corpus as a SQLite index with FTS5
-- Boot never waits on the advisory corpus — the KEV, SSVC, and alert tools serve from the first request while the index seeds in the background
-- The BOD 26-04 decision table is carried as data, so a timeline is a table lookup over published decision points rather than a judgment call
+- Four public sources, no account or key: the KEV JSON feed, Vulnrichment, the CSAF ICS advisory repository, and CISA's RSS feeds
+- None of them offers search, so every filter runs locally: KEV as an in-memory snapshot kept current by a conditional-GET poll, ICS advisories as a SQLite index with FTS5
+- Boot never waits on the advisory index; the KEV, SSVC, and alert tools serve from the first request while it seeds in the background
+- BOD 26-04 Table 1 ships as data, so a computed timeline is a table lookup over published decision points. It is not a compliance determination, and it is reported beside CISA's assigned KEV due date, never reconciled with it
 
 Agent-friendly output:
 
-- Provenance on every response — the catalog version and `asOf` date that answered a KEV call, the index checkpoint behind a search, and a source URL plus attribution on every advisory
-- Discriminated output contracts — a three-state `directive`, typed `references[].kind`, `found` / `inKev` booleans, `severityDerived` on a band the upstream never published, and per-tool typed error reasons with recovery hints
-- Zero-hit results explain themselves — each one names the filter most likely responsible and the concrete next call, rather than returning a bare empty list
-- Coverage gaps are disclosed where they bite: how many advisories a sector filter can never reach, that KEV revisions are undetectable, and that a computed timeline is not CISA's own due-date assignment
+- Provenance on every response: the KEV `catalog` version and `asOf` date, the index checkpoint behind a search, and `url`, `csafUrl`, and `attribution` on every advisory
+- Discriminated outputs: a three-state `directive`, typed `references[].kind`, `found` / `inKev` booleans, `severityDerived` on a band upstream never published, and typed error reasons with recovery hints
+- Empty results and upstream gaps explain themselves: a zero-hit search names the filter responsible and the next call, and filters that hit a known gap (sector notes only from 2017, CVSS v2-only advisories, no KEV revision timestamps) say so in the response. The full list is under [Known Limitations](./docs/design.md#known-limitations) in the design doc
 
 ## Getting started
 
@@ -268,50 +244,27 @@ cd cisa-cybersecurity-mcp-server
 bun install
 ```
 
-## ICS advisory index
-
-`cisa_search_ics_advisories` and `cisa_get_advisory` read a local SQLite index of the CSAF advisory corpus. CISA offers no search endpoint for it, and the corpus exists only as thousands of individual documents, so the index is what makes the two tools possible.
-
-It seeds itself. On first run the server fetches one repository archive in the background and builds the index in about ten seconds, leaving roughly 55 MB at `CISA_CSAF_MIRROR_PATH` (`.mirror/csaf.sqlite3` by default). Nothing else waits on it: the KEV, SSVC, and alert tools serve from the first request, and until the index is ready the two ICS tools report that state through a retryable `mirror_not_ready` error rather than an empty result. `cisa_list_reference` with topic `sources` reports the progress.
-
-An index built by an older server version rebuilds itself the same way: on the next start the server re-ingests the archive in the background, over the existing index, which keeps answering queries from its current rows until the rebuild finishes. No manual step is needed; `mirror:verify` reports when an index is due for one.
-
-Under HTTP transport the index refreshes itself on a cron. Three scripts cover explicit control — a stdio deployment, a container, a CI gate:
-
-```sh
-bun run mirror:init      # full build, idempotent, safe to re-run after an interrupt
-bun run mirror:refresh   # incremental — fetches only the documents whose revision date moved
-bun run mirror:verify    # readiness, sync status, checkpoint, count, content version, SQLite integrity; exits non-zero on failure
-```
-
-Set `CISA_CSAF_MIRROR_AUTO_INIT=false` where seeding runs out of band.
-
-**Docker:** mount a volume over `CISA_CSAF_MIRROR_PATH` so a container recreation does not rebuild the index, then run the scripts with `docker exec <container> bun run mirror:refresh`. The image ships them for exactly that.
-
-**Claude Desktop (`.mcpb`):** the bundle has no shell, so the automatic background seed is the whole story — install it and the ICS tools come online shortly after the first launch.
-
 ## Configuration
 
 Every variable is optional; the server runs correctly with none of them set.
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `CISA_KEV_REFRESH_CRON` | Cron for the KEV conditional-refresh poll. HTTP transport only; empty disables the in-process schedule. | `*/30 * * * *` |
+| `CISA_KEV_REFRESH_CRON` | Cron for the KEV conditional-refresh poll. HTTP transport only; empty disables it. | `*/30 * * * *` |
 | `CISA_CSAF_MIRROR_PATH` | Filesystem path to the ICS advisory SQLite index. | `.mirror/csaf.sqlite3` |
-| `CISA_CSAF_MIRROR_AUTO_INIT` | Seed the advisory index in the background at startup when it has never synced, and re-ingest it when an older server version built it. | `true` |
+| `CISA_CSAF_MIRROR_AUTO_INIT` | Seed the index in the background when it has never synced, and re-ingest one an older version built. | `true` |
 | `CISA_CSAF_REFRESH_CRON` | Cron for the incremental advisory refresh. HTTP transport only; empty disables it. | `17 */6 * * *` |
-| `CISA_VULNRICHMENT_CACHE_TTL_SECONDS` | TTL for a cached SSVC record. Negative results use one sixth of this. | `21600` |
+| `CISA_VULNRICHMENT_CACHE_TTL_SECONDS` | TTL for a cached SSVC record; negative results use one sixth of it. | `21600` |
 | `CISA_FEED_CACHE_TTL_SECONDS` | TTL for a parsed RSS feed window. | `900` |
-| `CISA_HTTP_TIMEOUT_MS` | Per-request timeout for every upstream fetch, in milliseconds. | `30000` |
+| `CISA_HTTP_TIMEOUT_MS` | Per-request timeout for every upstream fetch, in ms. | `30000` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
-| `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
-| `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path where the server is mounted. | `/mcp` |
-| `MCP_SESSION_MODE` | HTTP session mode. This server ships `stateless` — no handler collects input mid-request. | `stateless` |
-| `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
-| `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
+| `MCP_HTTP_PORT` | HTTP server port. | `3010` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
+| `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
+| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
-| `STORAGE_PROVIDER_TYPE` | Storage backend. | `in-memory` |
-| `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
+| `STORAGE_PROVIDER_TYPE` | Storage backend for the SSVC cache: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1`. | `in-memory` |
+| `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
@@ -339,6 +292,18 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
   bun run lint:mcp   # Validate MCP definitions against spec
   ```
 
+### ICS advisory index
+
+The two ICS tools and the advisory resource read a local SQLite index of the CSAF corpus at `CISA_CSAF_MIRROR_PATH`. On first run the server builds it in the background from one repository archive; until it is ready those surfaces return a retryable `mirror_not_ready`, and `cisa_list_reference` with topic `sources` shows progress. An index built by an older version re-ingests on the next start and keeps serving its current rows meanwhile. The `.mcpb` bundle needs nothing beyond that background seed.
+
+HTTP deployments refresh the index on `CISA_CSAF_REFRESH_CRON`. For stdio, containers, CI, or seeding out of band (`CISA_CSAF_MIRROR_AUTO_INIT=false`), run the scripts directly:
+
+```sh
+bun run mirror:init      # full build, idempotent, safe to re-run after an interrupt
+bun run mirror:refresh   # incremental: fetches only documents whose revision date moved
+bun run mirror:verify    # readiness, sync status, checkpoint, count, content version, SQLite integrity; non-zero on failure
+```
+
 ### Docker
 
 ```sh
@@ -346,56 +311,28 @@ docker build -t cisa-cybersecurity-mcp-server .
 docker run --rm -p 3010:3010 -v cisa-mirror:/usr/src/app/.mirror cisa-cybersecurity-mcp-server
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/cisa-cybersecurity-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them. Mount a volume over `/usr/src/app/.mirror` so the advisory index survives a container recreation.
-
-There is no Cloudflare Workers deployment: the advisory index needs embedded SQLite and a persistent filesystem, and an isolate has neither.
-
-## Data sources and licensing
-
-| Source | What it provides | Status |
-|:---|:---|:---|
-| KEV catalog | Exploited-in-the-wild CVEs with federal remediation deadlines | US Government work, public domain under 17 U.S.C. §105 |
-| Vulnrichment | SSVC decision points, CVSS, and CWE CISA publishes per CVE | CC0-1.0 |
-| CSAF ICS advisories | The machine-readable advisory corpus back to 2010 | No declared license — see below |
-| Advisory and alert feeds | CISA's current publication windows | Relayed with a link to each item |
-
-The CSAF repository declares no license, and a substantial share of its advisories are vendor advisories CISA republished with the vendor's own text and revision history. This server therefore makes no public-domain claim over advisory content: every advisory a tool or resource returns carries its cisa.gov `url`, its raw `csafUrl`, and an `attribution` string naming the publisher and, for a republication, the originating vendor. Resolve reuse rights against the source before redistributing advisory text.
-
-This project is not affiliated with, endorsed by, or sponsored by CISA or the Department of Homeland Security. It uses no DHS seal, no CISA logo, and no agency branding.
-
-## Known limitations
-
-These are properties of the upstream sources, not of this server. Each is stated in the description or output of the tool it affects.
-
-- **KEV modifications are invisible.** The feed carries `dateAdded` but no per-record modified timestamp, so a revised `dueDate` or `requiredAction` on an existing entry cannot be distinguished from an unchanged one. Additions are queryable; revisions are not.
-- **Most KEV entries cite no directive.** The majority name neither BOD 22-01 nor BOD 26-04, and `directive` is `null` for them rather than inferred from an entry's age.
-- **A computed BOD 26-04 timeline is not a compliance determination.** It is CISA's published decision table applied to CISA's published decision points and the asset exposure the caller supplies. It also does not reproduce CISA's assigned KEV due date, which reflects values and judgment at the time of addition; the two are reported side by side and never reconciled.
-- **SSVC coverage is incomplete and can lag.** Not every CVE has a Vulnrichment record, KEV entries included, and a published `Exploitation` value can predate a KEV addition that contradicts it.
-- **Advisory sector coverage begins in 2017.** Hundreds of advisories carry no sector note at all, so a sector filter cannot reach them. The gap is disclosed on every filtered call.
-- **The advisory corpus carries no structured CVSS v4.** Some advisories score only in CVSS v2, where the upstream publishes no severity label and the band is derived and flagged as such.
-- **Advisory vendor names are unnormalized.** The same company appears under several spellings across the corpus, so vendor filtering is substring matching rather than an enum.
-- **The publication feeds have no history.** Thirty items per feed, no pagination, and no date query; anything older is unreachable from the feed. ICS advisory history lives in the local index instead.
+The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/cisa-cybersecurity-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them. Mount a volume over `/usr/src/app/.mirror` so the advisory index survives a container recreation; the image ships the `mirror:*` scripts for `docker exec <container> bun run mirror:refresh`.
 
 ## Project structure
 
 | Directory | Purpose |
 |:---|:---|
-| `src/index.ts` | `createApp()` entry point — wires the four services, schedules the refresh loops, registers the surface. |
+| `src/index.ts` | `createApp()` entry point: wires the four services, schedules the refresh jobs, registers the surface. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Seven tools across KEV, SSVC, ICS advisories, and the feeds. |
-| `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). KEV entry and ICS advisory templates. |
-| `src/mcp-server/schemas` | Shared output schemas and `format()` renderers for KEV records and advisories. |
-| `src/reference` | Static reference data — BOD 26-04 Table 1, canonical sector names, CVSS bands. |
-| `src/services/kev-catalog` | KEV JSON feed — snapshot, derived indexes, conditional refresh. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). |
+| `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). |
+| `src/mcp-server/schemas` | Output schemas and renderers shared by the KEV and advisory tools and resources. |
+| `src/reference` | Static reference data: BOD 26-04 Table 1, canonical sector names, CVSS bands. |
+| `src/services/kev-catalog` | KEV JSON feed: snapshot, derived indexes, conditional refresh. |
 | `src/services/vulnrichment` | Per-CVE SSVC enrichment fetch with a TTL cache. |
-| `src/services/csaf-mirror` | The ICS advisory index — schema, ingest, normalization, queries. |
+| `src/services/csaf-mirror` | The ICS advisory index: schema, ingest, normalization, queries. |
 | `src/services/cisa-feeds` | The three RSS feeds, parsed and cached on a TTL. |
-| `scripts/` | Build, checks, and the three `mirror:*` lifecycle commands. |
+| `scripts/` | Build, checks, and the `mirror:*` commands. |
 | `tests/` | Unit, integration, fuzz, and smoke tests mirroring `src/`. |
 
 ## Development guide
 
-See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and architectural rules. The short version:
+See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and architectural rules, and [`docs/design.md`](./docs/design.md) for the as-built specification. The short version:
 
 - Handlers throw, framework catches — no `try/catch` in tool logic
 - Use `ctx.log` for request-scoped logging, `ctx.state` for tenant-scoped storage
@@ -414,3 +351,5 @@ bun run test
 ## License
 
 Apache-2.0 — see [LICENSE](./LICENSE) for details.
+
+The license covers this code, not the data it serves. KEV entries are US Government work in the public domain and Vulnrichment is CC0-1.0, but the CSAF repository declares no license and many advisories republish vendor text, so check reuse rights at each advisory's `url` before redistributing it. This project is not affiliated with or endorsed by CISA or the Department of Homeland Security.
