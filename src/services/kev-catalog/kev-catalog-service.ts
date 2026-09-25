@@ -77,21 +77,64 @@ export interface KevCatalogOptions {
   timeoutMs: number;
 }
 
-/** Normalize a string for token matching: lowercase, strip punctuation. */
-function normalizeText(value: string): string {
+/**
+ * The lowercase letters of Latin-1 Supplement and Latin Extended-A that NFKD
+ * does not decompose to a-z, spelled as CLDR's Latin-ASCII transform spells them
+ * — except `ŉ`, which CLDR writes `'n` and which becomes `n` here, since the
+ * apostrophe would split the word. Without this table each of them became a
+ * separator and split its word into fragments that match as substrings:
+ * `Straße` searched `stra e`.
+ */
+const LATIN_ASCII: Readonly<Record<string, string>> = {
+  ß: 'ss',
+  æ: 'ae',
+  ð: 'd',
+  ø: 'o',
+  þ: 'th',
+  đ: 'd',
+  ħ: 'h',
+  ı: 'i',
+  ĸ: 'q',
+  ł: 'l',
+  ŀ: 'l',
+  ŉ: 'n',
+  ŋ: 'n',
+  œ: 'oe',
+  ŧ: 't',
+};
+
+const LATIN_ASCII_LETTER = new RegExp(`[${Object.keys(LATIN_ASCII).join('')}]`, 'g');
+
+/**
+ * Fold case, the {@link LATIN_ASCII} letters, and accents — everything the match
+ * does before discarding what is left outside a-z and 0-9. The table runs before
+ * NFKD, which would otherwise split `ŀ` and `ŉ` around a separator; capitals,
+ * `ẞ` included, reach it lowercased.
+ */
+function foldText(value: string): string {
   return value
     .toLowerCase()
+    .replace(LATIN_ASCII_LETTER, (letter) => LATIN_ASCII[letter] ?? letter)
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/[^a-z0-9\s]/g, ' ');
+    .replace(/[̀-ͯ]/g, '');
+}
+
+/**
+ * Normalize a string for token matching: {@link foldText}, then every character
+ * outside a-z, 0-9, and whitespace becomes a separator. Query and record text
+ * both pass through it, so matching stays symmetric.
+ */
+export function normalizeText(value: string): string {
+  return foldText(value).replace(/[^a-z0-9\s]/g, ' ');
 }
 
 /** A `nameContains` query as matching reads it. */
 export interface NameQuery {
   /**
    * The caller's whitespace-separated words that carry a letter or digit the
-   * normalization folds away — a word in another script, `ß`, digits outside
-   * 0-9. Record text is folded the same way, so those characters can never match.
+   * normalization folds away — a word in another script, a Latin letter outside
+   * the {@link LATIN_ASCII} table such as `ƒ`, digits outside 0-9. Record text is
+   * folded the same way, so those characters can never match.
    */
   dropped: string[];
   /** The tokens every matching record must contain. */
@@ -126,7 +169,7 @@ export function queryTokens(query: string): NameQuery {
   const tokens = normalizeText(query).split(/\s+/).filter(Boolean);
   if (tokens.length === 0) {
     throw validationError(
-      'nameContains holds no searchable token — matching folds case and accents and keeps only the letters a-z and the digits 0-9, and none remain.',
+      'nameContains holds no searchable token — matching folds case and accents, spells letters such as ß and ø as ss and o, and keeps only the letters a-z and the digits 0-9, and none remain.',
       {
         reason: 'empty_search_text',
         field: 'nameContains',
@@ -140,9 +183,7 @@ export function queryTokens(query: string): NameQuery {
     .trim()
     .split(/\s+/)
     .filter((word) =>
-      [...word.toLowerCase().normalize('NFKD')].some(
-        (char) => LETTER_OR_DIGIT.test(char) && !KEPT_CHARACTER.test(char),
-      ),
+      [...foldText(word)].some((char) => LETTER_OR_DIGIT.test(char) && !KEPT_CHARACTER.test(char)),
     );
   return { tokens, dropped };
 }

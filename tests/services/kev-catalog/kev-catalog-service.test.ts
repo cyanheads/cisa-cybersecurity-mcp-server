@@ -13,11 +13,13 @@ import {
   getKevCatalog,
   initKevCatalog,
   KEV_FEED_URL,
+  normalizeText,
   queryTokens,
   resetKevCatalog,
 } from '@/services/kev-catalog/kev-catalog-service.js';
 import type { KevSnapshot } from '@/services/kev-catalog/types.js';
 import { buildKevFeedBody } from '../../fixtures/kev-feed.js';
+import { bestMsBySize } from '../../helpers/linear-time.js';
 
 const FIXED_NOW = () => new Date('2026-09-10T00:00:00Z');
 
@@ -405,7 +407,17 @@ describe('KevCatalogService', () => {
       ['a word in another script', '漏洞 siemens', ['siemens'], ['漏洞']],
       ['two dropped words', 'ΑΘΗΝΑ acme 漏洞', ['acme'], ['ΑΘΗΝΑ', '漏洞']],
       ['a script run fused to a Latin word', '漏洞siemens', ['siemens'], ['漏洞siemens']],
-      ['a letter with no Latin fold', 'straße', ['stra', 'e'], ['straße']],
+      ['a letter NFKD cannot fold, spelled the Latin-ASCII way', 'Straße', ['strasse'], []],
+      ['two of them in one word', 'Ærø', ['aero'], []],
+      ['one leading a word', 'Øre', ['ore'], []],
+      [
+        'every lowercase letter in the table',
+        'ß æ ð ø þ đ ħ ı ĸ ł ŀ ŉ ŋ œ ŧ',
+        ['ss', 'ae', 'd', 'o', 'th', 'd', 'h', 'i', 'q', 'l', 'l', 'n', 'n', 'oe', 't'],
+        [],
+      ],
+      ['their capitals, and the capital sharp s', 'ÆÐØÞĐĦŁĿŊŒŦẞ', ['aedothdhllnoetss'], []],
+      ['a letter outside the table, still dropped', 'ƒoo widget', ['oo', 'widget'], ['ƒoo']],
       ['digits outside 0-9', 'acme ١٢٣', ['acme'], ['١٢٣']],
       ['accents, which fold', 'Café crème', ['cafe', 'creme'], []],
       ['punctuation, which is not a letter or digit', 'log4j—exploit --', ['log4j', 'exploit'], []],
@@ -413,6 +425,14 @@ describe('KevCatalogService', () => {
     ])('%s: %j searches %j and reports %j dropped', (_label, query, tokens, dropped) => {
       expect(queryTokens(query)).toEqual({ tokens, dropped });
     });
+
+    it('folds in linear time on its worst case, every character from the table', () => {
+      /* queryTokens caps a query at 512 characters; record text reaches the same fold uncapped. */
+      const times = bestMsBySize(normalizeText, (length) => 'ßŀŉæ'.repeat(length / 4));
+      /* 16x the input: linear growth is ~16x, quadratic ~256x. */
+      expect(times[80_000] / times[5_000]).toBeLessThan(64);
+      expect(times[80_000]).toBeLessThan(200);
+    }, 60_000);
 
     it('still throws empty_search_text when every word is dropped', () => {
       expect(() => queryTokens('漏洞 ΑΘΗΝΑ')).toThrow(

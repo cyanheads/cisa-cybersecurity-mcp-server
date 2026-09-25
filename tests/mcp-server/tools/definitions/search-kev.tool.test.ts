@@ -469,12 +469,77 @@ describe('cisa_search_kev', () => {
     const DROPPED = (words: string, searched: string) =>
       `nameContains dropped the characters of ${words} outside the letters a-z and the digits 0-9 — matching folds case and accents and keeps only those, so the dropped characters can never match. Searched for: ${searched}.`;
 
-    it('names a Latin letter with no a-z fold (ß) without calling it outside the Latin alphabet', async () => {
+    it('names a Latin letter outside the fold table (ƒ) without calling it outside the Latin alphabet', async () => {
       await loadCatalog();
-      const structured = (await run({ nameContains: 'Straße widget' }))
+      const structured = (await run({ nameContains: 'ƒoo widget' }))
         .structuredContent as Structured;
-      expect(structured.notice).toContain(DROPPED('"Straße"', 'stra e widget'));
+      expect(structured.notice).toContain(DROPPED('"ƒoo"', 'oo widget'));
       expect(structured.notice).not.toContain('Latin');
+    });
+
+    describe('letters NFKD cannot fold, spelled the Latin-ASCII way on both sides', () => {
+      const STRASSE_RECORD = {
+        cveID: 'CVE-2026-00020',
+        vendorProject: 'Hafen',
+        product: 'Leitstand',
+        vulnerabilityName: 'Hafen Straße Leitstand Command Injection',
+        dateAdded: '2026-09-05',
+        shortDescription: 'The Straße gateway of the Leitstand passes input to a shell.',
+        requiredAction: 'Apply updates per vendor instructions.',
+        dueDate: '2026-09-19',
+        knownRansomwareCampaignUse: 'Unknown',
+        forensicTriage: 'No',
+        notes: 'https://nvd.nist.gov/vuln/detail/CVE-2026-00020',
+        cwes: ['CWE-78'],
+      };
+      const ADMINISTRATOR_RECORD = {
+        ...STRASSE_RECORD,
+        cveID: 'CVE-2026-00021',
+        vulnerabilityName: 'Hafen Leitstand Administrator Bypass',
+        shortDescription: 'An administrator interface is exposed before login.',
+        notes: 'https://nvd.nist.gov/vuln/detail/CVE-2026-00021',
+      };
+
+      it.each(['Straße', 'strasse', 'STRASSE', 'STRAẞE'])(
+        '%j matches the record that spells Straße, and only that one, with no notice',
+        async (nameContains) => {
+          await loadCatalog([STRASSE_RECORD, ADMINISTRATOR_RECORD]);
+          const result = await run({ nameContains });
+          const structured = result.structuredContent as Structured;
+          expect(structured.results.map((record) => record.cveId)).toEqual(['CVE-2026-00020']);
+          expect(structured.notice).toBeUndefined();
+          expect(contentText(result)).toContain('CVE-2026-00020');
+        },
+      );
+
+      it.each([
+        ['Ærø', 'aero'],
+        ['Øre', 'ore'],
+      ])('%j searches what %j searches, and names no dropped word', async (nameContains, ascii) => {
+        await loadCatalog([STRASSE_RECORD, ADMINISTRATOR_RECORD]);
+        const expected = (await run({ nameContains: ascii })).structuredContent as Structured;
+        const structured = (await run({ nameContains })).structuredContent as Structured;
+        expect(structured.results).toEqual(expected.results);
+        expect(structured.totalCount).toBe(expected.totalCount);
+        expect(structured.notice ?? '').not.toContain('dropped the characters');
+      });
+
+      it('Ærø no longer matches every entry through a lone r', async () => {
+        await loadCatalog([STRASSE_RECORD, ADMINISTRATOR_RECORD]);
+        const structured = (await run({ nameContains: 'Ærø' })).structuredContent as Structured;
+        expect(structured.totalCount).toBe(0);
+        expect(structured.notice).toBe(
+          'nameContains=Ærø matches no entry on its own — relax or drop it.',
+        );
+      });
+
+      it('a word in another script beside a folded word is still named as dropped', async () => {
+        await loadCatalog([STRASSE_RECORD]);
+        const structured = (await run({ nameContains: '漏洞 Straße' }))
+          .structuredContent as Structured;
+        expect(structured.results.map((record) => record.cveId)).toEqual(['CVE-2026-00020']);
+        expect(structured.notice).toBe(DROPPED('"漏洞"', 'strasse'));
+      });
     });
 
     it('searches the surviving token, returns what that token alone returns, and names what was dropped and searched on both surfaces', async () => {

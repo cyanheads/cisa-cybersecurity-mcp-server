@@ -48,7 +48,7 @@ export const searchKevTool = tool('cisa_search_kev', {
       .min(2)
       .optional()
       .describe(
-        'Strict token match over the vulnerability name and short description: every token must appear. Matching folds case and accents and keeps only the letters a-z and the digits 0-9; a word carrying any other letter or digit, such as one in another script, loses those characters and the response names it, and a value left with none of them is rejected. No fuzzy fallback.',
+        'Strict token match over the vulnerability name and short description: every token must appear. Matching folds case and accents, spells letters such as ß, æ, ø, þ, and ł as ss, ae, o, th, and l, and keeps only the letters a-z and the digits 0-9; a word carrying any other letter or digit, such as one in another script, loses those characters and the response names it, and a value left with none of them is rejected. No fuzzy fallback.',
       ),
     cwe: CweIdInputSchema.optional().describe(
       'Exact CWE identifier, e.g. CWE-362. Case and surrounding whitespace are normalized. Entries with no CWEs never match.',
@@ -190,7 +190,7 @@ export const searchKevTool = tool('cisa_search_kev', {
     {
       reason: 'empty_search_text',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'nameContains holds no letter a-z or digit 0-9 once case and accents are folded and punctuation is removed, so there is nothing to search for.',
+      when: 'nameContains holds no letter a-z or digit 0-9 once case, accents, and letters such as ß and ø are folded and punctuation is removed, so there is nothing to search for.',
       recovery:
         'Put at least one word or number in nameContains that uses the letters a-z, accented or not, or the digits 0-9, such as a product or vulnerability term, or omit nameContains to search by the other filters alone.',
       thrownBy: 'service',
