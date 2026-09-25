@@ -84,6 +84,268 @@ describe('parseKevNotes', () => {
     const parsed = parseKevNotes(';; https://nvd.nist.gov/vuln/detail/CVE-2025-1 ;;');
     expect(parsed.references).toHaveLength(1);
   });
+
+  /* Notes values below are verbatim from KEV catalog 2026.09.24. */
+  describe('URL shapes that already parse and must keep parsing', () => {
+    it('splits a `;` followed directly by a URL (CVE-2018-5430)', () => {
+      const parsed = parseKevNotes(
+        'https://www.tibco.com/support/advisories/2018/04/tibco-security-advisory-april-17-2018-tibco-jasperreports-2018-5430;https://nvd.nist.gov/vuln/detail/CVE-2018-5430',
+      );
+      expect(parsed.references.map((ref) => ref.url)).toEqual([
+        'https://www.tibco.com/support/advisories/2018/04/tibco-security-advisory-april-17-2018-tibco-jasperreports-2018-5430',
+        'https://nvd.nist.gov/vuln/detail/CVE-2018-5430',
+      ]);
+      expect(parsed.commentary).toBeUndefined();
+    });
+
+    it('keeps a balanced closing parenthesis that ends a URL (CVE-2020-15415)', () => {
+      const draytek =
+        'https://www.draytek.com/about/security-advisory/vigor3900-/-vigor2960-/-vigor300b-remote-code-injection/execution-vulnerability-(cve-2020-14472)';
+      const parsed = parseKevNotes(`${draytek} ; https://nvd.nist.gov/vuln/detail/CVE-2020-15415`);
+      expect(parsed.references.map((ref) => ref.url)).toEqual([
+        draytek,
+        'https://nvd.nist.gov/vuln/detail/CVE-2020-15415',
+      ]);
+    });
+
+    it('keeps commas inside a URL that are not followed by another URL (CVE-2009-3459)', () => {
+      const archived =
+        'https://web.archive.org/web/20120324170253/http://www.adobe.com/support/security/bulletins/apsb09-15.html#:~:text=CVE%2D2009%2D3459).-,NOTE%3A,-There%20are%20reports';
+      const parsed = parseKevNotes(
+        `https://www.cisa.gov/news-events/alerts/2009/10/13/adobe-reader-and-acrobat-vulnerabilities ; ${archived} ; https://nvd.nist.gov/vuln/detail/CVE-2009-3459`,
+      );
+      expect(parsed.references.map((ref) => ref.url)).toEqual([
+        'https://www.cisa.gov/news-events/alerts/2009/10/13/adobe-reader-and-acrobat-vulnerabilities',
+        archived,
+        'https://nvd.nist.gov/vuln/detail/CVE-2009-3459',
+      ]);
+      expect(parsed.references.map((ref) => ref.kind)).toEqual(['cisa', 'vendor', 'nvd']);
+    });
+
+    it('keeps the label of a `Label: URL` segment exactly', () => {
+      const parsed = parseKevNotes(
+        'CISA Mitigation Instructions: https://www.cisa.gov/cisa-mitigation-instructions-CVE-2025-0282 ; https://nvd.nist.gov/vuln/detail/CVE-2025-0282',
+      );
+      expect(parsed.references[0]).toEqual({
+        kind: 'cisa',
+        label: 'CISA Mitigation Instructions',
+        url: 'https://www.cisa.gov/cisa-mitigation-instructions-CVE-2025-0282',
+      });
+    });
+  });
+
+  describe('every URL in notes becomes a reference', () => {
+    const nvd = (cveId: string) => `https://nvd.nist.gov/vuln/detail/${cveId}`;
+
+    it('splits a comma run with a space after each comma, in notes order (CVE-2023-4966)', () => {
+      const parsed = parseKevNotes(
+        'https://www.netscaler.com/blog/news/cve-2023-4966-critical-security-update-now-available-for-netscaler-adc-and-netscaler-gateway/, https://support.citrix.com/article/CTX579459/netscaler-adc-and-netscaler-gateway-security-bulletin-for-cve20234966-and-cve20234967 ;  https://nvd.nist.gov/vuln/detail/CVE-2023-4966',
+      );
+      expect(parsed.references).toEqual([
+        {
+          kind: 'vendor',
+          url: 'https://www.netscaler.com/blog/news/cve-2023-4966-critical-security-update-now-available-for-netscaler-adc-and-netscaler-gateway/',
+        },
+        {
+          kind: 'vendor',
+          url: 'https://support.citrix.com/article/CTX579459/netscaler-adc-and-netscaler-gateway-security-bulletin-for-cve20234966-and-cve20234967',
+        },
+        { kind: 'nvd', url: nvd('CVE-2023-4966') },
+      ]);
+      expect(parsed.commentary).toBeUndefined();
+    });
+
+    it('splits a five-URL comma run (CVE-2024-44309)', () => {
+      const parsed = parseKevNotes(
+        'https://support.apple.com/en-us/121752, https://support.apple.com/en-us/121753, https://support.apple.com/en-us/121754, https://support.apple.com/en-us/121755, https://support.apple.com/en-us/121756 ; https://nvd.nist.gov/vuln/detail/CVE-2024-44309',
+      );
+      expect(parsed.references.map((ref) => ref.url)).toEqual([
+        'https://support.apple.com/en-us/121752',
+        'https://support.apple.com/en-us/121753',
+        'https://support.apple.com/en-us/121754',
+        'https://support.apple.com/en-us/121755',
+        'https://support.apple.com/en-us/121756',
+        nvd('CVE-2024-44309'),
+      ]);
+      expect(parsed.commentary).toBeUndefined();
+    });
+
+    it('splits a comma run with no space after the comma (CVE-2023-28205)', () => {
+      const parsed = parseKevNotes(
+        'https://support.apple.com/en-us/HT213720,https://support.apple.com/en-us/HT213721,https://support.apple.com/en-us/HT213722,https://support.apple.com/en-us/HT213723;  https://nvd.nist.gov/vuln/detail/CVE-2023-28205',
+      );
+      expect(parsed.references.map((ref) => ref.url)).toEqual([
+        'https://support.apple.com/en-us/HT213720',
+        'https://support.apple.com/en-us/HT213721',
+        'https://support.apple.com/en-us/HT213722',
+        'https://support.apple.com/en-us/HT213723',
+        nvd('CVE-2023-28205'),
+      ]);
+    });
+
+    it('splits a comma run that ends in a trailing comma (CVE-2023-23397)', () => {
+      const parsed = parseKevNotes(
+        'https://msrc.microsoft.com/update-guide/en-US/vulnerability/CVE-2023-23397, https://msrc.microsoft.com/blog/2023/03/microsoft-mitigates-outlook-elevation-of-privilege-vulnerability/, ;  https://nvd.nist.gov/vuln/detail/CVE-2023-23397',
+      );
+      expect(parsed.references.map((ref) => ref.url)).toEqual([
+        'https://msrc.microsoft.com/update-guide/en-US/vulnerability/CVE-2023-23397',
+        'https://msrc.microsoft.com/blog/2023/03/microsoft-mitigates-outlook-elevation-of-privilege-vulnerability/',
+        nvd('CVE-2023-23397'),
+      ]);
+      expect(parsed.commentary).toBeUndefined();
+    });
+
+    it('extracts URLs from prose, unbalanced `)` trimmed, prose kept verbatim (CVE-2021-26855)', () => {
+      const prose =
+        "Reference CISA's ED 21-02 (https://www.cisa.gov/news-events/directives/ed-21-02-mitigate-microsoft-exchange-premises-product-vulnerabilities) for further guidance and requirements. Note: The due date for addressing this vulnerability aligns with the requirements outlined in ED 21-02. https://nvd.nist.gov/vuln/detail/CVE-2021-26855";
+      const parsed = parseKevNotes(prose);
+      expect(parsed.references).toEqual([
+        {
+          kind: 'cisa',
+          url: 'https://www.cisa.gov/news-events/directives/ed-21-02-mitigate-microsoft-exchange-premises-product-vulnerabilities',
+        },
+        { kind: 'nvd', url: nvd('CVE-2021-26855') },
+      ]);
+      expect(parsed.commentary).toBe(prose);
+    });
+
+    it('extracts URLs joined by "and" inside prose (CVE-2024-4978)', () => {
+      const prose =
+        'Please follow the vendor’s instructions as outlined in the public statements at https://www.rapid7.com/blog/post/2024/05/23/cve-2024-4978-backdoored-justice-av-solutions-viewer-software-used-in-apparent-supply-chain-attack#remediation and https://www.javs.com/downloads';
+      const parsed = parseKevNotes(`${prose};  https://nvd.nist.gov/vuln/detail/CVE-2024-4978`);
+      expect(parsed.references.map((ref) => ref.url)).toEqual([
+        'https://www.rapid7.com/blog/post/2024/05/23/cve-2024-4978-backdoored-justice-av-solutions-viewer-software-used-in-apparent-supply-chain-attack#remediation',
+        'https://www.javs.com/downloads',
+        nvd('CVE-2024-4978'),
+      ]);
+      expect(parsed.commentary).toBe(prose);
+    });
+
+    it('extracts URLs followed by more prose, trailing `.` trimmed (CVE-2023-0669)', () => {
+      const prose =
+        'This CVE has a CISA AA located here: https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-158a. Please see the AA for associated IOCs. Additional information is available at: https://my.goanywhere.com/webclient/DownloadProductFiles.xhtml. Fortra users must have an account in order to login and access the patch.';
+      const parsed = parseKevNotes(`${prose};  https://nvd.nist.gov/vuln/detail/CVE-2023-0669`);
+      expect(parsed.references).toEqual([
+        {
+          kind: 'cisa',
+          url: 'https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-158a',
+        },
+        { kind: 'vendor', url: 'https://my.goanywhere.com/webclient/DownloadProductFiles.xhtml' },
+        { kind: 'nvd', url: nvd('CVE-2023-0669') },
+      ]);
+      expect(parsed.commentary).toBe(prose);
+    });
+
+    it('extracts a URL after "please see:" and a comma run inside the same prose segment', () => {
+      const parsed = parseKevNotes(
+        'The patched Rejetto HTTP File Server (HFS) is version 3: https://github.com/rejetto/hfs?tab=readme-ov-file#installation, https://www.rejetto.com/hfs/ ;   https://nvd.nist.gov/vuln/detail/CVE-2024-23692',
+      );
+      expect(parsed.references.map((ref) => ref.url)).toEqual([
+        'https://github.com/rejetto/hfs?tab=readme-ov-file#installation',
+        'https://www.rejetto.com/hfs/',
+        nvd('CVE-2024-23692'),
+      ]);
+      expect(parsed.references.every((ref) => ref.label === undefined)).toBe(true);
+      expect(parsed.commentary).toBe(
+        'The patched Rejetto HTTP File Server (HFS) is version 3: https://github.com/rejetto/hfs?tab=readme-ov-file#installation, https://www.rejetto.com/hfs/',
+      );
+    });
+
+    it('does not split a URL that contains `;`, in references or commentary (CVE-2023-4911)', () => {
+      const glibc =
+        'https://sourceware.org/git/?p=glibc.git;a=commitdiff;h=1056e5b4c3f2d90ed2b4a55f96add28da2f4c8fa';
+      const prose = `This vulnerability affects a common open-source component, third-party library, or a protocol used by different products. Please check with specific vendors for information on patching status. For more information, please see: ${glibc}, https://access.redhat.com/security/cve/cve-2023-4911, https://www.debian.org/security/2023/dsa-5514`;
+      const parsed = parseKevNotes(`${prose} ; https://nvd.nist.gov/vuln/detail/CVE-2023-4911  `);
+      expect(parsed.references.map((ref) => ref.url)).toEqual([
+        glibc,
+        'https://access.redhat.com/security/cve/cve-2023-4911',
+        'https://www.debian.org/security/2023/dsa-5514',
+        nvd('CVE-2023-4911'),
+      ]);
+      expect(parsed.commentary).toBe(prose);
+    });
+
+    it('trims a trailing `",` and a trailing `"` off a URL (CVE-2025-5419, CVE-2026-41940)', () => {
+      expect(
+        parseKevNotes(
+          'https://chromereleases.googleblog.com/2025/06/stable-channel-update-for-desktop.html;   https://nvd.nist.gov/vuln/detail/CVE-2025-5419",',
+        ),
+      ).toEqual({
+        references: [
+          {
+            kind: 'vendor',
+            url: 'https://chromereleases.googleblog.com/2025/06/stable-channel-update-for-desktop.html',
+          },
+          { kind: 'nvd', url: nvd('CVE-2025-5419') },
+        ],
+      });
+      expect(
+        parseKevNotes(
+          'https://docs.wpsquared.com/changelogs/versions/changelog/#13617 ; https://nvd.nist.gov/vuln/detail/CVE-2026-41940"',
+        ).references.at(-1),
+      ).toEqual({ kind: 'nvd', url: nvd('CVE-2026-41940') });
+    });
+
+    it('trims a trailing `.` off a bare URL segment (CVE-2026-50751)', () => {
+      const parsed = parseKevNotes(
+        'https://support.checkpoint.com/results/sk/sk185033?_gl=1*1wqeqhc*_gcl_au*MTI1MzE5MjI2LjE3ODA5MzQ1NTM. ; https://nvd.nist.gov/vuln/detail/CVE-2026-50751',
+      );
+      expect(parsed.references[0]?.url).toBe(
+        'https://support.checkpoint.com/results/sk/sk185033?_gl=1*1wqeqhc*_gcl_au*MTI1MzE5MjI2LjE3ODA5MzQ1NTM',
+      );
+      expect(parsed.commentary).toBeUndefined();
+    });
+
+    it('extracts every URL from a segment carrying two labels, keeping the segment as prose (CVE-2025-0282)', () => {
+      const segment =
+        'CISA Mitigation Instructions: https://www.cisa.gov/cisa-mitigation-instructions-CVE-2025-0282 Additional References: https://forums.ivanti.com/s/article/Security-Advisory-Ivanti-Connect-Secure-Policy-Secure-ZTA-Gateways-CVE-2025-0282-CVE-2025-0283';
+      const parsed = parseKevNotes(`${segment} ; https://nvd.nist.gov/vuln/detail/CVE-2025-0282`);
+      expect(parsed.references.map((ref) => ref.kind)).toEqual(['cisa', 'vendor', 'nvd']);
+      expect(parsed.commentary).toBe(segment);
+    });
+  });
+
+  describe('pathological notes text', () => {
+    /* `notes` is upstream text parsed on every catalog load; none of these shapes
+     * may make the parse grow faster than linearly with its length. */
+    const SHAPES: Record<string, (length: number) => string> = {
+      'a run of (': (n) => '('.repeat(n),
+      'http:// repeated with no terminator': (n) => 'http://'.repeat(Math.ceil(n / 7)),
+      'a URL ending in a run of )': (n) => `https://a.example/${')'.repeat(n)}`,
+      'a URL ending in ).).).': (n) => `https://a.example/${').'.repeat(n / 2)}`,
+      'a URL with a punctuation run before its last character': (n) =>
+        `https://a.example/${',."'.repeat(Math.ceil(n / 3))}x`,
+      'a URL continued by ;x;x;x': (n) => `https://a.example/${';x'.repeat(n / 2)}`,
+      'prose URLs each continued by ;y': (n) =>
+        'see https://a.example/x;y '.repeat(Math.ceil(n / 26)),
+    };
+
+    /** Best per-call wall time over a few rounds of `runs` calls. */
+    function bestMs(notes: string, runs: number): number {
+      let best = Number.POSITIVE_INFINITY;
+      for (let round = 0; round < 3; round++) {
+        const start = performance.now();
+        for (let i = 0; i < runs; i++) parseKevNotes(notes);
+        best = Math.min(best, (performance.now() - start) / runs);
+      }
+      return best;
+    }
+
+    it.each(Object.entries(SHAPES))(
+      '%s parses in linear time',
+      (_label, build) => {
+        const small = build(5_000);
+        const large = build(80_000);
+        parseKevNotes(small);
+        const smallMs = Math.max(bestMs(small, 20), 0.02);
+        const largeMs = bestMs(large, 2);
+        /* 16x the input: linear growth is ~16x, quadratic ~256x. */
+        expect(largeMs / smallMs).toBeLessThan(64);
+        expect(largeMs).toBeLessThan(100);
+      },
+      60_000,
+    );
+  });
 });
 
 describe('readDirective', () => {

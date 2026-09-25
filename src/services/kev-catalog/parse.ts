@@ -49,40 +49,128 @@ export function classifyReference(url: string, label?: string): KevReferenceKind
 /** A leading `<Label>:` on a `notes` segment, with the rest of the segment after it. */
 const LABELED_SEGMENT = /^([^:]{1,60}):\s*(https?:\/\/\S+)$/;
 
+/** Text that opens with a URL scheme. */
+const URL_START = /^https?:\/\//i;
+
+/** A URL scheme anywhere in the text. */
+const URL_SCHEME = /https?:\/\//i;
+
+/** One URL inside a segment: from its scheme to the next whitespace. */
+const URL_TOKEN = /https?:\/\/\S+/gi;
+
+/** A comma that opens the next URL of a comma-joined run. */
+const COMMA_BEFORE_URL = /,(?=https?:\/\/)/i;
+
+/** Punctuation that closes the sentence or list around a URL rather than the URL itself. */
+const TRAILING_PUNCTUATION = new Set([',', '.', '"']);
+
 /** Parsed shape of a KEV entry's `notes` field. */
 export interface ParsedKevNotes {
   commentary?: string;
   references: KevReference[];
 }
 
+/** The final whitespace-free run of `text` — empty when it ends in whitespace. */
+function finalRun(text: string): string {
+  let start = text.length;
+  while (start > 0 && !/\s/.test(text.charAt(start - 1))) start--;
+  return text.slice(start);
+}
+
+/**
+ * Split `notes` on `;`, except where the `;` belongs to a URL. A piece that
+ * follows a URL with no space between them and does not open a URL of its own
+ * continues that URL (`…glibc.git;a=commitdiff;h=…`); `url;https://…` and `;;`
+ * still split.
+ *
+ * Whether the last segment ends in a URL is carried from piece to piece rather
+ * than re-read from the growing segment, so a long `;`-joined run stays linear.
+ */
+function splitSegments(notes: string): string[] {
+  const segments: string[] = [];
+  let endsInUrl = false;
+  for (const piece of notes.split(';')) {
+    if (endsInUrl && /^\S/.test(piece) && !URL_START.test(piece)) {
+      segments[segments.length - 1] += `;${piece}`;
+      /* With no whitespace in the piece, the URL run just grew and still ends the segment. */
+      if (/\s/.test(piece)) endsInUrl = URL_SCHEME.test(finalRun(piece));
+    } else {
+      segments.push(piece);
+      endsInUrl = URL_SCHEME.test(finalRun(piece));
+    }
+  }
+  return segments;
+}
+
+/**
+ * Strip what closes the sentence around a URL: trailing `,` `.` `"`, and a `)`
+ * with no matching `(` inside the URL. A balanced `)` is part of the path, as in
+ * `…-(cve-2020-14472)`. One pass from the end, against a paren balance counted
+ * once, so a long closing run stays linear.
+ */
+function trimUrl(token: string): string {
+  let unmatchedClosing = 0;
+  for (const char of token) {
+    if (char === ')') unmatchedClosing++;
+    else if (char === '(') unmatchedClosing--;
+  }
+  let end = token.length;
+  while (end > 0) {
+    const char = token.charAt(end - 1);
+    if (TRAILING_PUNCTUATION.has(char)) {
+      end--;
+    } else if (char === ')' && unmatchedClosing > 0) {
+      unmatchedClosing--;
+      end--;
+    } else {
+      break;
+    }
+  }
+  return token.slice(0, end);
+}
+
+/**
+ * Every URL in a segment, in order. A comma run (`url, url` or `url,url`)
+ * splits into its URLs; a comma inside a URL that is not followed by another
+ * URL stays part of it.
+ */
+function extractUrls(segment: string): string[] {
+  return (segment.match(URL_TOKEN) ?? [])
+    .flatMap((token) => token.split(COMMA_BEFORE_URL))
+    .map(trimUrl);
+}
+
 /**
  * Split a KEV `notes` value into references and free prose. Segments are
- * `;`-delimited; a segment shaped `<Label>: <url>` yields a labeled reference, a
- * bare URL yields an unlabeled one classified by host, and anything else is
- * commentary (116 of 1,716 entries open with prose). Every reference keeps the
- * label verbatim so a caller sees CISA's own wording.
+ * `;`-delimited. A segment shaped `<Label>: <url>` yields one labeled reference,
+ * the label kept verbatim so a caller sees CISA's own wording. From any other
+ * segment every URL becomes an unlabeled reference classified by host — URLs
+ * come comma-joined and embedded in prose (`please see: <url>`, `(<url>)`,
+ * `<url> and <url>`) as well as alone. A segment holding anything besides URLs,
+ * commas, and whitespace is also kept whole as commentary, URLs included, so the
+ * prose around them still reads.
  */
 export function parseKevNotes(notes: string): ParsedKevNotes {
   const references: KevReference[] = [];
   const prose: string[] = [];
 
-  for (const raw of notes.split(';')) {
+  for (const raw of splitSegments(notes)) {
     const segment = raw.trim();
     if (segment === '') continue;
 
     const labeled = LABELED_SEGMENT.exec(segment);
-    if (labeled?.[1] && labeled[2] && !/^https?$/i.test(labeled[1])) {
+    const labeledUrls = labeled?.[2] ? extractUrls(labeled[2]) : [];
+    const [labeledUrl] = labeledUrls;
+    if (labeled?.[1] && labeledUrl && labeledUrls.length === 1 && !/^https?$/i.test(labeled[1])) {
       const label = labeled[1].trim();
-      references.push({ kind: classifyReference(labeled[2], label), label, url: labeled[2] });
+      references.push({ kind: classifyReference(labeledUrl, label), label, url: labeledUrl });
       continue;
     }
 
-    if (/^https?:\/\/\S+$/i.test(segment)) {
-      references.push({ kind: classifyReference(segment), url: segment });
-      continue;
+    for (const url of extractUrls(segment)) {
+      references.push({ kind: classifyReference(url), url });
     }
-
-    prose.push(segment);
+    if (segment.replace(URL_TOKEN, '').replace(/[\s,]/g, '') !== '') prose.push(segment);
   }
 
   const commentary = prose.join('; ').trim();
