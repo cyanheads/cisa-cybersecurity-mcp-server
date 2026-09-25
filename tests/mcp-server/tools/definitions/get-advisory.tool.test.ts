@@ -15,7 +15,7 @@ import {
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import fc from 'fast-check';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ADVISORY_OUTLINE_BUDGET } from '@/mcp-server/schemas/advisory.js';
 import { getAdvisoryTool } from '@/mcp-server/tools/definitions/get-advisory.tool.js';
 import {
@@ -91,6 +91,78 @@ describe('cisa_get_advisory', () => {
       const text = firstText(getAdvisoryTool.format?.(result));
       expect(text).toContain('not found');
       expect(text).toContain(result.guidance as string);
+    });
+
+    describe('a miss reports how current the index is', () => {
+      beforeEach(async () => {
+        /* An index whose checkpoint (2026-09-17) trails its last completed sync (2026-09-19). */
+        (await getCsafMirror().mirrorInstance.raw())
+          .prepare('UPDATE mirror_sync_state SET checkpoint = ?, completed_at = ? WHERE id = 1')
+          .run('2026-09-17T06:00:00.000000Z', '2026-09-19T22:30:29.000Z');
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-09-25T12:00:00Z'));
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      const miss = async (advisoryId: string) => {
+        const result = await runToolContract(getAdvisoryTool, { advisoryId });
+        expect(result.isError).toBeFalsy();
+        return {
+          structured: result.structuredContent as {
+            found: boolean;
+            guidance: string;
+            indexCheckpoint: string | null;
+            indexLastSyncedAt: string | null;
+          },
+          text: contentText(result),
+        };
+      };
+
+      it('an ID dated after the last sync misses with the checkpoint, the sync time, and the may-be-newer note', async () => {
+        const { structured, text } = await miss('ICSA-26-265-09');
+        expect(structured.found).toBe(false);
+        expect(structured.indexCheckpoint).toBe('2026-09-17T06:00:00.000000Z');
+        expect(structured.indexLastSyncedAt).toBe('2026-09-19T22:30:29.000Z');
+        expect(structured.guidance).toContain('2026-09-22');
+        expect(structured.guidance).toContain('may be newer than the index');
+        expect(structured.guidance).toContain(
+          'https://www.cisa.gov/news-events/ics-advisories/icsa-26-265-09',
+        );
+        for (const fragment of [
+          '2026-09-17T06:00:00.000000Z',
+          '2026-09-19T22:30:29.000Z',
+          structured.guidance,
+        ]) {
+          expect(text).toContain(fragment);
+        }
+      });
+
+      it('an ID dated on or before the last sync, or on the checkpoint day, misses without the note', async () => {
+        for (const advisoryId of ['ICSA-26-260-99', 'ICSA-26-262-01', 'ICSMA-25-100-01']) {
+          const { structured, text } = await miss(advisoryId);
+          expect(structured.found, advisoryId).toBe(false);
+          expect(structured.indexLastSyncedAt).toBe('2026-09-19T22:30:29.000Z');
+          expect(structured.guidance, advisoryId).not.toContain('may be newer');
+          expect(text).toContain('2026-09-19T22:30:29.000Z');
+        }
+      });
+
+      it('an ID whose day is out of range for its year, or dated after today, gets no note', async () => {
+        for (const advisoryId of ['ICSA-26-366-01', 'ICSA-26-000-01', 'ICSA-26-300-01']) {
+          const { structured } = await miss(advisoryId);
+          expect(structured.guidance, advisoryId).not.toContain('may be newer');
+        }
+      });
+
+      it('an ICS medical advisory ID gets its own web URL in the note', async () => {
+        const { structured } = await miss('ICSMA-26-266-01');
+        expect(structured.guidance).toContain(
+          'https://www.cisa.gov/news-events/ics-medical-advisories/icsma-26-266-01',
+        );
+      });
     });
 
     it('normalizes ID case before lookup', async () => {

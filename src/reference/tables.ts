@@ -204,7 +204,7 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
   sectors: {
     title: 'Critical-infrastructure sectors',
     summary:
-      'The sixteen canonical sector names plus the Multiple sentinel, as the advisory corpus spells them. The upstream sector note is free-form prose rather than an enum, so this server matches canonical names longest-first and keeps the verbatim text alongside the normalized set. Coverage begins in 2017: 729 of 3,926 advisories carry no sector note at all and cannot match a sector filter.',
+      'The sixteen canonical sector names plus the Multiple sentinel, as the advisory corpus spells them. The upstream sector note is free-form prose rather than an enum, so this server matches canonical names longest-first and keeps the verbatim text alongside the normalized set. Coverage begins in 2017, and an advisory with no sector note at all cannot match a sector filter; a sector search reports how many of the advisories currently in the index carry none.',
     entries: [
       {
         key: 'canonical',
@@ -236,21 +236,21 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
         key: 'ICSA',
         label: 'ICS advisory',
         description:
-          'Industrial control system advisories: ICSA-YY-DDD-NN, where DDD is the day of year. 3,738 of 3,926 documents. Web version at https://www.cisa.gov/news-events/ics-advisories/{id}.',
+          'Industrial control system advisories, nearly all of the corpus: ICSA-YY-DDD-NN, where DDD is the day of year. Web version at https://www.cisa.gov/news-events/ics-advisories/{id}.',
         values: ['ICSA-26-260-07', 'ICSA-10-316-01A'],
       },
       {
         key: 'ICSMA',
         label: 'ICS medical advisory',
         description:
-          'Medical device advisories: ICSMA-YY-DDD-NN. 188 of 3,926 documents. Web version at https://www.cisa.gov/news-events/ics-medical-advisories/{id}.',
+          'Medical device advisories, a small minority of the corpus: ICSMA-YY-DDD-NN. Web version at https://www.cisa.gov/news-events/ics-medical-advisories/{id}.',
         values: ['ICSMA-26-253-02'],
       },
       {
         key: 'suffix',
         label: 'Revision suffix',
         description:
-          'Most IDs carry no suffix (3,805 documents). 120 carry a single letter A through F marking a revision, and exactly one carries a numeric suffix, ICSA-16-231-01-0.',
+          'Most IDs carry no suffix. Some carry a single letter A through F marking a revision, and one carries a numeric suffix, ICSA-16-231-01-0.',
         values: ['ICSA-26-260-07', 'ICSA-10-316-01A', 'ICSA-16-231-01-0'],
       },
     ],
@@ -271,7 +271,7 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
         key: 'maxCvss',
         label: 'How maxCvss is computed',
         description:
-          'The maximum baseScore across every vulnerabilities[].scores[] entry in the advisory. document.aggregate_severity exists on only 52 of 3,926 documents and is never relied on. 392 advisories score only in v2; 2 carry no CVSS at all and cannot match a score filter.',
+          'The maximum baseScore across every vulnerabilities[].scores[] entry in the advisory. document.aggregate_severity exists on only a few dozen documents and is never relied on. Some advisories score only in v2, and a few carry no CVSS at all and cannot match a score filter; a score-filtered search reports both counts for the advisories currently in the index.',
       },
     ],
   },
@@ -284,13 +284,13 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
         key: 'kev',
         label: 'KEV catalog snapshot',
         description:
-          'An in-memory snapshot of the KEV JSON feed, refreshed on a cron with a conditional GET. catalogVersion and count are null until the first load lands.',
+          'An in-memory snapshot of the KEV JSON feed, refreshed with a conditional GET on its cron; refreshCron reads off when the schedule is disabled. catalogVersion and count are null until the first load lands.',
       },
       {
         key: 'csafMirror',
         label: 'ICS advisory index',
         description:
-          'A local SQLite index of the full CSAF advisory corpus. ready is true once a full sync has ever completed; the index keeps serving during a refresh and after a failed one.',
+          'A local SQLite index of the full CSAF advisory corpus, refreshed once at startup and then on a schedule unless the operator turned refresh off. ready is true once a full sync has ever completed; the index keeps serving during a refresh and after a failed one. unavailableReason appears only when the index cannot be opened at its configured location, which the server operator fixes through CISA_CSAF_MIRROR_PATH — waiting does not.',
       },
       {
         key: 'vulnrichment',

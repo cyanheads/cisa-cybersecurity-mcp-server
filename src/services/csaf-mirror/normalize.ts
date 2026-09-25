@@ -1,7 +1,8 @@
 /**
  * @fileoverview Pure normalization for CSAF ICS advisories — advisory-ID
  * normalization, product-tree flattening, CVSS computation, sector extraction,
- * the `changes.csv` manifest parser, and the FTS5 `MATCH` builder. No network, no
+ * the `changes.csv` manifest parser, and the FTS5 `MATCH` and substring `GLOB`
+ * builders. No network, no
  * database: every function here takes a parsed document (or a string) and returns
  * plain data, which is what makes the whole ingest path unit-testable against a
  * fixture.
@@ -36,10 +37,10 @@ export const CSAF_OT_BASE =
 
 /**
  * The canonical advisory-ID pattern — the uppercase form every stored ID takes.
- * Both real suffix forms are covered: a single letter (120 documents carry
- * `A`–`F`) and the one numeric form, `ICSA-16-231-01-0`. `ICS[AM]` would spell
- * `ICSA` or `ICSM` and reject all 188 `ICSMA-` advisories, so the alternation is
- * spelled out.
+ * Both real suffix forms are covered: a single letter (`A`–`F`, 120 documents
+ * at the 2026-09-24 index checkpoint) and the one numeric form,
+ * `ICSA-16-231-01-0`. `ICS[AM]` would spell `ICSA` or `ICSM` and reject every
+ * `ICSMA-` advisory, so the alternation is spelled out.
  *
  * No flag: the pattern is advertised in JSON Schema, which has no flags, so a
  * `/i` here would mean one thing to this server and a stricter thing to every
@@ -47,6 +48,22 @@ export const CSAF_OT_BASE =
  * only after {@link normalizeAdvisoryId}.
  */
 export const ADVISORY_ID_PATTERN = /^ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[A-Z]|-\d+)?$/;
+
+/**
+ * The date an advisory ID encodes, `YYYY-MM-DD` — year `20YY`, day of year
+ * `DDD` — or `null` when the day is out of range for that year or the input is
+ * not an advisory ID. It is CISA's publication day, not the document's
+ * `published` field: a republished vendor advisory carries the vendor's earlier
+ * date there.
+ */
+export function advisoryIdDate(advisoryId: string): string | null {
+  const match = /^ICS(?:A|MA)-(\d{2})-(\d{3})-/.exec(advisoryId);
+  if (!match) return null;
+  const year = 2000 + Number(match[1]);
+  const day = Number(match[2]);
+  const date = new Date(Date.UTC(year, 0, day));
+  return day >= 1 && date.getUTCFullYear() === year ? date.toISOString().slice(0, 10) : null;
+}
 
 /**
  * The shape of a document path inside a distribution directory: a four-digit
@@ -246,7 +263,7 @@ export function readScores(vulnerability: Record<string, unknown>): AdvisoryScor
 
     const v2 = isRecord(entry.cvss_v2) ? entry.cvss_v2 : undefined;
     if (v2 && typeof v2.baseScore === 'number') {
-      /* cvss_v2 never carries baseSeverity across all 697 occurrences. */
+      /* cvss_v2 never carries baseSeverity (697 occurrences at the 2026-09-17 checkpoint). */
       const upstream = str(v2.baseSeverity);
       scores.push({
         version: str(v2.version) ?? '2.0',
@@ -264,8 +281,9 @@ export function readScores(vulnerability: Record<string, unknown>): AdvisoryScor
 
 /**
  * The maximum base score across every vulnerability's scores.
- * `document.aggregate_severity` exists on only 52 of 3,926 documents, so it can
- * never back a severity filter and is not consulted.
+ * `document.aggregate_severity` exists on only a few dozen documents (52 of
+ * 3,926 at the 2026-09-17 checkpoint), so it can never back a severity filter and
+ * is not consulted.
  */
 export function computeMaxCvss(
   vulnerabilities: AdvisoryVulnerability[],
@@ -364,8 +382,9 @@ function readRevisionHistory(value: unknown): AdvisoryRevision[] {
  * Build the attribution string every advisory response carries. It is
  * unconditional rather than conditional on `publisher.category`, because a caller
  * should not have to branch on a field to know whether the text is safe to
- * redistribute: the CSAF repository declares no license, and 1,063 of its 3,926
- * ICS advisories are CISA republications of a vendor's own advisory text.
+ * redistribute: the CSAF repository declares no license, and over a quarter of
+ * its ICS advisories (1,069 of 3,937 at the 2026-09-24 checkpoint) are CISA
+ * republications of a vendor's own advisory text.
  */
 export function buildAttribution(
   publisherName: string,
@@ -463,7 +482,7 @@ export function normalizeAdvisory(raw: unknown, sourcePath: string): NormalizedA
     if (!isRecord(entry)) continue;
     const cve = str(entry.cve);
     if (!cve) continue;
-    /* `vulnerabilities[].cwe` is always a single object across 14,461 occurrences. */
+    /* `vulnerabilities[].cwe` is always a single object (14,461 occurrences at the 2026-09-17 checkpoint). */
     const cwe = isRecord(entry.cwe) ? entry.cwe : undefined;
     const status = isRecord(entry.product_status) ? entry.product_status : {};
     const remediations: AdvisoryRemediation[] = [];
@@ -632,4 +651,40 @@ export function toFtsMatch(input: string): string {
     );
   }
   return tokens.map((token) => `"${token}"`).join(' AND ');
+}
+
+/** The characters GLOB reads as syntax. Each is matched literally as a one-character class. */
+const GLOB_SYNTAX = new Set(['*', '?', '[']);
+
+/** Lower A-Z and nothing else — exactly what SQLite's built-in `LOWER()` does. */
+const lowerAscii = (char: string): string =>
+  char >= 'A' && char <= 'Z' ? char.toLowerCase() : char;
+
+/**
+ * Build a `GLOB` pattern matching `value` as a case-insensitive substring of a
+ * column read through SQLite's `LOWER()`, for the `vendor` and `product` filters.
+ *
+ * `LOWER()` folds A-Z only, so a pattern built from a needle lowercased in
+ * JavaScript missed every stored label carrying a non-ASCII capital — `GeutebrÃ¼ck`,
+ * copied verbatim from a search result, matched nothing. Here A-Z is lowered to
+ * meet `LOWER()`, and every other letter with a single-character case pair
+ * becomes a class of both forms (`Ã` → `[Ãã]`), so a capital folds alike in the
+ * stored label and in the caller's text. `*`, `?`, and `[` become one-character
+ * classes; GLOB has no `%` or `_` wildcard and no escape character, so those and
+ * `\` are already literal.
+ *
+ * Linear in the length of `value`.
+ */
+export function toSubstringGlob(value: string): string {
+  let pattern = '';
+  for (const char of value) {
+    const forms = new Set(
+      [char, char.toLowerCase(), char.toUpperCase()]
+        .filter((form) => form.length === char.length)
+        .map(lowerAscii),
+    );
+    if (forms.size > 1) pattern += `[${[...forms].join('')}]`;
+    else pattern += GLOB_SYNTAX.has(char) ? `[${char}]` : lowerAscii(char);
+  }
+  return `*${pattern}*`;
 }

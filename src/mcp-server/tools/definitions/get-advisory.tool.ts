@@ -2,8 +2,9 @@
  * @fileoverview `cisa_get_advisory` — read one ICS advisory in full, or a section
  * outline when the document overflows the inline budget.
  *
- * 783 of 3,926 advisories exceed the 24 KB budget, 102 exceed 100 KB, and the
- * largest is 1.38 MB with 544 vulnerability entries and 585 products. Returning
+ * At the 2026-09-17 index checkpoint, 783 of 3,926 advisories exceeded the 24 KB
+ * budget, 102 exceeded 100 KB, and the largest was 1.38 MB with 544 vulnerability
+ * entries and 585 products. Returning
  * those whole burns the caller's context; truncating them either hides data or
  * desyncs `content[]` from `structuredContent`. The outline is a complete, honest
  * listing of what is available plus a re-call contract, and the re-call is
@@ -27,6 +28,7 @@ import {
   advisoryCves,
   cvesNarrowingHint,
   extractAdvisorySections,
+  indexFreshnessNote,
   presentSections,
   renderAdvisoryAcknowledgments,
   renderAdvisoryHeader,
@@ -75,7 +77,26 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
   output: z.object({
     found: z.boolean().describe('Whether an advisory with that ID is in the index.'),
     ...AdvisoryDocumentOutputShape,
-    guidance: z.string().optional().describe('What to do instead, present when found is false.'),
+    guidance: z
+      .string()
+      .optional()
+      .describe(
+        'What to do instead, present when found is false: how current the index is, and whether the advisory may be newer than it.',
+      ),
+    indexCheckpoint: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'Present when found is false: the newest revision timestamp the index holds, or null if none.',
+      ),
+    indexLastSyncedAt: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'Present when found is false: when the index last completed a sync, ISO 8601, or null if never.',
+      ),
   }),
 
   errors: [
@@ -86,6 +107,13 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       retryable: true,
       recovery:
         'The ICS advisory index is still building; call cisa_list_reference with topic sources to check its progress, then retry this lookup.',
+    },
+    {
+      reason: 'mirror_unavailable',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The advisory index store cannot be opened: its location is not writable, is read-only, runs through a missing directory or a file, or holds a file that is not a SQLite database.',
+      recovery:
+        'The ICS advisory index cannot be opened at its configured location; the server operator must set CISA_CSAF_MIRROR_PATH to a writable path and restart. Retrying will not help, but cisa_check_cve_status, cisa_search_kev, cisa_get_ssvc, and cisa_get_alerts still work.',
     },
     {
       reason: 'unknown_section',
@@ -127,7 +155,15 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
     }
 
     const mirror = getCsafMirror();
-    if (!(await mirror.ready())) {
+    const availability = await mirror.availability();
+    if (availability.status === 'unavailable') {
+      throw ctx.fail(
+        'mirror_unavailable',
+        `The ICS advisory index cannot be opened (${availability.reason.replaceAll('_', ' ')}).`,
+        { ...ctx.recoveryFor('mirror_unavailable') },
+      );
+    }
+    if (availability.status === 'not_ready') {
       throw ctx.fail(
         'mirror_not_ready',
         'The ICS advisory index has not completed its first sync.',
@@ -138,8 +174,14 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
     const { advisoryId } = input;
     const doc = await mirror.getAdvisory(advisoryId);
     if (!doc) {
+      const index = await mirror.state();
       ctx.log.info('Advisory not in the index', { advisoryId });
-      return { found: false, guidance: MISS_GUIDANCE };
+      return {
+        found: false,
+        guidance: `${MISS_GUIDANCE} ${indexFreshnessNote(advisoryId, index)}`,
+        indexCheckpoint: index.checkpoint,
+        indexLastSyncedAt: index.lastCompletedAt,
+      };
     }
 
     if (requested) {
@@ -189,13 +231,19 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
 
   format: (result) => {
     const lines: string[] = [];
+    const index: string[] = [];
+    if (result.indexCheckpoint !== undefined)
+      index.push(`**Index checkpoint:** ${result.indexCheckpoint ?? 'none'}`);
+    if (result.indexLastSyncedAt !== undefined)
+      index.push(`**Index last synced:** ${result.indexLastSyncedAt ?? 'never'}`);
     if (!result.found) {
-      lines.push('**Advisory not found in the index.**');
+      lines.push('**Advisory not found in the index.**', ...index);
       if (result.guidance) lines.push(result.guidance);
       return [{ type: 'text', text: lines.join('\n') }];
     }
 
     if (result.guidance) lines.push(result.guidance);
+    lines.push(...index);
     lines.push(`**Advisory found:** ${result.found ? 'yes' : 'no'}`);
     if (result.kind) lines.push(`**Result kind:** ${result.kind}`, '');
     if (result.advisory) lines.push(...renderAdvisoryHeader(result.advisory));

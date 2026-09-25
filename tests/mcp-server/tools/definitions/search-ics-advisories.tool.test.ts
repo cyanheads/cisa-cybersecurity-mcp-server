@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tests for `cisa_search_ics_advisories` — mirror_not_ready,
  * invalid_cvss_range, invalid_date_range, relevance_sort_without_query,
- * empty_search_text, catalog_unavailable, every zero-hit fragment, the
- * sector/CVSS coverage notices, the cwe filter and its stale-index disclosure,
+ * empty_search_text, catalog_unavailable, the zero-hit notice and the per-filter
+ * counts that gate it, the sector/CVSS coverage notices, the corpus-count drift
+ * matcher, the cwe filter and its stale-index disclosure,
  * and KEV membership (inKev, kevCves, the not-evaluated notice), against a
  * mirror seeded through the real ingest path and a KEV catalog loaded from the
  * fixture feed.
@@ -12,7 +13,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { z } from '@cyanheads/mcp-ts-core';
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
@@ -20,7 +21,8 @@ import {
   getEnrichment,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { encodeCursor } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchIcsAdvisoriesTool } from '@/mcp-server/tools/definitions/search-ics-advisories.tool.js';
 import {
   getCsafMirror,
@@ -43,6 +45,7 @@ import {
 } from '../../../fixtures/csaf-documents.js';
 import { buildKevFeedBody, KEV_RECORDS } from '../../../fixtures/kev-feed.js';
 import { buildTarGzResponse } from '../../../fixtures/tar.js';
+import { DRIFTING_CATALOG_COUNT } from '../../../helpers/catalog-counts.js';
 import { emittedOutputSchema, strictClientValidator } from '../../../helpers/emitted-schema.js';
 import { contentText, firstText } from '../../../helpers/format-text.js';
 
@@ -123,6 +126,7 @@ describe('cisa_search_ics_advisories', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     resetCsafMirror();
     resetKevCatalog();
     rmSync(dir, { recursive: true, force: true });
@@ -175,14 +179,96 @@ describe('cisa_search_ics_advisories', () => {
       const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
       const input = searchIcsAdvisoriesTool.input.parse({ sector: 'Energy' });
       await searchIcsAdvisoriesTool.handler(input, ctx);
-      expect(getEnrichment(ctx).sectorCoverage).toContain('carry no sector note');
+      /* The fixture index holds one advisory with no sector note of three. */
+      expect(getEnrichment(ctx).sectorCoverage).toMatch(
+        /^1 of 3 advisories carries no sector note/,
+      );
     });
 
     it('emits cvssCoverage when a score filter is applied', async () => {
       const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
       const input = searchIcsAdvisoriesTool.input.parse({ severity: 'CRITICAL' });
       await searchIcsAdvisoriesTool.handler(input, ctx);
-      expect(getEnrichment(ctx).cvssCoverage).toContain('score only in CVSS v2');
+      expect(getEnrichment(ctx).cvssCoverage).toMatch(/^1 advisory scores only in CVSS v2/);
+    });
+
+    it('prints the coverage counts it reads from the index thousands-grouped, on both surfaces', async () => {
+      vi.spyOn(getCsafMirror(), 'coverageCounts').mockResolvedValue({
+        total: 3937,
+        noSector: 729,
+        v2Only: 1392,
+        noCvss: 3,
+      });
+      const result = await runToolContract(searchIcsAdvisoriesTool, {
+        sector: 'Energy',
+        cvssMin: 1,
+      });
+      const structured = result.structuredContent as Structured & {
+        cvssCoverage: string;
+        sectorCoverage: string;
+      };
+      expect(structured.sectorCoverage).toMatch(/^729 of 3,937 advisories carry no sector note/);
+      expect(structured.cvssCoverage).toMatch(/^1,392 advisories score only in CVSS v2/);
+      expect(structured.cvssCoverage).toContain('3 advisories carry no CVSS score');
+      expect(contentText(result)).toContain(structured.sectorCoverage);
+      expect(contentText(result)).toContain(structured.cvssCoverage);
+    });
+
+    it('agrees the coverage sentences with a count of one, on both surfaces', async () => {
+      vi.spyOn(getCsafMirror(), 'coverageCounts').mockResolvedValue({
+        total: 1,
+        noSector: 1,
+        v2Only: 1,
+        noCvss: 1,
+      });
+      const result = await runToolContract(searchIcsAdvisoriesTool, {
+        sector: 'Energy',
+        cvssMin: 1,
+      });
+      const structured = result.structuredContent as Structured & {
+        cvssCoverage: string;
+        sectorCoverage: string;
+      };
+      expect(structured.sectorCoverage).toMatch(/^1 of 1 advisory carries no sector note/);
+      expect(structured.cvssCoverage).toMatch(/^1 advisory scores only in CVSS v2/);
+      expect(structured.cvssCoverage).toContain('1 advisory carries no CVSS score');
+      expect(contentText(result)).toContain(structured.sectorCoverage);
+      expect(contentText(result)).toContain(structured.cvssCoverage);
+    });
+
+    it('states no advisory-corpus count that drifts with each index refresh', () => {
+      const definition = JSON.stringify({
+        description: searchIcsAdvisoriesTool.description,
+        input: z.toJSONSchema(searchIcsAdvisoriesTool.input),
+        output: z.toJSONSchema(searchIcsAdvisoriesTool.output),
+      });
+      expect(definition).toContain('Sector filtering reaches only advisories');
+      expect(definition).not.toMatch(DRIFTING_CATALOG_COUNT);
+    });
+
+    it.each([
+      '3,926 CSAF 2.0 documents',
+      'covers 12,321 distinct CVEs',
+      'ICSA (3,738 documents)',
+      'medical devices (188)',
+      'Absent on the two advisories with no CVSS',
+      '729 advisories carry no sector note',
+    ])('the drift matcher catches %j', (text) => {
+      expect(text).toMatch(DRIFTING_CATALOG_COUNT);
+    });
+
+    it.each(['(CVE-2021-44228)', 'up to 50 per page', 'ICSA-16-231-01-0', 'BOD 26-04'])(
+      'the drift matcher passes %j',
+      (text) => {
+        expect(text).not.toMatch(DRIFTING_CATALOG_COUNT);
+      },
+    );
+
+    it('a capped page without a KEV snapshot keeps its notice byte for byte', async () => {
+      const result = await runToolContract(searchIcsAdvisoriesTool, { limit: 1 });
+      expect((result.structuredContent as Structured).notice).toBe(
+        'Results capped at 1; showing 1. Raise the cap or narrow with filters. KEV membership was not evaluated: the KEV catalog snapshot has not loaded yet, so these results carry no kevCves. Retry in a few seconds, or pass the listed CVEs to cisa_check_cve_status.',
+      );
     });
 
     it('throws invalid_cvss_range when cvssMin exceeds cvssMax', async () => {
@@ -354,43 +440,47 @@ describe('cisa_search_ics_advisories', () => {
       });
     });
 
-    describe('zero-hit notice fragments', () => {
-      it('vendor set: notes vendor names are unnormalized', async () => {
+    describe('zero-hit notice: a filter that matches nothing on its own', () => {
+      it('vendor: notes vendor names are unnormalized', async () => {
         const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
         const input = searchIcsAdvisoriesTool.input.parse({ vendor: 'NoSuchVendorXYZ' });
         await searchIcsAdvisoriesTool.handler(input, ctx);
         expect(getEnrichment(ctx).notice).toContain('not normalized');
       });
 
-      it('sector set: notes the 2017 coverage boundary', async () => {
+      it('sector: notes the 2017 coverage boundary', async () => {
         const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
         const input = searchIcsAdvisoriesTool.input.parse({ sector: 'Dams' });
         await searchIcsAdvisoriesTool.handler(input, ctx);
         expect(getEnrichment(ctx).notice).toContain('Sector coverage begins in 2017');
       });
 
-      it('series ICSMA: notes the 188-of-3,926 scope', async () => {
+      it('series ICSMA: notes what the series covers', async () => {
         const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
         const input = searchIcsAdvisoriesTool.input.parse({ series: 'ICSMA' });
         await searchIcsAdvisoriesTool.handler(input, ctx);
         expect(getEnrichment(ctx).notice).toContain('ICSMA covers medical devices');
       });
 
-      it('cve set: routes to cisa_check_cve_status', async () => {
+      it('cve: routes to cisa_check_cve_status', async () => {
         const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
         const input = searchIcsAdvisoriesTool.input.parse({ cve: 'CVE-2099-00001' });
         await searchIcsAdvisoriesTool.handler(input, ctx);
         expect(getEnrichment(ctx).notice).toContain('cisa_check_cve_status');
       });
 
-      it('no filter explains it: falls back to the generic miss message', async () => {
-        const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
-        const input = searchIcsAdvisoriesTool.input.parse({ q: 'nonexistentquerytoken' });
-        await searchIcsAdvisoriesTool.handler(input, ctx);
-        expect(getEnrichment(ctx).notice).toContain('Relax the narrowest filter');
+      it('q, which has no fragment of its own: named with what to do', async () => {
+        const result = await runToolContract(searchIcsAdvisoriesTool, {
+          q: 'nonexistentquerytoken',
+        });
+        const notice = (result.structuredContent as Structured).notice;
+        expect(notice).toBe(
+          'q=nonexistentquerytoken matches no advisory on its own — relax or drop it.',
+        );
+        expect(contentText(result)).toContain(notice as string);
       });
 
-      it('cwe set: explains exact CWE matching and routes to cisa_search_kev', async () => {
+      it('cwe: explains exact CWE matching and routes to cisa_search_kev', async () => {
         const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
         const input = searchIcsAdvisoriesTool.input.parse({ cwe: 'CWE-99999' });
         await searchIcsAdvisoriesTool.handler(input, ctx);
@@ -400,12 +490,160 @@ describe('cisa_search_ics_advisories', () => {
         expect(notice).not.toContain('may be incomplete');
       });
 
-      it('inKev true: explains how sharply inKev narrows', async () => {
+      it('inKev true: says no advisory covers a KEV CVE', async () => {
         await loadKev([]);
         const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
         const input = searchIcsAdvisoriesTool.input.parse({ inKev: true });
         await searchIcsAdvisoriesTool.handler(input, ctx);
         expect(getEnrichment(ctx).notice).toContain('drop inKev');
+      });
+    });
+
+    describe('zero-hit notice: per-filter counts decide which filter is named', () => {
+      const run = (args: z.input<typeof searchIcsAdvisoriesTool.input>) =>
+        runToolContract(searchIcsAdvisoriesTool, args);
+      const noticeOf = async (args: z.input<typeof searchIcsAdvisoriesTool.input>) => {
+        const result = await run(args);
+        const structured = result.structuredContent as Structured;
+        expect(structured.totalCount).toBe(0);
+        /* The same notice reaches content[]. */
+        expect(contentText(result)).toContain(structured.notice as string);
+        return structured.notice as string;
+      };
+
+      it('every filter matches alone: names what dropping each restores, and no CWE fragment', async () => {
+        /* cwe alone matches ICSA-26-260-07, publishedTo alone ICSA-14-035-01. */
+        const notice = await noticeOf({ cwe: 'CWE-20', publishedTo: '2015-01-01' });
+        expect(notice).toBe(
+          'Every filter matches advisories on its own; dropping cwe restores 1 advisory, dropping publishedTo restores 1 advisory.',
+        );
+      });
+
+      it('the one filter matching nothing is named with what dropping it restores, and the vendor that matches is not blamed', async () => {
+        const notice = await noticeOf({ vendor: 'acme', cve: 'CVE-2099-00001' });
+        expect(notice).toBe(
+          'No ICS advisory covers that CVE; call cisa_check_cve_status to see whether it is in KEV instead. Dropping cve restores 1 advisory.',
+        );
+      });
+
+      it('a filter with no fragment of its own that matches nothing is named', async () => {
+        const notice = await noticeOf({ vendor: 'acme', cvssMax: 1 });
+        expect(notice).toBe(
+          'cvssMax=1 matches no advisory on its own — relax or drop it. Dropping cvssMax restores 1 advisory.',
+        );
+      });
+
+      it('a sector that matches alone draws no sector fragment', async () => {
+        const notice = await noticeOf({ sector: 'Energy', publishedTo: '2015-01-01' });
+        expect(notice).not.toContain('Sector coverage');
+        expect(notice).toBe(
+          'Every filter matches advisories on its own; dropping sector restores 1 advisory, dropping publishedTo restores 1 advisory.',
+        );
+      });
+
+      it('inKev true that matches alone draws no inKev fragment', async () => {
+        await loadKev(['CVE-2026-12345']);
+        const notice = await noticeOf({ inKev: true, publishedTo: '2015-01-01' });
+        expect(notice).not.toContain('drop inKev');
+        expect(notice).toBe(
+          'Every filter matches advisories on its own; dropping inKev restores 1 advisory, dropping publishedTo restores 1 advisory.',
+        );
+      });
+
+      it('two filters matching nothing are both named, with no drop-one sentence', async () => {
+        const notice = await noticeOf({ cve: 'CVE-2099-00001', product: 'nosuchproduct' });
+        expect(notice).toBe(
+          'No ICS advisory covers that CVE; call cisa_check_cve_status to see whether it is in KEV instead. product=nosuchproduct matches no advisory on its own — relax or drop it.',
+        );
+      });
+
+      it('says when dropping the one filter matching nothing restores nothing', async () => {
+        const notice = await noticeOf({
+          cve: 'CVE-2099-00001',
+          vendor: 'acme',
+          publisher: 'other',
+        });
+        expect(notice).toContain(
+          'Dropping cve alone restores nothing: the other filters match no advisory together either.',
+        );
+        expect(notice).not.toContain('not normalized');
+      });
+
+      it('says when no single filter explains the miss', async () => {
+        const notice = await noticeOf({
+          vendor: 'acme',
+          publisher: 'other',
+          publishedTo: '2015-01-01',
+        });
+        expect(notice).toBe(
+          'Every filter matches advisories on its own, but no single filter explains the miss — only relaxing two or more of them together restores a result.',
+        );
+      });
+
+      it('prints the counts it reads thousands-grouped', async () => {
+        const counts = vi.spyOn(getCsafMirror(), 'filterCounts').mockResolvedValue([
+          { filter: 'vendor', alone: 1046, restoredByDropping: 0 },
+          { filter: 'cve', alone: 0, restoredByDropping: 1046 },
+        ]);
+        const notice = await noticeOf({ vendor: 'acme', cve: 'CVE-2099-00001' });
+        expect(counts).toHaveBeenCalledOnce();
+        expect(notice).toContain('Dropping cve restores 1,046 advisories.');
+      });
+
+      it('a cursor past the end of a non-zero result is not a zero-hit: no count pass, no notice', async () => {
+        const counts = vi.spyOn(getCsafMirror(), 'filterCounts');
+        const cursor = encodeCursor({ offset: 5, limit: 2 });
+        const past = await run({ publisher: 'coordinator', limit: 2, cursor });
+        const structured = past.structuredContent as Structured;
+        expect(structured.results).toEqual([]);
+        expect(structured.totalCount).toBe(2);
+        expect(structured.notice).toBeUndefined();
+        expect(counts).not.toHaveBeenCalled();
+      });
+
+      it.each(['vendor', 'product'])(
+        '%s past the 512-character ceiling fails as search_text_too_long with its recovery on both surfaces',
+        async (field) => {
+          const result = await run({ [field]: 'Ã'.repeat(513) });
+          expect(result.isError).toBe(true);
+          expect(JSON.stringify(result.structuredContent)).toContain('search_text_too_long');
+          expect(contentText(result)).toContain(`Shorten ${field} to at most 512 characters`);
+        },
+      );
+
+      it('runs the count pass only on a zero-hit result', async () => {
+        const counts = vi.spyOn(getCsafMirror(), 'filterCounts');
+        await run({ vendor: 'acme' });
+        await run({ limit: 1 });
+        expect(counts).not.toHaveBeenCalled();
+        await run({ vendor: 'acme', publisher: 'other' });
+        expect(counts).toHaveBeenCalledOnce();
+      });
+    });
+
+    describe('zero-hit notice on a series the fixture index holds', () => {
+      beforeEach(async () => {
+        await seedMirror([
+          ...BASE_ENTRIES,
+          {
+            name: 'CSAF-develop/csaf_files/OT/white/2019/icsma-19-001-01.json',
+            data: JSON.stringify(
+              sparseAdvisoryAs('ICSMA-19-001-01', '2019-01-01T00:00:00.000000Z'),
+            ),
+          },
+        ]);
+      }, 30000);
+
+      it('series ICSMA that matches alone draws no ICSMA fragment', async () => {
+        const result = await runToolContract(searchIcsAdvisoriesTool, {
+          series: 'ICSMA',
+          vendor: 'acme',
+        });
+        const structured = result.structuredContent as Structured;
+        expect(structured.totalCount).toBe(0);
+        expect(structured.notice).toBe(
+          'Every filter matches advisories on its own; dropping vendor restores 1 advisory, dropping series restores 1 advisory.',
+        );
       });
     });
 
@@ -478,6 +716,34 @@ describe('cisa_search_ics_advisories', () => {
           expect(structured.notice).not.toContain('No ICS advisory lists that CWE');
           expect(structured.notice).not.toContain('No advisory matches');
           expect(contentText(result)).toContain('may be incomplete');
+        });
+
+        it('a zero-hit cwe beside another filter is never named as matching nothing, and no count sentence leans on it', async () => {
+          const handle = await getCsafMirror().mirrorInstance.raw();
+          handle.exec('DELETE FROM advisory_cwes');
+          const result = await runToolContract(searchIcsAdvisoriesTool, {
+            cwe: 'CWE-20',
+            vendor: 'acme',
+          });
+          const structured = result.structuredContent as Structured;
+          expect(structured.totalCount).toBe(0);
+          expect(structured.notice).toMatch(/^This cwe result may be incomplete/);
+          for (const claim of ['cwe=', 'No ICS advisory lists', 'Dropping', 'Every filter']) {
+            expect(structured.notice).not.toContain(claim);
+          }
+          expect(contentText(result)).toContain(structured.notice as string);
+        });
+
+        it('another filter matching nothing is still named beside the withheld cwe', async () => {
+          const handle = await getCsafMirror().mirrorInstance.raw();
+          handle.exec('DELETE FROM advisory_cwes');
+          const notice = (
+            (await runToolContract(searchIcsAdvisoriesTool, { cwe: 'CWE-20', cvssMax: 1 }))
+              .structuredContent as Structured
+          ).notice as string;
+          expect(notice).toMatch(/^cvssMax=1 matches no advisory on its own — relax or drop it\. /);
+          expect(notice).toContain('may be incomplete');
+          expect(notice).not.toContain('Dropping');
         });
 
         it('a cwe search with hits carries the same disclosure', async () => {

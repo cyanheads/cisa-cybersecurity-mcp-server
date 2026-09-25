@@ -40,17 +40,16 @@
         },
         {
           "name": "CISA_KEV_REFRESH_CRON",
-          "description": "Cron expression for the KEV catalog conditional-refresh poll. HTTP transport only; an empty value disables the in-process schedule.",
+          "description": "Cron expression for the KEV catalog conditional-refresh poll, on every transport. Set off to disable it; an invalid expression fails startup.",
           "format": "string",
           "isRequired": false,
           "default": "*/30 * * * *"
         },
         {
           "name": "CISA_CSAF_MIRROR_PATH",
-          "description": "Filesystem path to the local SQLite index of ICS advisories.",
+          "description": "Filesystem path to the local SQLite index of ICS advisories. Unset, it is csaf.sqlite3 under cisa-cybersecurity-mcp-server in the per-user cache directory: ~/Library/Caches on macOS, $XDG_CACHE_HOME or ~/.cache on Linux, %LOCALAPPDATA% on Windows.",
           "format": "string",
-          "isRequired": false,
-          "default": ".mirror/csaf.sqlite3"
+          "isRequired": false
         },
         {
           "name": "CISA_CSAF_MIRROR_AUTO_INIT",
@@ -61,7 +60,7 @@
         },
         {
           "name": "CISA_CSAF_REFRESH_CRON",
-          "description": "Cron expression for the incremental ICS advisory refresh. HTTP transport only; an empty value disables it.",
+          "description": "Cron expression for the incremental ICS advisory refresh, on every transport; the refresh also runs once at startup. Set off to disable both; an invalid expression fails startup.",
           "format": "string",
           "isRequired": false,
           "default": "17 */6 * * *"
@@ -146,17 +145,16 @@
         },
         {
           "name": "CISA_KEV_REFRESH_CRON",
-          "description": "Cron expression for the KEV catalog conditional-refresh poll. HTTP transport only; an empty value disables the in-process schedule.",
+          "description": "Cron expression for the KEV catalog conditional-refresh poll, on every transport. Set off to disable it; an invalid expression fails startup.",
           "format": "string",
           "isRequired": false,
           "default": "*/30 * * * *"
         },
         {
           "name": "CISA_CSAF_MIRROR_PATH",
-          "description": "Filesystem path to the local SQLite index of ICS advisories.",
+          "description": "Filesystem path to the local SQLite index of ICS advisories. Unset, it is csaf.sqlite3 under cisa-cybersecurity-mcp-server in the per-user cache directory: ~/Library/Caches on macOS, $XDG_CACHE_HOME or ~/.cache on Linux, %LOCALAPPDATA% on Windows.",
           "format": "string",
-          "isRequired": false,
-          "default": ".mirror/csaf.sqlite3"
+          "isRequired": false
         },
         {
           "name": "CISA_CSAF_MIRROR_AUTO_INIT",
@@ -167,7 +165,7 @@
         },
         {
           "name": "CISA_CSAF_REFRESH_CRON",
-          "description": "Cron expression for the incremental ICS advisory refresh. HTTP transport only; an empty value disables it.",
+          "description": "Cron expression for the incremental ICS advisory refresh, on every transport; the refresh also runs once at startup. Set off to disable both; an invalid expression fails startup.",
           "format": "string",
           "isRequired": false,
           "default": "17 */6 * * *"

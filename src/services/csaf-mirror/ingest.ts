@@ -3,8 +3,8 @@
  * of the mirror.
  *
  * `init` streams one 11.4 MB repository archive and normalizes every document
- * under the OT distribution; the alternative is 3,926 individual
- * `raw.githubusercontent.com` requests. `refresh` conditionally fetches the
+ * under the OT distribution; the alternative is one `raw.githubusercontent.com`
+ * request per document, several thousand of them. `refresh` conditionally fetches the
  * 228 KB `changes.csv` manifest with `If-None-Match` (which
  * `raw.githubusercontent.com` honors), diffs its timestamps against the stored
  * `revised` values, and fetches only the documents whose timestamp moved. Because

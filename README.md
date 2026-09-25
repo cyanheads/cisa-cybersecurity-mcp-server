@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cisa-cybersecurity-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cisa-cybersecurity-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cisa-cybersecurity-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cisa-cybersecurity-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cisa-cybersecurity-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cisa-cybersecurity-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -73,7 +73,7 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 - Filters AND together over the whole snapshot: `vendorProject` and `product` (CISA's own labels, not CPE names), `nameContains`, `cwe`, `cveIdPrefix`, `dateAddedFrom` / `dateAddedTo`, `dueBefore` / `dueAfter`, `overdue`, `ransomware`, `forensicTriage`, `directive` (`BOD 26-04` / `BOD 22-01` / `none`); up to 100 per page (default 25) with an opaque `cursor`. `cwe` and `cveIdPrefix` normalize case and surrounding whitespace
 - Sorts by `dateAdded` (default) or `dueDate` and reports `totalCount` and `appliedFilters`; a zero-hit result names the filter that matches nothing on its own and what dropping it restores, or the filters whose removal restores results and how many
-- `nameContains` matches the letters a-z and the digits 0-9 after folding case and accents; any other letter or digit, such as a word in another script, is dropped, and the notice names it and the tokens actually searched
+- `nameContains` matches the letters a-z and the digits 0-9 after folding case and accents and spelling letters such as `ß`, `æ`, and `ø` as `ss`, `ae`, and `o`; any other letter or digit, such as a word in another script, is dropped, and the notice names it and the tokens actually searched
 - Typed errors: `catalog_unavailable` (retryable), `invalid_date_range`, `empty_search_text`
 
 ---
@@ -90,7 +90,9 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 - Full-text `q` over titles, vendor names, and product names, plus `vendor`, `product`, `cve`, `cwe`, `inKev`, `cvssMin` / `cvssMax`, `severity`, `sector`, `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` / `other`), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`; sorts by `revised` (default), `published`, `maxCvss`, or `relevance` (needs `q`); up to 50 per page (default 20) with an opaque `cursor`. `cve` and `cwe` normalize case and surrounding whitespace
 - Results carry `advisoryId`, up to 20 `cves` with `cveCount`, `kevCves`, `maxCvss` with `severityDerived`, `sectors`, `url`, `csafUrl`, and `attribution`; without `inKev`, an unloaded KEV snapshot leaves `kevCves` out and says so rather than failing
-- Typed errors: `mirror_not_ready` and `catalog_unavailable` (retryable), `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
+- Reports `totalCount` and `appliedFilters`; a zero-hit result names the filter that matches nothing on its own and what dropping it restores, or the filters whose removal restores results and how many
+- `vendor` and `product` are case-insensitive substrings matched literally, non-ASCII capitals included, so a label copied from a result matches its own advisories
+- Typed errors: `mirror_not_ready` and `catalog_unavailable` (retryable), `mirror_unavailable`, `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
 
 ---
 
@@ -98,7 +100,8 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 - `advisoryId` (optional revision suffix; case, surrounding whitespace, and a trailing `.json` are normalized, and every ID comes back in its uppercase form), optional `sections` (`advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`), and optional `cves` to narrow `vulnerabilities` to named entries
 - Returns `kind: "full"`, or `kind: "outline"` when a document read without `sections` exceeds the 24,000-byte budget: per-section byte sizes plus the CVE IDs in `vulnerabilities`, for a stateless re-call
-- An ID not in the index returns `found: false` with `guidance`; typed errors `mirror_not_ready` (retryable), `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`
+- An ID not in the index returns `found: false` with `guidance`, `indexCheckpoint`, and `indexLastSyncedAt`; the guidance says when the ID's own date is later than the last sync, so the advisory may be newer than the index
+- Typed errors: `mirror_not_ready` (retryable), `mirror_unavailable`, `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`
 
 ---
 
@@ -250,10 +253,10 @@ Every variable is optional; the server runs correctly with none of them set.
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `CISA_KEV_REFRESH_CRON` | Cron for the KEV conditional-refresh poll. HTTP transport only; empty disables it. | `*/30 * * * *` |
-| `CISA_CSAF_MIRROR_PATH` | Filesystem path to the ICS advisory SQLite index. | `.mirror/csaf.sqlite3` |
+| `CISA_KEV_REFRESH_CRON` | Cron for the KEV conditional-refresh poll, on every transport. `off` disables it; an invalid expression fails startup. | `*/30 * * * *` |
+| `CISA_CSAF_MIRROR_PATH` | Filesystem path to the ICS advisory SQLite index. | `<user cache dir>/cisa-cybersecurity-mcp-server/csaf.sqlite3` |
 | `CISA_CSAF_MIRROR_AUTO_INIT` | Seed the index in the background when it has never synced, and re-ingest one an older version built. | `true` |
-| `CISA_CSAF_REFRESH_CRON` | Cron for the incremental advisory refresh. HTTP transport only; empty disables it. | `17 */6 * * *` |
+| `CISA_CSAF_REFRESH_CRON` | Cron for the incremental advisory refresh, on every transport; it also runs once at startup. `off` disables both; an invalid expression fails startup. | `17 */6 * * *` |
 | `CISA_VULNRICHMENT_CACHE_TTL_SECONDS` | TTL for a cached SSVC record; negative results use one sixth of it. | `21600` |
 | `CISA_FEED_CACHE_TTL_SECONDS` | TTL for a parsed RSS feed window. | `900` |
 | `CISA_HTTP_TIMEOUT_MS` | Per-request timeout for every upstream fetch, in ms. | `30000` |
@@ -294,9 +297,9 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### ICS advisory index
 
-The two ICS tools and the advisory resource read a local SQLite index of the CSAF corpus at `CISA_CSAF_MIRROR_PATH`. On first run the server builds it in the background from one repository archive; until it is ready those surfaces return a retryable `mirror_not_ready`, and `cisa_list_reference` with topic `sources` shows progress. An index built by an older version re-ingests on the next start and keeps serving its current rows meanwhile. The `.mcpb` bundle needs nothing beyond that background seed.
+The two ICS tools and the advisory resource read a local SQLite index of the CSAF corpus at `CISA_CSAF_MIRROR_PATH`. Unset, it lives in your user cache directory — `~/Library/Caches` on macOS, `$XDG_CACHE_HOME` or `~/.cache` on Linux, `%LOCALAPPDATA%` on Windows — under `cisa-cybersecurity-mcp-server/csaf.sqlite3`, whatever directory the client starts the server from. On first run the server builds it in the background from one repository archive; until it is ready those surfaces return a retryable `mirror_not_ready`, and `cisa_list_reference` with topic `sources` shows progress. An index built by an older version re-ingests on the next start and keeps serving its current rows meanwhile. The `.mcpb` bundle needs nothing beyond that background seed. If the path cannot be opened (not writable, read-only, a missing directory, a file that is not a SQLite database), the ICS surfaces fail with a non-retryable `mirror_unavailable`, `sources` says why, and every other tool keeps working.
 
-HTTP deployments refresh the index on `CISA_CSAF_REFRESH_CRON`. For stdio, containers, CI, or seeding out of band (`CISA_CSAF_MIRROR_AUTO_INIT=false`), run the scripts directly:
+On every transport, the server refreshes the index once at startup and then on `CISA_CSAF_REFRESH_CRON`, and polls KEV on `CISA_KEV_REFRESH_CRON`. Server processes that share one index — every stdio session uses the default path — take a lease before seeding or refreshing it, so only one syncs at a time and the rest keep serving reads. For containers, CI, or seeding out of band (`CISA_CSAF_MIRROR_AUTO_INIT=false`, and `CISA_CSAF_REFRESH_CRON=off` to leave refreshes to you), run the scripts directly; they take the same lease:
 
 ```sh
 bun run mirror:init      # full build, idempotent, safe to re-run after an interrupt
@@ -311,7 +314,7 @@ docker build -t cisa-cybersecurity-mcp-server .
 docker run --rm -p 3010:3010 -v cisa-mirror:/usr/src/app/.mirror cisa-cybersecurity-mcp-server
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/cisa-cybersecurity-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them. Mount a volume over `/usr/src/app/.mirror` so the advisory index survives a container recreation; the image ships the `mirror:*` scripts for `docker exec <container> bun run mirror:refresh`.
+The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/cisa-cybersecurity-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them. The image sets `CISA_CSAF_MIRROR_PATH=/usr/src/app/.mirror/csaf.sqlite3`; mount a volume over `/usr/src/app/.mirror` so the advisory index survives a container recreation; the image ships the `mirror:*` scripts for `docker exec <container> bun run mirror:refresh`.
 
 ## Project structure
 

@@ -12,7 +12,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { configurationError, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { outlineOnOverflow } from '@cyanheads/mcp-ts-core/utils';
 import {
   ADVISORY_OUTLINE_BUDGET,
@@ -20,6 +20,7 @@ import {
   AdvisoryIdInputSchema,
   cvesNarrowingHint,
   extractAdvisorySections,
+  indexFreshnessNote,
 } from '@/mcp-server/schemas/advisory.js';
 import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
 
@@ -46,7 +47,20 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
 
   async handler(params) {
     const mirror = getCsafMirror();
-    if (!(await mirror.ready())) {
+    const availability = await mirror.availability();
+    if (availability.status === 'unavailable') {
+      throw configurationError(
+        `The ICS advisory index cannot be opened (${availability.reason.replaceAll('_', ' ')}).`,
+        {
+          reason: 'mirror_unavailable',
+          retryable: false,
+          recovery: {
+            hint: 'The server operator must set CISA_CSAF_MIRROR_PATH to a writable path and restart. Retrying will not help, but the cisa://kev resource and the KEV, SSVC, and alert tools still work.',
+          },
+        },
+      );
+    }
+    if (availability.status === 'not_ready') {
       throw serviceUnavailable('The ICS advisory index is still building.', {
         reason: 'mirror_not_ready',
         retryable: true,
@@ -59,9 +73,14 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
     const { advisoryId } = params;
     const doc = await mirror.getAdvisory(advisoryId);
     if (!doc) {
+      const index = await mirror.state();
       throw notFound(
-        `No advisory with ID ${advisoryId} is in the index. Call cisa_search_ics_advisories to find the right ID.`,
-        { advisoryId },
+        `No advisory with ID ${advisoryId} is in the index. ${indexFreshnessNote(advisoryId, index)} Call cisa_search_ics_advisories to find the right ID.`,
+        {
+          advisoryId,
+          indexCheckpoint: index.checkpoint,
+          indexLastSyncedAt: index.lastCompletedAt,
+        },
       );
     }
 
@@ -88,9 +107,11 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
     return result;
   },
 
+  /* Listing and completion degrade to empty on an unopenable index: a throw here
+   * would fail the whole resources/list, KEV entries included. */
   list: async () => {
     const mirror = getCsafMirror();
-    if (!(await mirror.ready())) return { resources: [] };
+    if ((await mirror.availability()).status !== 'ready') return { resources: [] };
     const recent = await mirror.recentlyRevised(LIST_LIMIT);
     return {
       resources: recent.map((entry) => ({
@@ -104,7 +125,7 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
   complete: {
     advisoryId: async (partial) => {
       const mirror = getCsafMirror();
-      if (!(await mirror.ready())) return [];
+      if ((await mirror.availability()).status !== 'ready') return [];
       return mirror.completeAdvisoryIds(partial, COMPLETION_LIMIT);
     },
   },

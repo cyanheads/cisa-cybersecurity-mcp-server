@@ -9,11 +9,13 @@
  * @module scripts/csaf-mirror-verify
  */
 
-import { logger } from '@cyanheads/mcp-ts-core/utils';
+import { logger, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 import { INGEST_CONTENT_VERSION, readIngestContentVersion } from '@/services/csaf-mirror/ingest.js';
 import { getMirror } from './_mirror-context.js';
 
-const mirror = await getMirror();
+const context = requestContextService.createRequestContext({ operation: 'mirror:verify' });
+
+const mirror = (await getMirror()).mirrorInstance;
 const status = await mirror.status();
 const contentVersion = readIngestContentVersion(await mirror.raw());
 
@@ -23,7 +25,7 @@ logger.info(
 if (status.error) logger.warning(`Last sync error: ${status.error}`);
 
 if (!status.ready) {
-  logger.error('Mirror is NOT ready — run mirror:init to build the index.');
+  logger.error('Mirror is NOT ready — run mirror:init to build the index.', context);
   await mirror.close();
   process.exit(1);
 }
@@ -36,7 +38,7 @@ if (contentVersion === null || contentVersion < INGEST_CONTENT_VERSION) {
 
 const integrity = await mirror.store.integrityCheck();
 if (!integrity.ok) {
-  logger.error(`SQLite integrity check FAILED: ${integrity.results.join('; ')}`);
+  logger.error(`SQLite integrity check FAILED: ${integrity.results.join('; ')}`, context);
   await mirror.close();
   process.exit(1);
 }

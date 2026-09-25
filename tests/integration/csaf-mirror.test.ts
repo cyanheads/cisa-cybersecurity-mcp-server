@@ -1,10 +1,12 @@
 /**
  * @fileoverview Integration test for the CSAF mirror — seeds a real SQLite
  * index through the actual ingest path (a hand-built gzip tar archive fake
- * standing in for the GitHub codeload response), then exercises search — the
- * literal LIKE and empty-`q` handling, the cwe filter, and KEV membership
- * (`inKev` paging, full-membership `kevCves`) — the raw-handle junction tables,
- * incremental refresh (changed / unchanged / tombstoned), the ingest-content
+ * standing in for the GitHub codeload response), then exercises search — every
+ * filter kind, literal and case-folded vendor/product matching, the search-text
+ * ceiling, empty-`q` handling, the cwe filter, and KEV membership (`inKev`
+ * paging, full-membership `kevCves`) — the per-filter counts against a
+ * brute-force oracle, coverage counts across a sync, the raw-handle junction
+ * tables, incremental refresh (changed / unchanged / tombstoned), the ingest-content
  * version, and the mirror_not_ready gate. Every mirror instance points at
  * a fresh temp-directory SQLite file, never the repo's `.mirror/csaf.sqlite3`.
  * @module tests/integration/csaf-mirror.test
@@ -25,7 +27,9 @@ import {
   CSAF_CHANGES_URL,
   INGEST_CONTENT_VERSION,
 } from '@/services/csaf-mirror/ingest.js';
-import { CSAF_OT_BASE } from '@/services/csaf-mirror/normalize.js';
+import { CSAF_OT_BASE, toSubstringGlob } from '@/services/csaf-mirror/normalize.js';
+import type { AdvisorySearchFilters } from '@/services/csaf-mirror/types.js';
+import { MAX_SEARCH_TEXT_LENGTH } from '@/services/search-text.js';
 import {
   buildOversizedAdvisory,
   FULL_ADVISORY,
@@ -33,6 +37,7 @@ import {
   SPARSE_ADVISORY,
 } from '../fixtures/csaf-documents.js';
 import { buildTarGzResponse } from '../fixtures/tar.js';
+import { bestMsBySize } from '../helpers/linear-time.js';
 
 const FULL_PATH = '2026/icsa-26-260-07.json';
 const SPARSE_PATH = '2014/icsa-14-035-01.json';
@@ -216,6 +221,35 @@ describe('CsafMirrorService — real ingest path', () => {
       expect(await ids({ q: 'hmi-9000' })).toEqual(['ICSA-14-035-01']);
     });
 
+    it.each([
+      [{ q: 'Widget' }, ['ICSA-26-260-07']],
+      [{ q: 'hmi', sortBy: 'relevance' }, ['ICSA-14-035-01']],
+      [{ vendor: 'CORP' }, ['ICSA-14-035-01']],
+      [{ product: 'x200' }, ['ICSA-26-260-07']],
+      [{ cve: 'CVE-2025-5555' }, ['ICSA-25-100-02']],
+      [{ cwe: 'CWE-20' }, ['ICSA-26-260-07']],
+      [{ sector: 'Energy' }, ['ICSA-26-260-07']],
+      [{ cvssMin: 8 }, ['ICSA-26-260-07']],
+      [{ cvssMax: 8 }, ['ICSA-14-035-01']],
+      [{ severity: 'HIGH' }, ['ICSA-14-035-01']],
+      [{ series: 'ICSA' }, ['ICSA-26-260-07', 'ICSA-25-100-02', 'ICSA-14-035-01']],
+      [{ series: 'ICSMA' }, []],
+      [{ publisher: 'coordinator' }, ['ICSA-26-260-07', 'ICSA-14-035-01']],
+      [{ publishedFrom: '2025-01-01' }, ['ICSA-26-260-07', 'ICSA-25-100-02']],
+      [{ publishedTo: '2025-12-31' }, ['ICSA-25-100-02', 'ICSA-14-035-01']],
+      [{ revisedFrom: '2026-09-18' }, ['ICSA-26-260-07']],
+      [{ revisedTo: '2014-12-31' }, ['ICSA-14-035-01']],
+      [{ vendor: 'e', publisher: 'coordinator', publishedTo: '2020-01-01' }, ['ICSA-14-035-01']],
+      [{ q: 'Widget', cvssMin: 9, sector: 'Energy', cwe: 'CWE-20' }, ['ICSA-26-260-07']],
+    ] as const)('filters %j keep matching %j', async (filters, expected) => {
+      const page = await getCsafMirror().search(
+        { sortBy: 'revised', order: 'desc', limit: 20, offset: 0, ...filters },
+        createMockContext(),
+      );
+      expect(page.items.map((item) => item.advisoryId)).toEqual(expected);
+      expect(page.total).toBe(expected.length);
+    });
+
     it('a search result lists at most the first twenty CVEs, alphabetically', async () => {
       const page = await getCsafMirror().search(
         { cve: 'CVE-2026-12345', sortBy: 'revised', order: 'desc', limit: 20, offset: 0 },
@@ -255,7 +289,115 @@ describe('CsafMirrorService — real ingest path', () => {
       expect(coverage.noCvss).toBe(1); /* REPUBLISHED_ADVISORY carries no CVSS at all. */
     });
 
+    describe('filterCounts', () => {
+      const KEV = new Set(['CVE-2026-12345']);
+      const total = async (filters: Record<string, unknown>) =>
+        (
+          await getCsafMirror().search(
+            { ...filters, sortBy: 'revised', order: 'desc', limit: 1, offset: 0 },
+            createMockContext(),
+            KEV,
+          )
+        ).total;
+
+      /* Every filter kind — FTS, substring, junction, KEV set, nullable score, date — in combinations that miss. */
+      const combinations: Array<Partial<AdvisorySearchFilters>> = [
+        { cwe: 'CWE-20', publishedTo: '2015-01-01' },
+        { vendor: 'acme', cve: 'CVE-2099-00001' },
+        { q: 'Widget', publisher: 'other' },
+        { product: 'HMI', cvssMin: 9, sector: 'Energy' },
+        { inKev: true, cvssMax: 8 },
+        { inKev: false, severity: 'CRITICAL' },
+        { cvssMin: 0, publisher: 'other' },
+        { vendor: 'acme', publisher: 'other', publishedTo: '2015-01-01' },
+        { series: 'ICSMA', revisedFrom: '2026-01-01', revisedTo: '2026-12-31' },
+        { cve: 'CVE-2099-00001', vendor: 'acme', publisher: 'other' },
+      ];
+      it.each(combinations)('%j: each count equals the search it stands for', async (filters) => {
+        expect(await total(filters)).toBe(0);
+        const counts = await getCsafMirror().filterCounts(
+          { ...filters, sortBy: 'revised', order: 'desc', limit: 1, offset: 0 },
+          KEV,
+        );
+        expect(counts.map((count) => count.filter).sort()).toEqual(Object.keys(filters).sort());
+        for (const { filter, alone, restoredByDropping } of counts) {
+          const value = filters[filter as keyof typeof filters];
+          const others = Object.fromEntries(
+            Object.entries(filters).filter(([key]) => key !== filter),
+          );
+          expect({ filter, alone }).toEqual({ filter, alone: await total({ [filter]: value }) });
+          expect({ filter, restoredByDropping }).toEqual({
+            filter,
+            restoredByDropping: await total(others),
+          });
+        }
+      });
+
+      it('reads the counts from the index: body case 1 and 2 shapes on the fixture', async () => {
+        const counts = (filters: Record<string, unknown>) =>
+          getCsafMirror().filterCounts(
+            { ...filters, sortBy: 'revised', order: 'desc', limit: 1, offset: 0 },
+            KEV,
+          );
+        expect(await counts({ cwe: 'CWE-20', publishedTo: '2015-01-01' })).toEqual([
+          { filter: 'cwe', alone: 1, restoredByDropping: 1 },
+          { filter: 'publishedTo', alone: 1, restoredByDropping: 1 },
+        ]);
+        expect(await counts({ vendor: 'acme', cve: 'CVE-2099-00001' })).toEqual([
+          { filter: 'vendor', alone: 1, restoredByDropping: 0 },
+          { filter: 'cve', alone: 0, restoredByDropping: 1 },
+        ]);
+        /* A NULL score is a miss for cvssMin 0, as in the search. */
+        expect(await counts({ cvssMin: 0 })).toEqual([
+          { filter: 'cvssMin', alone: 2, restoredByDropping: 1 },
+        ]);
+      });
+
+      it('is empty with no filter applied', async () => {
+        expect(
+          await getCsafMirror().filterCounts({
+            sortBy: 'revised',
+            order: 'desc',
+            limit: 1,
+            offset: 0,
+          }),
+        ).toEqual([]);
+      });
+    });
+
     describe('refresh', () => {
+      it('coverageCounts reports the corpus a completed sync left behind, without a restart', async () => {
+        expect(await getCsafMirror().coverageCounts()).toEqual({
+          total: 3,
+          noSector: 1,
+          v2Only: 1,
+          noCvss: 1,
+        });
+        /* The manifest drops REPUBLISHED_ADVISORY, the one advisory with no CVSS. */
+        const manifest = [
+          `"${FULL_PATH}","2026-09-18T06:00:00.000000Z"`,
+          `"${SPARSE_PATH}","2014-02-04T00:00:00.000000Z"`,
+        ].join('\n');
+        const http = createFetchMock([
+          {
+            match: CSAF_CHANGES_URL,
+            respond: new Response(manifest, { status: 200, headers: { etag: '"v4"' } }),
+          },
+        ]);
+        http.install();
+        try {
+          await getCsafMirror().sync('refresh', AbortSignal.timeout(30_000));
+        } finally {
+          http.restore();
+        }
+        expect(await getCsafMirror().coverageCounts()).toEqual({
+          total: 2,
+          noSector: 1,
+          v2Only: 1,
+          noCvss: 0,
+        });
+      }, 30000);
+
       it('fetches only the changed document, leaves the unchanged one alone, and tombstones the dropped one', async () => {
         const updatedFull = {
           ...FULL_ADVISORY,
@@ -598,6 +740,130 @@ describe('CsafMirrorService — real ingest path', () => {
     it('completeAdvisoryIds treats an underscore in the prefix literally', async () => {
       expect(await getCsafMirror().completeAdvisoryIds('ICSA_25', 10)).toEqual([]);
       expect(await getCsafMirror().completeAdvisoryIds('icsa-25-345-1', 10)).toHaveLength(4);
+    });
+  });
+
+  describe('vendor and product fold case alike on both sides', () => {
+    /** FULL_ADVISORY under a different ID, vendor label, and product name. */
+    const withLabels = (advisoryId: string, vendor: string, product: string) => {
+      const [vendorBranch] = FULL_ADVISORY.product_tree.branches;
+      const [productBranch] = vendorBranch?.branches ?? [];
+      return {
+        ...FULL_ADVISORY,
+        document: {
+          ...FULL_ADVISORY.document,
+          tracking: { ...FULL_ADVISORY.document.tracking, id: advisoryId },
+        },
+        product_tree: {
+          branches: [
+            { ...vendorBranch, name: vendor, branches: [{ ...productBranch, name: product }] },
+          ],
+        },
+      };
+    };
+
+    const ids = async (filters: Record<string, unknown>) =>
+      (
+        await getCsafMirror().search(
+          { ...filters, sortBy: 'revised', order: 'desc', limit: 20, offset: 0 },
+          createMockContext(),
+        )
+      ).items
+        .map((item) => item.advisoryId)
+        .sort();
+
+    beforeEach(async () => {
+      const http = createFetchMock([
+        {
+          match: CSAF_ARCHIVE_URL,
+          respond: () =>
+            buildTarGzResponse(
+              [
+                /* Labels as upstream serves them: a non-ASCII capital in the stored text. */
+                ['ICSA-17-045-02', 'GeutebrÃ¼ck', 'G-Cam EFD-2250'],
+                ['ICSA-17-045-03', 'Weidmüller', 'ÜberPanel 5'],
+                ['ICSA-17-045-04', 'Acme_Corp', 'Widget 100%'],
+              ].map(([id, vendor, product]) => ({
+                name: `CSAF-develop/csaf_files/OT/white/2017/${(id as string).toLowerCase()}.json`,
+                data: JSON.stringify(withLabels(id as string, vendor as string, product as string)),
+              })),
+            ),
+        },
+      ]);
+      http.install();
+      try {
+        await getCsafMirror().mirrorInstance.runSync({
+          mode: 'init',
+          signal: AbortSignal.timeout(30_000),
+        });
+      } finally {
+        http.restore();
+      }
+    }, 30000);
+
+    it.each(['GeutebrÃ¼ck', 'geutebrÃ¼ck', 'GEUTEBRÃ¼CK', 'geutebrã¼ck', 'Geutebr'])(
+      'vendor %j matches the label with a stored non-ASCII capital',
+      async (vendor) => {
+        expect(await ids({ vendor })).toEqual(['ICSA-17-045-02']);
+      },
+    );
+
+    it.each(['ÜberPanel', 'überpanel', 'ÜBERPANEL', 'berPanel 5'])(
+      'product %j matches the name with a stored non-ASCII capital',
+      async (product) => {
+        expect(await ids({ product })).toEqual(['ICSA-17-045-03']);
+      },
+    );
+
+    it.each(['Weidmüller', 'WEIDMÜLLER', 'weidmüller'])(
+      'vendor %j still matches a stored non-ASCII lowercase letter',
+      async (vendor) => {
+        expect(await ids({ vendor })).toEqual(['ICSA-17-045-03']);
+      },
+    );
+
+    it.each([
+      ['vendor', 'a'],
+      ['vendor', 'Ã'],
+      ['product', 'a'],
+    ])(
+      '%s past the search-text ceiling fails as search_text_too_long, never as SQLite refusing the pattern (%s)',
+      async (field, letter) => {
+        /* SQLite refuses a LIKE or GLOB pattern over 50,000 bytes; a class per
+         * non-ASCII letter reaches that at about 8,300 characters. */
+        for (const length of [MAX_SEARCH_TEXT_LENGTH + 1, 50_001]) {
+          await expect(ids({ [field]: letter.repeat(length) })).rejects.toMatchObject({
+            data: { reason: 'search_text_too_long', field },
+          });
+        }
+        expect(await ids({ [field]: letter.repeat(MAX_SEARCH_TEXT_LENGTH) })).toEqual([]);
+      },
+    );
+
+    it('the GLOB a vendor needle becomes costs linear time on its worst case, a class for every character', async () => {
+      const handle = await getCsafMirror().mirrorInstance.raw();
+      const statement = handle.prepare<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM ics_advisories a WHERE LOWER(a.vendorsText) GLOB ?',
+      );
+      /* The statement search() runs for a vendor filter. Past about 8,300 classes
+       * SQLite refuses the pattern, so the sizes stop well short of that. */
+      const times = bestMsBySize(
+        (needle) => statement.get(toSubstringGlob(needle)),
+        (length) => 'Ã'.repeat(length / 10),
+      );
+      expect(times[80_000] / times[5_000]).toBeLessThan(64);
+      expect(times[80_000]).toBeLessThan(200);
+    }, 60_000);
+
+    it('%, _, and \\ stay literal and the GLOB syntax characters are literal too', async () => {
+      expect(await ids({ vendor: 'acme_corp' })).toEqual(['ICSA-17-045-04']);
+      expect(await ids({ vendor: 'Acme%Corp' })).toEqual([]);
+      expect(await ids({ vendor: 'Acme?Corp' })).toEqual([]);
+      expect(await ids({ vendor: 'Acme*' })).toEqual([]);
+      expect(await ids({ vendor: '[A]cme' })).toEqual([]);
+      expect(await ids({ product: 'widget 100%' })).toEqual(['ICSA-17-045-04']);
+      expect(await ids({ product: 'Widget 1_0' })).toEqual([]);
+      expect(await ids({ product: 'Widget\\ 100' })).toEqual([]);
     });
   });
 

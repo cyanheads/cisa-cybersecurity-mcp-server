@@ -92,6 +92,24 @@ describe('cisa_list_reference', () => {
     expect(JSON.stringify(result)).not.toMatch(DRIFTING_CATALOG_COUNT);
   });
 
+  it.each([
+    ['sectors', 'Coverage begins in 2017'],
+    ['advisory_id_formats', 'Revision suffix'],
+    ['severity_bands', 'How maxCvss is computed'],
+  ])(
+    'topic %s states no advisory-corpus count that drifts with each index refresh',
+    async (topic, anchor) => {
+      const result = await listReferenceTool.handler(
+        listReferenceTool.input.parse({ topic }),
+        createMockContext(),
+      );
+      const text = firstText(listReferenceTool.format?.(result));
+      expect(text).toContain(anchor);
+      expect(text).not.toMatch(DRIFTING_CATALOG_COUNT);
+      expect(JSON.stringify(result)).not.toMatch(DRIFTING_CATALOG_COUNT);
+    },
+  );
+
   it('topic directives returns the full 16-row Table 1, definitions, and supersedes', async () => {
     const ctx = createMockContext();
     const input = listReferenceTool.input.parse({ topic: 'directives' });
@@ -176,5 +194,17 @@ describe('cisa_list_reference', () => {
      * this asserts the tool actually calls them without throwing. */
     expect(getVulnrichment().state().mode).toBe('on_demand');
     expect(getCisaFeeds().state().windowItems).toBe(30);
+
+    /* The ready-index arm keeps exactly these fields and this rendered line. */
+    const mirror = result.sources?.csafMirror;
+    expect(Object.keys(mirror ?? {}).sort()).toEqual(
+      ['checkpoint', 'documentCount', 'lastCompletedAt', 'ready', 'syncStatus'].sort(),
+    );
+    expect(mirror?.syncStatus).toBe('complete');
+    const text = firstText(listReferenceTool.format?.(result));
+    expect(text).toContain(
+      `- **ICS advisory index** — ready: yes, 1 documents, sync status complete, checkpoint ${mirror?.checkpoint}, last completed ${mirror?.lastCompletedAt}.`,
+    );
+    expect(text).toContain('refresh cron `*/30 * * * *`.');
   }, 20000);
 });

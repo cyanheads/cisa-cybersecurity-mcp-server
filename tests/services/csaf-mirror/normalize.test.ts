@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for pure CSAF normalization — advisory-ID handling,
- * product-tree flattening, CVSS scoring, attribution, and the `changes.csv`
- * parser. No network, no database.
+ * product-tree flattening, CVSS scoring, attribution, the `changes.csv` parser,
+ * and the FTS5 `MATCH` and substring `GLOB` builders. No network, no database.
  * @module tests/services/csaf-mirror/normalize.test
  */
 
@@ -9,6 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
 import {
   ADVISORY_ID_PATTERN,
+  advisoryIdDate,
   advisorySeries,
   advisoryWebUrl,
   buildAttribution,
@@ -21,6 +22,7 @@ import {
   readScores,
   toFtsMatch,
   toMirrorRow,
+  toSubstringGlob,
 } from '@/services/csaf-mirror/normalize.js';
 import { MAX_SEARCH_TEXT_LENGTH } from '@/services/search-text.js';
 import {
@@ -29,6 +31,7 @@ import {
   REPUBLISHED_ADVISORY,
   SPARSE_ADVISORY,
 } from '../../fixtures/csaf-documents.js';
+import { bestMsBySize } from '../../helpers/linear-time.js';
 
 describe('normalizeAdvisoryId', () => {
   it('uppercases, trims, and strips a trailing .json', () => {
@@ -80,6 +83,27 @@ describe('ADVISORY_ID_PATTERN', () => {
       expect(ADVISORY_ID_PATTERN.test(advisoryId), advisoryId).toBe(true);
     }
   });
+});
+
+describe('advisoryIdDate', () => {
+  it.each([
+    ['ICSA-26-265-09', '2026-09-22'],
+    ['ICSMA-26-253-02', '2026-09-10'],
+    ['ICSA-10-316-01A', '2010-11-12'],
+    ['ICSA-16-231-01-0', '2016-08-18'],
+    ['ICSA-26-001-01', '2026-01-01'],
+    ['ICSA-24-366-01', '2024-12-31'],
+    ['ICSA-26-365-01', '2026-12-31'],
+  ])('reads %s as 20YY plus day-of-year: %s', (advisoryId, date) => {
+    expect(advisoryIdDate(advisoryId)).toBe(date);
+  });
+
+  it.each(['ICSA-26-366-01', 'ICSA-26-000-01', 'ICSA-24-367-01', 'ICSA-26-999-01', 'not-an-id'])(
+    'returns null for %s, whose day is out of range for its year or which is no ID',
+    (advisoryId) => {
+      expect(advisoryIdDate(advisoryId)).toBeNull();
+    },
+  );
 });
 
 describe('advisorySeries / advisoryWebUrl', () => {
@@ -547,6 +571,31 @@ describe('toFtsMatch', () => {
   it('accepts a query exactly at the ceiling', () => {
     expect(() => toFtsMatch('a'.repeat(MAX_SEARCH_TEXT_LENGTH))).not.toThrow();
   });
+});
+
+describe('toSubstringGlob', () => {
+  it.each([
+    ['ASCII, lowered to meet LOWER()', 'SIEMENS ag', '*siemens ag*'],
+    ['a non-ASCII capital, as a class of both forms', 'GeutebrÃ¼ck', '*geutebr[Ãã]¼ck*'],
+    ['a non-ASCII lowercase letter, as a class of both forms', 'ü', '*[üÜ]*'],
+    ['a letter whose uppercase is two characters, literal', 'Straße', '*straße*'],
+    ['a caseless script, literal', '漏洞', '*漏洞*'],
+    ['the GLOB syntax characters, as one-character classes', 'a*b?c[d]', '*a[*]b[?]c[[]d]*'],
+    ['the LIKE wildcards and backslash, literal', '100%_\\', '*100%_\\*'],
+  ])('%s: %j → %j', (_label, value, pattern) => {
+    expect(toSubstringGlob(value)).toBe(pattern);
+  });
+
+  it('keeps a lone surrogate as an ordinary character', () => {
+    expect(toSubstringGlob('a\uD800b')).toBe('*a\uD800b*');
+  });
+
+  it('builds in linear time on its worst case, a class for every character', () => {
+    const times = bestMsBySize(toSubstringGlob, (length) => 'Ã'.repeat(length));
+    /* 16x the input: linear growth is ~16x, quadratic ~256x. */
+    expect(times[80_000] / times[5_000]).toBeLessThan(64);
+    expect(times[80_000]).toBeLessThan(200);
+  }, 60_000);
 });
 
 describe('buildOversizedAdvisory fixture sanity', () => {

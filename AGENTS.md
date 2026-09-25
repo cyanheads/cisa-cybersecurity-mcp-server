@@ -35,8 +35,8 @@ No prompts: every workflow here is a direct lookup or a filtered search the tool
 
 | Service | Tier | Refresh |
 |:--------|:-----|:--------|
-| `kev-catalog` | In-memory process-level snapshot with derived indexes | `If-Modified-Since` poll on `CISA_KEV_REFRESH_CRON`. `If-None-Match` is deliberately unused — the origin serves an ETag and ignores it. |
-| `csaf-mirror` | `MirrorService` over embedded SQLite + FTS5 | One archive seeds it; refresh diffs `changes.csv` and fetches only the documents whose revision date moved. An index whose recorded `INGEST_CONTENT_VERSION` is older re-ingests the archive in place on boot. |
+| `kev-catalog` | In-memory process-level snapshot with derived indexes | `If-Modified-Since` poll on `CISA_KEV_REFRESH_CRON`, on every transport. `If-None-Match` is deliberately unused — the origin serves an ETag and ignores it. |
+| `csaf-mirror` | `MirrorService` over embedded SQLite + FTS5 | One archive seeds it; refresh diffs `changes.csv` and fetches only the documents whose revision date moved. `maintain()` runs once at boot and on `CISA_CSAF_REFRESH_CRON` (`src/services/refresh-schedule.ts`), on every transport: seed or re-ingest (older `INGEST_CONTENT_VERSION`) under auto-init, else refresh. Every sync takes a cross-process lease (`sync-lease.ts`). |
 | `vulnrichment` | Per-CVE fetch with a `ctx.state` TTL cache | On demand. A 404 caches as a negative at one sixth of the TTL. |
 | `cisa-feeds` | Timer cache | Unconditional — the feeds serve no `etag` and no `last-modified`, so nothing can make a request conditional. |
 
@@ -45,11 +45,13 @@ No prompts: every workflow here is a direct lookup or a filtered search the tool
 - Boot never depends on the advisory corpus. KEV, SSVC, and alert tools serve from the first request; the index seeds in the background and reports `mirror_not_ready` until it lands.
 - An HTML body on a JSON or XML route is `ServiceUnavailable`, never `SerializationError` — cisa.gov serves a Drupal error page transiently, and a parse-error classification makes a recoverable outage look like a data-shape defect.
 - A not-yet-seeded index throws rather than returning an empty result: an empty page asserts that nothing matches.
+- An index store that cannot be opened is `mirror_unavailable` (`ConfigurationError`, non-retryable), never the raw filesystem error: caller-facing text never carries the index path, and resource listing and completion degrade to empty so `resources/list` keeps serving the KEV entries.
+- Two processes never sync one index at once. Seed and refresh go through `CsafMirrorService.sync()`, which holds the `mirror_meta` lease (`sync-lease.ts`) — never call `mirrorInstance.runSync()` directly outside tests.
 - Raise `INGEST_CONTENT_VERSION` (`src/services/csaf-mirror/ingest.ts`) whenever ingest would store different content for a document upstream has not revised — a row field, the stored document, a junction table. `refresh` never revisits an unchanged document, so without the bump the change never reaches an existing index. A new auxiliary table also needs a migration and a raised store-spec `version`.
 - A computed BOD 26-04 timeline and CISA's assigned KEV due date are two separate facts, reported side by side and never reconciled.
 - No DHS seal, CISA logo, or implied endorsement on any surface. Advisory responses always carry `url`, `csafUrl`, and `attribution` — the CSAF repository declares no license and many advisories republish vendor text.
 
-**Mirror scripts** — `scripts/csaf-mirror-{init,refresh,verify}.ts`, sharing `scripts/_mirror-context.ts`. They ship in `package.json` `files[]` and in the Docker image, for `docker exec`, CI, and stdio operators who want explicit control over a background seed they cannot schedule.
+**Mirror scripts** — `scripts/csaf-mirror-{init,refresh,verify}.ts`, sharing `scripts/_mirror-context.ts`. They ship in `package.json` `files[]` and in the Docker image, for `docker exec`, CI, and operators who drive seeding or refreshes themselves (`CISA_CSAF_MIRROR_AUTO_INIT=false`, `CISA_CSAF_REFRESH_CRON=off`). They resolve the server's index path and take its sync lease, so a run that finds a server syncing skips.
 
 ```sh
 bun run mirror:init      # full build from the repository archive; idempotent
@@ -201,24 +203,35 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  csafMirrorPath: z.string().default('.mirror/csaf.sqlite3')
-    .describe('Filesystem path to the ICS advisory SQLite index.'),
+  kevRefreshCron: refreshCron('*/30 * * * *')   // 'off' disables; any other non-cron value fails startup
+    .describe('Cron for the KEV conditional-refresh poll, on every transport; "off" disables it.'),
+  csafMirrorPath: z.string().optional()           // unset → defaultCsafMirrorPath(): the per-user cache dir
+    .describe('Filesystem path to the ICS advisory SQLite index; unset, the per-user cache directory.'),
   csafMirrorAutoInit: z.stringbool().default(true)
     .describe('Seed the advisory mirror in the background at startup when it has never synced.'),
   httpTimeoutMs: z.coerce.number().int().positive().default(30_000)
     .describe('Per-request timeout for every upstream fetch, in milliseconds.'),
 });
 
-let _config: z.infer<typeof ServerConfigSchema> | undefined;
-export function getServerConfig() {
-  _config ??= parseEnvConfig(ServerConfigSchema, {
+let _config: ServerConfig | undefined;
+export function getServerConfig(): ServerConfig {
+  if (_config) return _config;
+  const parsed = parseEnvConfig(ServerConfigSchema, {
+    kevRefreshCron: 'CISA_KEV_REFRESH_CRON',
     csafMirrorPath: 'CISA_CSAF_MIRROR_PATH',
     csafMirrorAutoInit: 'CISA_CSAF_MIRROR_AUTO_INIT',
     httpTimeoutMs: 'CISA_HTTP_TIMEOUT_MS',
   });
+  _config = {
+    ...parsed,
+    csafMirrorPath: parsed.csafMirrorPath ??
+      defaultCsafMirrorPath({ env: process.env, homedir: homedir(), platform: process.platform }),
+  };
   return _config;
 }
 ```
+
+The index default is never relative to the working directory: some clients start stdio servers at `/`. `defaultCsafMirrorPath()` takes the host as an argument so tests resolve it without touching the real user cache. A refresh cron's empty value keeps meaning the default — the `.mcpb` host forwards `""` for every option left blank — so `off` is the disable value.
 
 All seven `CISA_*` variables are optional — every source is keyless and every tunable has a working default, so the server runs correctly with none of them set. Adding one means editing four files together: the schema above, `.env.example`, `server.json` `environmentVariables[]` (both package entries), and `manifest.json` (`mcp_config.env` + `user_config`). `lint:packaging` fails on a mismatch.
 
@@ -326,9 +339,9 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() — services, cron jobs, surface registration
+  index.ts                              # createApp() — services, background refresh, surface registration
   config/
-    server-config.ts                    # The seven CISA_* vars (Zod schema, lazy-parsed)
+    server-config.ts                    # The seven CISA_* vars (Zod schema, lazy-parsed) and the per-user index default
   reference/
     bod-2604.ts                         # Table 1, its definitions, and the timeline resolver
     cvss.ts                             # Severity bands and the CVSS v2 band derivation
@@ -337,7 +350,8 @@ src/
   services/
     kev-catalog/                        # kev-catalog-service.ts, parse.ts, types.ts
     vulnrichment/                       # vulnrichment-service.ts, paths.ts, types.ts
-    csaf-mirror/                        # csaf-mirror-service.ts, ingest.ts, normalize.ts, schema.ts, tar.ts, types.ts
+    csaf-mirror/                        # csaf-mirror-service.ts, ingest.ts, normalize.ts, schema.ts, sync-lease.ts, tar.ts, types.ts
+    refresh-schedule.ts                 # Boot pass over the index and the two refresh cron jobs, every transport
     upstream-http.ts                    # The single fetch boundary every service reaches the network through
   mcp-server/
     schemas/

@@ -12,7 +12,12 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { OUTLINE_VARIANT } from '@cyanheads/mcp-ts-core/utils';
-import { ADVISORY_ID_PATTERN, normalizeAdvisoryId } from '@/services/csaf-mirror/normalize.js';
+import {
+  ADVISORY_ID_PATTERN,
+  advisoryIdDate,
+  advisoryWebUrl,
+  normalizeAdvisoryId,
+} from '@/services/csaf-mirror/normalize.js';
 import type { NormalizedAdvisory } from '@/services/csaf-mirror/types.js';
 
 /**
@@ -352,6 +357,29 @@ export function cvesNarrowingHint(sections: readonly OutlineSection[], budget: n
   const vulnerabilities = sections.find((section) => section.name === 'vulnerabilities');
   if (!vulnerabilities || vulnerabilities.bytes <= budget) return '';
   return `The vulnerabilities section alone is ${vulnerabilities.bytes} bytes; pass cves with IDs from its listed CVEs to cisa_get_advisory to read only those entries.`;
+}
+
+/**
+ * What a miss says about how current the index is: its checkpoint and last
+ * completed sync, and — when the ID's own date is later than that sync's UTC
+ * date and not later than today — that the advisory may be newer than the
+ * index. Keyed on the last sync, not the checkpoint: the checkpoint is a
+ * revision timestamp that trails the sync, so an ID dated between the two was
+ * published before a sync that did not find it. A same-day ID gets no note.
+ */
+export function indexFreshnessNote(
+  advisoryId: string,
+  index: { checkpoint: string | null; lastCompletedAt: string | null },
+  now: Date = new Date(),
+): string {
+  const text = `The index holds advisories revised through ${index.checkpoint ?? 'none'} and last completed a sync at ${index.lastCompletedAt ?? 'never'}.`;
+  const idDate = advisoryIdDate(advisoryId);
+  const synced = index.lastCompletedAt ? new Date(index.lastCompletedAt) : undefined;
+  if (!idDate || !synced || Number.isNaN(synced.getTime())) return text;
+  const syncDay = synced.toISOString().slice(0, 10);
+  const today = now.toISOString().slice(0, 10);
+  if (idDate <= syncDay || idDate > today) return text;
+  return `${text} ${advisoryId} is dated ${idDate} by its ID, after that sync, so it may be newer than the index; an index refresh picks it up, and cisa.gov publishes it at ${advisoryWebUrl(advisoryId)}.`;
 }
 
 // ── Renderers ───────────────────────────────────────────────────────────────

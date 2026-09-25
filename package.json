@@ -79,7 +79,7 @@
     "url": "git+https://github.com/cyanheads/cisa-cybersecurity-mcp-server.git"
   },
   "license": "Apache-2.0",
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.2",
   "engines": {
     "bun": ">=1.4.0",
     "node": ">=24.0.0"

@@ -38,14 +38,14 @@
     "cisa_kev_refresh_cron": {
       "type": "string",
       "title": "KEV refresh cron",
-      "description": "Cron expression for the KEV catalog conditional-refresh poll. Applies to HTTP transport only; leave blank for the default */30 * * * *.",
+      "description": "Cron expression for the KEV catalog conditional-refresh poll. Enter off to disable it; leave blank for the default */30 * * * *.",
       "required": false,
       "default": ""
     },
     "cisa_csaf_mirror_path": {
       "type": "string",
       "title": "ICS advisory index path",
-      "description": "Filesystem path to the local SQLite index of ICS advisories. Leave blank for .mirror/csaf.sqlite3.",
+      "description": "Filesystem path to the local SQLite index of ICS advisories. Leave blank for csaf.sqlite3 under cisa-cybersecurity-mcp-server in your user cache directory (~/Library/Caches on macOS, %LOCALAPPDATA% on Windows, $XDG_CACHE_HOME or ~/.cache on Linux).",
       "required": false,
       "default": ""
     },
@@ -59,7 +59,7 @@
     "cisa_csaf_refresh_cron": {
       "type": "string",
       "title": "ICS advisory refresh cron",
-      "description": "Cron expression for the incremental ICS advisory refresh. Applies to HTTP transport only; leave blank for the default 17 */6 * * *.",
+      "description": "Cron expression for the incremental ICS advisory refresh, which also runs once at startup. Enter off to disable both; leave blank for the default 17 */6 * * *.",
       "required": false,
       "default": ""
     },

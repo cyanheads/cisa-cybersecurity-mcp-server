@@ -231,6 +231,21 @@ export interface AdvisorySearchFilters {
   vendor?: string | undefined;
 }
 
+/** One filter the advisory search applies, by the name the caller sets it under. */
+export type AdvisoryFilterKey = Exclude<
+  keyof AdvisorySearchFilters,
+  'limit' | 'offset' | 'order' | 'sortBy'
+>;
+
+/** How one applied filter behaves against the whole index. */
+export interface AdvisoryFilterCount {
+  /** Advisories this filter matches on its own. */
+  alone: number;
+  filter: AdvisoryFilterKey;
+  /** Advisories that fail this filter and pass every other applied one — what dropping it restores. */
+  restoredByDropping: number;
+}
+
 /** One page of advisory search results. */
 export interface AdvisorySearchPage {
   items: AdvisorySearchResult[];
@@ -252,6 +267,23 @@ export interface IngestContentState {
   stored: number | null;
 }
 
+/**
+ * Why the index store cannot be opened: the location is not writable, the
+ * filesystem or database is read-only, a directory on the path is missing, a
+ * path component is a regular file, or the file at the path is not a SQLite
+ * database.
+ */
+export const STORE_UNAVAILABLE_REASONS = [
+  'not_writable',
+  'read_only',
+  'missing_directory',
+  'not_a_directory',
+  'not_a_database',
+] as const;
+
+/** One of {@link STORE_UNAVAILABLE_REASONS}. */
+export type StoreUnavailableReason = (typeof STORE_UNAVAILABLE_REASONS)[number];
+
 /** What `cisa_list_reference` topic `sources` reports about the mirror tier. */
 export interface CsafMirrorState {
   checkpoint: string | null;
@@ -259,4 +291,6 @@ export interface CsafMirrorState {
   lastCompletedAt: string | null;
   ready: boolean;
   syncStatus: string;
+  /** Present only when the store cannot be opened and the failure was classified. */
+  unavailableReason?: StoreUnavailableReason;
 }

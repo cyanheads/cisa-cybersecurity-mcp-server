@@ -3,9 +3,10 @@
  * query engine.
  *
  * `cisa_search_ics_advisories` turns `q` into an FTS5 `MATCH` expression and
- * `cisa_search_kev` tokenizes `nameContains` against every record in the catalog
- * snapshot, so the work a single call costs scales with the length of the string
- * it was handed. The input schemas set a minimum but no maximum — a maximum
+ * `vendor`/`product` into `GLOB` patterns, which SQLite refuses past 50,000
+ * bytes, and `cisa_search_kev` tokenizes `nameContains` against every record in
+ * the catalog snapshot, so the work a single call costs scales with the length of
+ * the string it was handed. The input schemas set a minimum but no maximum — a maximum
  * belongs at the sink that does the work, where it holds for every caller of the
  * function rather than only for the one tool whose schema declares it.
  * @module services/search-text

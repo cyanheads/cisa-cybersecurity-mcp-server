@@ -14,7 +14,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
 
 WORKDIR /usr/src/app
 
@@ -40,7 +40,7 @@ RUN bun run build
 # application. It uses a slim base image and only includes production
 # dependencies and build artifacts.
 # ==============================================================================
-FROM oven/bun:1.4.0-slim AS production
+FROM oven/bun:1.4.2-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -132,6 +132,10 @@ ENV MCP_SESSION_MODE="stateless"
 ENV MCP_LOG_LEVEL="info"
 ENV LOGS_DIR="/var/log/cisa-cybersecurity-mcp-server"
 ENV MCP_FORCE_CONSOLE_LOGGING="true"
+# Pin the advisory index to the /usr/src/app/.mirror volume; unset, it would land
+# in the bun user's cache dir inside the container layer and re-seed on every
+# container recreation.
+ENV CISA_CSAF_MIRROR_PATH="/usr/src/app/.mirror/csaf.sqlite3"
 
 # Expose the port the server listens on
 EXPOSE ${MCP_HTTP_PORT}

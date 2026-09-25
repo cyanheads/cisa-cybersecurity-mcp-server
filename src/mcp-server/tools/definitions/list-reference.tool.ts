@@ -18,6 +18,7 @@ import {
 import { REFERENCE_BLOCKS, REFERENCE_TOPICS } from '@/reference/tables.js';
 import { getCisaFeeds } from '@/services/cisa-feeds/cisa-feeds-service.js';
 import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
+import { STORE_UNAVAILABLE_REASONS } from '@/services/csaf-mirror/types.js';
 import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 import { getVulnrichment } from '@/services/vulnrichment/vulnrichment-service.js';
 
@@ -138,7 +139,9 @@ export const listReferenceTool = tool('cisa_list_reference', {
               .describe(
                 'Upstream Last-Modified of the loaded snapshot, used for the conditional poll.',
               ),
-            refreshCron: z.string().describe('Cron expression the refresh poll runs on.'),
+            refreshCron: z
+              .string()
+              .describe('Cron expression the refresh poll runs on, or off when it is disabled.'),
           })
           .describe('The in-memory KEV catalog snapshot.'),
         csafMirror: z
@@ -162,6 +165,12 @@ export const listReferenceTool = tool('cisa_list_reference', {
               .string()
               .nullable()
               .describe('When a full sync last completed, ISO 8601; null if never.'),
+            unavailableReason: z
+              .enum(STORE_UNAVAILABLE_REASONS)
+              .optional()
+              .describe(
+                'Present only when the index cannot be opened: its location is not writable, is read-only, has a missing directory, runs through a file, or holds a file that is not a SQLite database. Fixed by CISA_CSAF_MIRROR_PATH, not by waiting.',
+              ),
           })
           .describe('The local ICS advisory index.'),
         vulnrichment: z
@@ -316,6 +325,11 @@ export const listReferenceTool = tool('cisa_list_reference', {
           csafMirror.checkpoint ?? 'none'
         }, last completed ${csafMirror.lastCompletedAt ?? 'never'}.`,
       );
+      if (csafMirror.unavailableReason) {
+        lines.push(
+          `  - The index cannot be opened — unavailable: ${csafMirror.unavailableReason.replaceAll('_', ' ')}. The ICS tools fail until the server operator sets CISA_CSAF_MIRROR_PATH to a writable path; every other tool works.`,
+        );
+      }
       lines.push(
         `- **Vulnrichment** — mode ${vulnrichment.mode}, cache TTL ${vulnrichment.cacheTtlSeconds}s.`,
       );

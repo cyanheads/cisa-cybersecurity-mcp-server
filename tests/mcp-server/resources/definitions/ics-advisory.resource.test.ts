@@ -9,9 +9,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { icsAdvisoryResource } from '@/mcp-server/resources/definitions/ics-advisory.resource.js';
 import {
   getCsafMirror,
@@ -109,6 +109,38 @@ describe('cisa://advisory/{advisoryId} resource', () => {
       );
       expect(error).toBeInstanceOf(McpError);
       expect((error as McpError).message).toContain('cisa_search_ics_advisories');
+    });
+
+    it('a not-found names the checkpoint and last sync, with the may-be-newer note only for an ID dated after that sync', async () => {
+      (await getCsafMirror().mirrorInstance.raw())
+        .prepare('UPDATE mirror_sync_state SET checkpoint = ?, completed_at = ? WHERE id = 1')
+        .run('2026-09-17T06:00:00.000000Z', '2026-09-19T22:30:29.000Z');
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-25T12:00:00Z'));
+      try {
+        const read = async (advisoryId: string) =>
+          (await Promise.resolve(
+            icsAdvisoryResource.handler(advisoryParams.parse({ advisoryId }), createMockContext()),
+          ).catch((e: unknown) => e)) as McpError;
+
+        const newer = await read('ICSA-26-265-09');
+        expect(newer.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(newer.message).toContain('2026-09-17T06:00:00.000000Z');
+        expect(newer.message).toContain('2026-09-19T22:30:29.000Z');
+        expect(newer.message).toContain('may be newer than the index');
+        expect(newer.data).toMatchObject({
+          advisoryId: 'ICSA-26-265-09',
+          indexCheckpoint: '2026-09-17T06:00:00.000000Z',
+          indexLastSyncedAt: '2026-09-19T22:30:29.000Z',
+        });
+
+        const older = await read('ICSA-26-260-99');
+        expect(older.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(older.message).toContain('2026-09-19T22:30:29.000Z');
+        expect(older.message).not.toContain('may be newer');
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('list() returns the most recently revised advisories', async () => {

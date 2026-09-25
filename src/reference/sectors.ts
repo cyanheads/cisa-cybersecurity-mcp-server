@@ -84,9 +84,9 @@ function fold(value: string): string {
 /**
  * Extract the canonical sector set from an advisory's sector note. Returns the
  * names in canonical order (with `Multiple` last when present) and an empty array
- * when nothing in the note resolves — 1 document of the 3,197 that carry a note
- * (`Critical Facilities`) resolves to nothing, and an empty set is the honest
- * answer for it.
+ * when nothing in the note resolves — one note (`Critical Facilities`, 1 of the
+ * 3,197 documents carrying a note at the 2026-09-17 index checkpoint) resolves to
+ * nothing, and an empty set is the honest answer for it.
  */
 export function extractSectors(raw: string): SectorName[] {
   let remaining = fold(raw);

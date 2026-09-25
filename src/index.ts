@@ -12,13 +12,13 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { logger, schedulerService } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from './config/server-config.js';
 import { allResourceDefinitions } from './mcp-server/resources/definitions/index.js';
 import { allToolDefinitions } from './mcp-server/tools/definitions/index.js';
 import { initCisaFeeds } from './services/cisa-feeds/cisa-feeds-service.js';
 import { closeCsafMirror, initCsafMirror } from './services/csaf-mirror/csaf-mirror-service.js';
 import { initKevCatalog } from './services/kev-catalog/kev-catalog-service.js';
+import { startBackgroundRefresh } from './services/refresh-schedule.js';
 import { initVulnrichment } from './services/vulnrichment/vulnrichment-service.js';
 
 await createApp({
@@ -34,7 +34,7 @@ await createApp({
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
 
-  setup(core) {
+  setup() {
     const config = getServerConfig();
 
     const kev = initKevCatalog({
@@ -57,63 +57,16 @@ await createApp({
     /* Start the KEV load without awaiting it — a request arriving first awaits the same promise. */
     kev.primeInBackground();
 
-    /* Seeds a never-synced index, or re-ingests one an older ingest-content
-     * version built, on both transports. Neither blocks boot. */
-    if (config.csafMirrorAutoInit) {
-      void mirror.autoInit().catch((error: unknown) => {
-        logger.warning(
-          `ICS advisory index seed or re-ingest failed; a never-seeded index reports mirror_not_ready, an existing one keeps serving its current rows, and the next start retries: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
-    }
-
-    /*
-     * Cron jobs are an HTTP-transport concern: a stdio server is a short-lived
-     * child process, and its operator runs `mirror:refresh` out of band instead.
-     */
-    if (core.config.mcpTransportType !== 'http') return;
-
-    scheduleJob(
-      'kev-catalog-refresh',
-      config.kevRefreshCron,
-      () => kev.refresh(),
-      'Conditional refresh of the CISA KEV catalog snapshot',
-    );
-    scheduleJob(
-      'csaf-mirror-refresh',
-      config.csafRefreshCron,
-      async () => {
-        await mirror.mirrorInstance.runSync({
-          mode: 'refresh',
-          signal: AbortSignal.timeout(1_800_000),
-        });
-      },
-      'Incremental refresh of the ICS advisory index',
-    );
+    /* The boot pass over the advisory index and both refresh schedules, on every transport. */
+    void startBackgroundRefresh({
+      csafMirrorAutoInit: config.csafMirrorAutoInit,
+      csafRefreshCron: config.csafRefreshCron,
+      kevRefreshCron: config.kevRefreshCron,
+      kev,
+      mirror,
+    });
   },
 
-  /* The framework already tears the scheduler down; only the SQLite handle is ours. */
+  /* The framework already tears the scheduler down; an in-flight index sync and the SQLite handle are ours. */
   teardown: closeCsafMirror,
 });
-
-/** Register and start one cron job, skipping an empty expression and logging a bad one. */
-function scheduleJob(
-  id: string,
-  expression: string,
-  task: () => Promise<void>,
-  description: string,
-): void {
-  if (expression.trim() === '') return;
-  void schedulerService
-    .schedule(id, expression, task, description)
-    .then(() => schedulerService.start(id))
-    .catch((error: unknown) => {
-      logger.warning(
-        `Could not schedule ${id} (${expression}): ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    });
-}
