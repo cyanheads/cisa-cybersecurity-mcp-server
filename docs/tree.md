@@ -1,6 +1,6 @@
 # cisa-cybersecurity-mcp-server - Directory Structure
 
-Generated on: 2026-09-20 03:33:54
+Generated on: 2026-09-25 12:41:20
 
 ```text
 cisa-cybersecurity-mcp-server/
@@ -25,6 +25,7 @@ cisa-cybersecurity-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -195,6 +196,8 @@ cisa-cybersecurity-mcp-server/
 │   ├── fuzz/
 │   │   └── tools.fuzz.test.ts
 │   ├── helpers/
+│   │   ├── catalog-counts.ts
+│   │   ├── emitted-schema.ts
 │   │   └── format-text.ts
 │   ├── integration/
 │   │   └── csaf-mirror.test.ts

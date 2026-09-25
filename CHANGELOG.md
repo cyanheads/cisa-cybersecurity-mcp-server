@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-09-25 · ⚠️ Breaking
+
+Adds a summary detail to cisa_check_cve_status, reads every KEV notes URL into references, and computes zero-hit notices from per-filter counts; a nameContains with nothing to search is now rejected, and advisoryId patterns are advertised in their canonical, flag-free form.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-09-22
 
 Adds cwe and inKev search filters and cves-narrowed advisory reads; removes the 200-product cap, fixes silent search-filter widening, and resolves more sector aliases.

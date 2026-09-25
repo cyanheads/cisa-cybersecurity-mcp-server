@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/cisa-cybersecurity-mcp-server",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "mcpName": "io.github.cyanheads/cisa-cybersecurity-mcp-server",
   "description": "CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF) via MCP. Keyless. STDIO & Streamable HTTP.",
   "type": "module",
