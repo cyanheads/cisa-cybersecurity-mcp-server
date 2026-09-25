@@ -320,15 +320,28 @@ describe('parseKevNotes', () => {
         'see https://a.example/x;y '.repeat(Math.ceil(n / 26)),
     };
 
-    /** Best per-call wall time over a few rounds of `runs` calls. */
-    function bestMs(notes: string, runs: number): number {
-      let best = Number.POSITIVE_INFINITY;
-      for (let round = 0; round < 3; round++) {
-        const start = performance.now();
-        for (let i = 0; i < runs; i++) parseKevNotes(notes);
-        best = Math.min(best, (performance.now() - start) / runs);
+    /** Mean per-call wall time over `runs` calls. */
+    function meanMs(notes: string, runs: number): number {
+      const start = performance.now();
+      for (let i = 0; i < runs; i++) parseKevNotes(notes);
+      return (performance.now() - start) / runs;
+    }
+
+    /**
+     * Best per-call wall time for each input, over interleaved rounds. Parallel
+     * test workers contend for the CPU in bursts; back-to-back rounds of one
+     * input can all land inside a single burst and skew the ratio, while
+     * interleaved rounds spread both inputs across the same conditions, and one
+     * clean round of each is enough.
+     */
+    function bestMsPair(small: string, large: string): { largeMs: number; smallMs: number } {
+      let smallMs = Number.POSITIVE_INFINITY;
+      let largeMs = Number.POSITIVE_INFINITY;
+      for (let round = 0; round < 10; round++) {
+        smallMs = Math.min(smallMs, meanMs(small, 20));
+        largeMs = Math.min(largeMs, meanMs(large, 2));
       }
-      return best;
+      return { smallMs: Math.max(smallMs, 0.02), largeMs };
     }
 
     it.each(Object.entries(SHAPES))(
@@ -337,8 +350,8 @@ describe('parseKevNotes', () => {
         const small = build(5_000);
         const large = build(80_000);
         parseKevNotes(small);
-        const smallMs = Math.max(bestMs(small, 20), 0.02);
-        const largeMs = bestMs(large, 2);
+        parseKevNotes(large);
+        const { smallMs, largeMs } = bestMsPair(small, large);
         /* 16x the input: linear growth is ~16x, quadratic ~256x. */
         expect(largeMs / smallMs).toBeLessThan(64);
         expect(largeMs).toBeLessThan(100);
