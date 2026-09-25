@@ -23,8 +23,8 @@ export interface KevReference {
 
 /**
  * The binding operational directive a KEV entry cites, or `null` when it cites
- * none. 1,277 of 1,716 entries name neither — `null` is the honest value for
- * those and is never inferred from an entry's age.
+ * none. Most entries name neither (1,277 of 1,716 at catalog 2026.09.18) — `null`
+ * is the honest value for those and is never inferred from an entry's age.
  */
 export type KevDirective = 'BOD 26-04' | 'BOD 22-01' | null;
 

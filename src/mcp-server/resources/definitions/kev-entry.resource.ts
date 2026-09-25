@@ -38,7 +38,7 @@ export const kevEntryResource = resource('cisa://kev/{cveId}', {
   async handler(params, ctx) {
     const catalog = getKevCatalog();
     const snapshot = await catalog.snapshot(ctx);
-    const cveId = params.cveId.trim().toUpperCase();
+    const { cveId } = params;
     const record = snapshot.byId.get(cveId);
     if (!record) {
       throw notFound(

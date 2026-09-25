@@ -1,6 +1,7 @@
 /**
- * @fileoverview Output schemas and markdown renderers for a single ICS advisory,
- * shared by `cisa_get_advisory` and the `cisa://advisory/{advisoryId}` resource.
+ * @fileoverview The advisory-ID input schema, plus the output schemas and
+ * markdown renderers for a single ICS advisory, shared by `cisa_get_advisory`
+ * and the `cisa://advisory/{advisoryId}` resource.
  *
  * The seven section schemas mirror the seven top-level keys of the stored
  * normalized advisory, which is also what the section outline enumerates — so the
@@ -11,8 +12,19 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { OUTLINE_VARIANT } from '@cyanheads/mcp-ts-core/utils';
-import { ADVISORY_ID_PATTERN } from '@/services/csaf-mirror/normalize.js';
+import { ADVISORY_ID_PATTERN, normalizeAdvisoryId } from '@/services/csaf-mirror/normalize.js';
 import type { NormalizedAdvisory } from '@/services/csaf-mirror/types.js';
+
+/**
+ * An advisory ID as callers type it. {@link normalizeAdvisoryId} runs before
+ * the pattern check — surrounding whitespace, a trailing `.json`, and case are
+ * normalized — so the lowercase filename form resolves while the advertised
+ * pattern stays the canonical, flag-free one.
+ */
+export const AdvisoryIdInputSchema = z
+  .string()
+  .overwrite(normalizeAdvisoryId)
+  .regex(ADVISORY_ID_PATTERN);
 
 /** The seven addressable sections of an advisory, largest-first in the outline. */
 export const ADVISORY_SECTIONS = [

@@ -269,7 +269,7 @@ export class CsafMirrorService {
     }
     if (filters.cve) {
       where.push(`a.advisoryId IN (SELECT advisoryId FROM ${ADVISORY_CVES_TABLE} WHERE cve = ?)`);
-      params.push(filters.cve.toUpperCase());
+      params.push(filters.cve);
     }
     if (filters.sector) {
       where.push(
@@ -279,7 +279,7 @@ export class CsafMirrorService {
     }
     if (filters.cwe) {
       where.push(`a.advisoryId IN (SELECT advisoryId FROM ${ADVISORY_CWES_TABLE} WHERE cweId = ?)`);
-      params.push(filters.cwe.toUpperCase());
+      params.push(filters.cwe);
     }
     if (filters.inKev !== undefined) {
       if (!kevCves) throw new Error('search(): the inKev filter needs the KEV CVE set.');

@@ -8,6 +8,7 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
 import {
+  ADVISORY_ID_PATTERN,
   advisorySeries,
   advisoryWebUrl,
   buildAttribution,
@@ -36,6 +37,48 @@ describe('normalizeAdvisoryId', () => {
 
   it('is idempotent on an already-normalized ID', () => {
     expect(normalizeAdvisoryId('ICSA-16-231-01-0')).toBe('ICSA-16-231-01-0');
+  });
+
+  it('uppercases a lowercase revision suffix and strips an uppercase extension', () => {
+    expect(normalizeAdvisoryId('\ticsa-10-316-01a.JSON\n')).toBe('ICSA-10-316-01A');
+  });
+});
+
+describe('ADVISORY_ID_PATTERN', () => {
+  it('carries no regex flag, since JSON Schema has none to carry it', () => {
+    expect(ADVISORY_ID_PATTERN.flags).toBe('');
+  });
+
+  it.each([
+    'ICSA-26-260-07',
+    'ICSA-10-316-01A',
+    'ICSA-10-316-01F',
+    'ICSA-16-231-01-0',
+    'ICSMA-19-253-02',
+  ])('matches the canonical form %s', (advisoryId) => {
+    expect(ADVISORY_ID_PATTERN.test(advisoryId)).toBe(true);
+    expect(new RegExp(ADVISORY_ID_PATTERN.source).test(advisoryId)).toBe(true);
+  });
+
+  it.each([
+    'icsa-26-260-07',
+    'ICSA-10-316-01a',
+    'ICSM-19-253-02',
+    'ICSA-26-260-07.json',
+    ' ICSA-26-260-07',
+  ])('rejects the non-canonical %j', (advisoryId) => {
+    expect(ADVISORY_ID_PATTERN.test(advisoryId)).toBe(false);
+  });
+
+  it('matches every ID normalizeAdvisory stores for the fixture documents', () => {
+    for (const [raw, path] of [
+      [FULL_ADVISORY, '2026/icsa-26-260-07.json'],
+      [SPARSE_ADVISORY, '2014/icsa-14-035-01.json'],
+      [REPUBLISHED_ADVISORY, '2025/icsa-25-100-02.json'],
+    ] as const) {
+      const advisoryId = normalizeAdvisory(raw, path)?.advisory.advisoryId ?? '';
+      expect(ADVISORY_ID_PATTERN.test(advisoryId), advisoryId).toBe(true);
+    }
   });
 });
 

@@ -245,6 +245,24 @@ export const REPUBLISHED_ADVISORY = {
   ],
 };
 
+/**
+ * A copy of the sparse advisory under another tracking ID and release date — the
+ * seam for the revision-suffix forms (`ICSA-10-316-01A`, `ICSA-16-231-01-0`) the
+ * other fixtures do not carry. The document spells the ID uppercase, as the
+ * corpus does.
+ */
+export function sparseAdvisoryAs(advisoryId: string, releaseDate: string): unknown {
+  const doc = structuredClone(SPARSE_ADVISORY);
+  doc.document.tracking.id = advisoryId;
+  doc.document.tracking.initial_release_date = releaseDate;
+  doc.document.tracking.current_release_date = releaseDate;
+  doc.document.title = `Legacy HMI Advisory ${advisoryId}`;
+  for (const [index, vulnerability] of doc.vulnerabilities.entries()) {
+    vulnerability.cve = `CVE-${releaseDate.slice(0, 4)}-${advisoryId.replace(/\D/g, '').slice(-5)}${index}`;
+  }
+  return doc;
+}
+
 /** Build a document guaranteed to exceed a 24,000-byte outline budget. */
 export function buildOversizedAdvisory(advisoryId: string): unknown {
   const vulnerabilities = Array.from({ length: 40 }, (_, index) => ({

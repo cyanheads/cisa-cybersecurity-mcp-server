@@ -73,6 +73,16 @@ describe('advisoryIdFromLink', () => {
     ).toBe('ICSA-26-260-07');
   });
 
+  it.each([
+    ['icsa-24-100-01a', 'ICSA-24-100-01A'],
+    ['ICSA-24-100-01B', 'ICSA-24-100-01B'],
+    ['icsa-16-231-01-0', 'ICSA-16-231-01-0'],
+  ])('emits the canonical uppercase form for the slug %s', (slug, expected) => {
+    expect(advisoryIdFromLink(`https://www.cisa.gov/news-events/ics-advisories/${slug}`)).toBe(
+      expected,
+    );
+  });
+
   it('extracts from an ics-medical-advisories link', () => {
     expect(
       advisoryIdFromLink('https://www.cisa.gov/news-events/ics-medical-advisories/icsma-26-253-02'),

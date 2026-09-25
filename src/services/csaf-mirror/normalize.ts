@@ -35,19 +35,18 @@ export const CSAF_OT_BASE =
   'https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white';
 
 /**
- * The advisory-ID pattern, case-insensitive. Both real suffix forms are covered:
- * a single letter (120 documents carry `a`–`f`) and the one numeric form,
- * `ICSA-16-231-01-0`. `ICS[AM]` would spell `ICSA` or `ICSM` and reject all 188
- * `ICSMA-` advisories, so the alternation is spelled out.
+ * The canonical advisory-ID pattern — the uppercase form every stored ID takes.
+ * Both real suffix forms are covered: a single letter (120 documents carry
+ * `A`–`F`) and the one numeric form, `ICSA-16-231-01-0`. `ICS[AM]` would spell
+ * `ICSA` or `ICSM` and reject all 188 `ICSMA-` advisories, so the alternation is
+ * spelled out.
+ *
+ * No flag: the pattern is advertised in JSON Schema, which has no flags, so a
+ * `/i` here would mean one thing to this server and a stricter thing to every
+ * client that validates against the advertised schema. Caller input reaches it
+ * only after {@link normalizeAdvisoryId}.
  */
-export const ADVISORY_ID_PATTERN = /^ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[a-z]|-\d+)?$/i;
-
-/**
- * The same pattern for caller input, which may carry the filename's `.json`
- * suffix and surrounding whitespace; {@link normalizeAdvisoryId} strips both.
- */
-export const ADVISORY_ID_INPUT_PATTERN =
-  /^\s*ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[a-z]|-\d+)?(?:\.json)?\s*$/i;
+export const ADVISORY_ID_PATTERN = /^ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[A-Z]|-\d+)?$/;
 
 /**
  * The shape of a document path inside a distribution directory: a four-digit

@@ -441,12 +441,13 @@ describe('CsafMirrorService — real ingest path', () => {
       ]);
     });
 
-    it('matches exact CWE membership, case-insensitively, and AND-combines with other filters', async () => {
+    it('matches exact CWE membership in canonical form and AND-combines with other filters', async () => {
+      /* Case and whitespace are normalized by the tool's input schema, upstream of here. */
       expect((await searchCwe('CWE-20')).items.map((item) => item.advisoryId)).toEqual([
         'ICSA-26-260-07',
         'ICSA-25-100-02',
       ]);
-      expect((await searchCwe('cwe-787')).items.map((item) => item.advisoryId)).toEqual([
+      expect((await searchCwe('CWE-787')).items.map((item) => item.advisoryId)).toEqual([
         'ICSA-25-100-02',
       ]);
       const anded = await searchCwe('CWE-20', { publisher: 'coordinator' });

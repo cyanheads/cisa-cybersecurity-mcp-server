@@ -5,14 +5,28 @@
  * @module tests/mcp-server/schemas/kev-record.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
 import {
   KevRecordSchema,
   renderKevRecord,
   toKevRecordOutput,
+  toKevRecordSummary,
   toMissingKevOutput,
 } from '@/mcp-server/schemas/kev-record.js';
 import type { KevRecord } from '@/services/kev-catalog/types.js';
+import { DRIFTING_CATALOG_COUNT } from '../../helpers/catalog-counts.js';
+
+/** The fields `detail: "summary"` drops from an in-KEV record. */
+const SUMMARY_OMITS = [
+  'requiredAction',
+  'vulnerabilityName',
+  'shortDescription',
+  'cwes',
+  'references',
+  'notesCommentary',
+  'kevUrl',
+] as const;
 
 const RECORD: KevRecord = {
   cveId: 'CVE-2026-12345',
@@ -56,6 +70,73 @@ describe('toKevRecordOutput', () => {
   it('validates against KevRecordSchema', () => {
     const output = toKevRecordOutput(RECORD, '2026-09-10');
     expect(() => KevRecordSchema.parse(output)).not.toThrow();
+  });
+});
+
+describe('toKevRecordSummary', () => {
+  it('keeps the triage fields in full-record order and drops the rest', () => {
+    const summary = toKevRecordSummary(
+      { ...RECORD, notesCommentary: 'Exploited in the wild.' },
+      '2026-09-10',
+    );
+    expect(summary).toEqual({
+      cveId: 'CVE-2026-12345',
+      inKev: true,
+      dateAdded: '2026-09-10',
+      dueDate: '2026-09-13',
+      daysUntilDue: 3,
+      overdue: false,
+      directive: 'BOD 26-04',
+      vendorProject: 'Acme',
+      product: 'Widget',
+      knownRansomwareCampaignUse: 'Known',
+      forensicTriage: 'Yes',
+    });
+    const full = Object.keys(toKevRecordOutput(RECORD, '2026-09-10'));
+    expect(Object.keys(summary)).toEqual(
+      full.filter((key) => !(SUMMARY_OMITS as readonly string[]).includes(key)),
+    );
+  });
+
+  it('resolves overdue against asOf and carries a null directive through', () => {
+    const summary = toKevRecordSummary({ ...RECORD, directive: null }, '2026-09-20');
+    expect(summary.overdue).toBe(true);
+    expect(summary.daysUntilDue).toBe(-7);
+    expect(summary.directive).toBeNull();
+    expect(() => KevRecordSchema.parse(summary)).not.toThrow();
+  });
+
+  it('renders the projected fields and nothing it dropped', () => {
+    const lines = renderKevRecord(toKevRecordSummary(RECORD, '2026-09-10')).join('\n');
+    expect(lines).toContain('**Vendor / product:** Acme / Widget');
+    expect(lines).toContain('3 day(s) remaining');
+    expect(lines).not.toContain(RECORD.vulnerabilityName);
+    expect(lines).not.toContain(RECORD.requiredAction);
+    expect(lines).not.toContain('CWE-20');
+    expect(lines).not.toContain(RECORD.kevUrl);
+  });
+});
+
+describe('KevRecordSchema descriptions', () => {
+  const schema = z.toJSONSchema(KevRecordSchema) as {
+    description?: string;
+    properties: Record<string, { description?: string }>;
+  };
+
+  it('says each field detail "summary" drops is absent under it', () => {
+    for (const field of SUMMARY_OMITS) {
+      expect(schema.properties[field]?.description).toContain('Absent under detail "summary"');
+    }
+    expect(schema.properties.dueDate?.description).not.toContain('summary');
+  });
+
+  it('describes the summary shape on the record itself, naming the one tool that takes detail', () => {
+    /* The schema is also cisa_search_kev's and the resource's, and neither takes detail. */
+    expect(schema.description).toContain('Under cisa_check_cve_status detail "summary"');
+  });
+
+  it('states no KEV catalog count that drifts with each release', () => {
+    expect(JSON.stringify(schema)).not.toMatch(DRIFTING_CATALOG_COUNT);
   });
 });
 

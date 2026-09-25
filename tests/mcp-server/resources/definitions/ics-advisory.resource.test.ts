@@ -19,7 +19,11 @@ import {
   resetCsafMirror,
 } from '@/services/csaf-mirror/csaf-mirror-service.js';
 import { CSAF_ARCHIVE_URL } from '@/services/csaf-mirror/ingest.js';
-import { buildOversizedAdvisory, FULL_ADVISORY } from '../../../fixtures/csaf-documents.js';
+import {
+  buildOversizedAdvisory,
+  FULL_ADVISORY,
+  sparseAdvisoryAs,
+} from '../../../fixtures/csaf-documents.js';
 import { buildTarGzResponse } from '../../../fixtures/tar.js';
 
 /* `resource()`'s ResourceDefinition types `params` and `output` as optional (the
@@ -123,6 +127,38 @@ describe('cisa://advisory/{advisoryId} resource', () => {
     it('complete() matches advisory IDs by prefix', async () => {
       const matches = await icsAdvisoryResource.complete?.advisoryId?.('ICSA-26');
       expect(matches).toEqual(['ICSA-26-260-07']);
+    });
+  });
+
+  describe('a revision-suffixed advisory', () => {
+    beforeEach(async () => {
+      await seedMirror([
+        {
+          name: 'CSAF-develop/csaf_files/OT/white/2010/icsa-10-316-01a.json',
+          data: JSON.stringify(sparseAdvisoryAs('ICSA-10-316-01A', '2010-11-12T00:00:00.000000Z')),
+        },
+      ]);
+    }, 30000);
+
+    it.each([
+      'ICSA-10-316-01A',
+      'icsa-10-316-01a',
+      'ICSA-10-316-01a',
+      'icsa-10-316-01A.json',
+      ' ICSA-10-316-01A.JSON\t',
+    ])('%j resolves to ICSA-10-316-01A through the params schema', async (advisoryId) => {
+      const params = advisoryParams.parse({ advisoryId });
+      const result = await icsAdvisoryResource.handler(params, createMockContext());
+      expect(advisoryOutput.parse(result)).toMatchObject({
+        advisory: { advisoryId: 'ICSA-10-316-01A' },
+      });
+    });
+
+    it('rejects a malformed advisoryId at the params schema', () => {
+      expect(advisoryParams.safeParse({ advisoryId: 'ICSA-10-316-01AB' }).success).toBe(false);
+      expect(advisoryParams.safeParse({ advisoryId: 'ICSA-10-316-01A.json.json' }).success).toBe(
+        false,
+      );
     });
   });
 

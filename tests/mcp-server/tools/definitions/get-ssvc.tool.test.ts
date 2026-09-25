@@ -83,6 +83,28 @@ describe('cisa_get_ssvc', () => {
     }
   });
 
+  it('normalizes case and whitespace on cveIds before the fetch and the KEV join', async () => {
+    await loadCatalog();
+    const http = createFetchMock([
+      {
+        match: cveToVulnrichmentUrl('CVE-2026-00001') as string,
+        respond: Response.json(buildSsvcRecord()),
+      },
+    ]);
+    http.install();
+    try {
+      const ctx = createMockContext({ errors: getSsvcTool.errors });
+      const input = getSsvcTool.input.parse({ cveIds: [' cve-2026-00001\t'] });
+      const result = await getSsvcTool.handler(input, ctx);
+      expect(result.results[0]?.cveId).toBe('CVE-2026-00001');
+      expect(result.results[0]?.found).toBe(true);
+      expect(result.results[0]?.inKev).toBe(true);
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+
   it('a stated assetExposure returns exactly one timeline and computes assignmentAgrees', async () => {
     await loadCatalog();
     /* CVE-2026-00001 is in KEV with dueDate 2026-09-04, dateAdded 2026-09-01 (3 days). */

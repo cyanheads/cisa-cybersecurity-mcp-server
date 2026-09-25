@@ -228,7 +228,7 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
   ],
 
   async handler(input, ctx) {
-    const cveIds = input.cveIds.map((id) => id.trim().toUpperCase());
+    const { cveIds } = input;
     const catalog = getKevCatalog();
     const snapshot = await catalog.snapshot(ctx);
     const records = await getVulnrichment().fetchMany(cveIds, ctx);

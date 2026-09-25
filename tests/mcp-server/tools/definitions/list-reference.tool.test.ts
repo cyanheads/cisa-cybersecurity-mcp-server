@@ -37,6 +37,7 @@ import {
 import { FULL_ADVISORY } from '../../../fixtures/csaf-documents.js';
 import { buildKevFeedBody } from '../../../fixtures/kev-feed.js';
 import { buildTarGzResponse } from '../../../fixtures/tar.js';
+import { DRIFTING_CATALOG_COUNT } from '../../../helpers/catalog-counts.js';
 import { firstText } from '../../../helpers/format-text.js';
 
 describe('cisa_list_reference', () => {
@@ -77,6 +78,18 @@ describe('cisa_list_reference', () => {
         expect(text).toContain(entry.label);
       }
     }
+  });
+
+  it('topic kev_fields states no KEV catalog count that drifts with each release', async () => {
+    const ctx = createMockContext();
+    const result = await listReferenceTool.handler(
+      listReferenceTool.input.parse({ topic: 'kev_fields' }),
+      ctx,
+    );
+    const text = firstText(listReferenceTool.format?.(result));
+    expect(text).toContain('forensic-triage tier');
+    expect(text).not.toMatch(DRIFTING_CATALOG_COUNT);
+    expect(JSON.stringify(result)).not.toMatch(DRIFTING_CATALOG_COUNT);
   });
 
   it('topic directives returns the full 16-row Table 1, definitions, and supersedes', async () => {

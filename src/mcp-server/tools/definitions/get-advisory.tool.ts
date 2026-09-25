@@ -23,6 +23,7 @@ import {
   ADVISORY_OUTLINE_BUDGET,
   ADVISORY_SECTIONS,
   AdvisoryDocumentOutputShape,
+  AdvisoryIdInputSchema,
   advisoryCves,
   cvesNarrowingHint,
   extractAdvisorySections,
@@ -38,10 +39,6 @@ import {
 } from '@/mcp-server/schemas/advisory.js';
 import { CveIdInputSchema } from '@/mcp-server/schemas/kev-record.js';
 import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
-import {
-  ADVISORY_ID_INPUT_PATTERN,
-  normalizeAdvisoryId,
-} from '@/services/csaf-mirror/normalize.js';
 import type { NormalizedAdvisory } from '@/services/csaf-mirror/types.js';
 
 const MISS_GUIDANCE =
@@ -54,12 +51,9 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
-    advisoryId: z
-      .string()
-      .regex(ADVISORY_ID_INPUT_PATTERN)
-      .describe(
-        'Advisory identifier, e.g. ICSA-26-260-07 or ICSMA-26-253-02. Case-insensitive; an optional revision suffix is a single letter a-f or a numeric -N. A trailing .json is stripped.',
-      ),
+    advisoryId: AdvisoryIdInputSchema.describe(
+      'Advisory identifier, e.g. ICSA-26-260-07 or ICSMA-26-253-02, with an optional revision suffix: a single letter A-F or a numeric -N. Case, surrounding whitespace, and a trailing .json are normalized.',
+    ),
     sections: z
       .array(z.enum(ADVISORY_SECTIONS).describe('One section name, as the outline reports it.'))
       .optional()
@@ -141,7 +135,7 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       );
     }
 
-    const advisoryId = normalizeAdvisoryId(input.advisoryId);
+    const { advisoryId } = input;
     const doc = await mirror.getAdvisory(advisoryId);
     if (!doc) {
       ctx.log.info('Advisory not in the index', { advisoryId });

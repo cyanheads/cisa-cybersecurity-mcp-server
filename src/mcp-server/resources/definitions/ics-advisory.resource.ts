@@ -17,14 +17,11 @@ import { outlineOnOverflow } from '@cyanheads/mcp-ts-core/utils';
 import {
   ADVISORY_OUTLINE_BUDGET,
   AdvisoryDocumentOutputShape,
+  AdvisoryIdInputSchema,
   cvesNarrowingHint,
   extractAdvisorySections,
 } from '@/mcp-server/schemas/advisory.js';
 import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
-import {
-  ADVISORY_ID_INPUT_PATTERN,
-  normalizeAdvisoryId,
-} from '@/services/csaf-mirror/normalize.js';
 
 /** Entries surfaced by `list()` and the maximum completion suggestions. */
 const LIST_LIMIT = 30;
@@ -40,12 +37,9 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
   cacheHint: { ttlMs: 21_600_000, cacheScope: 'public' },
 
   params: z.object({
-    advisoryId: z
-      .string()
-      .regex(ADVISORY_ID_INPUT_PATTERN)
-      .describe(
-        'The advisory identifier, e.g. ICSA-26-260-07. Case-insensitive; a trailing .json is stripped.',
-      ),
+    advisoryId: AdvisoryIdInputSchema.describe(
+      'The advisory identifier, e.g. ICSA-26-260-07. Case, surrounding whitespace, and a trailing .json are normalized.',
+    ),
   }),
 
   output: z.object(AdvisoryDocumentOutputShape),
@@ -62,7 +56,7 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
       });
     }
 
-    const advisoryId = normalizeAdvisoryId(params.advisoryId);
+    const { advisoryId } = params;
     const doc = await mirror.getAdvisory(advisoryId);
     if (!doc) {
       throw notFound(

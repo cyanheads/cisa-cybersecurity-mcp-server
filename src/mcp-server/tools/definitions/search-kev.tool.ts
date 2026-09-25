@@ -9,6 +9,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { extractCursor, paginateArray } from '@cyanheads/mcp-ts-core/utils';
 import {
+  CweIdInputSchema,
   ISO_DATE_REGEX,
   KevRecordSchema,
   renderKevRecord,
@@ -16,8 +17,12 @@ import {
 } from '@/mcp-server/schemas/kev-record.js';
 import {
   getKevCatalog,
+  type KevFilterCount,
+  type KevFilterKey,
   type KevSearchFilters,
+  queryTokens,
 } from '@/services/kev-catalog/kev-catalog-service.js';
+import type { KevRecord } from '@/services/kev-catalog/types.js';
 
 const MAX_PAGE_SIZE = 100;
 
@@ -32,29 +37,31 @@ export const searchKevTool = tool('cisa_search_kev', {
       .string()
       .min(2)
       .optional()
-      .describe("Case-insensitive substring of CISA's own vendor label. 283 distinct values."),
+      .describe("Case-insensitive substring of CISA's own vendor label."),
     product: z
       .string()
       .min(2)
       .optional()
-      .describe("Case-insensitive substring of CISA's own product label. 694 distinct values."),
+      .describe("Case-insensitive substring of CISA's own product label."),
     nameContains: z
       .string()
       .min(2)
       .optional()
       .describe(
-        'Strict token match over the vulnerability name and short description: every token must appear. No fuzzy fallback.',
+        'Strict token match over the vulnerability name and short description: every token must appear. Matching folds case and accents and keeps only the letters a-z and the digits 0-9; a word carrying any other letter or digit, such as one in another script, loses those characters and the response names it, and a value left with none of them is rejected. No fuzzy fallback.',
       ),
-    cwe: z
-      .string()
-      .regex(/^CWE-[0-9]+$/)
-      .optional()
-      .describe('Exact CWE identifier, e.g. CWE-362. Excludes the 175 entries with no CWEs.'),
+    cwe: CweIdInputSchema.optional().describe(
+      'Exact CWE identifier, e.g. CWE-362. Case and surrounding whitespace are normalized. Entries with no CWEs never match.',
+    ),
     cveIdPrefix: z
       .string()
+      .trim()
+      .toUpperCase()
       .regex(/^CVE-[0-9]{4}$/)
       .optional()
-      .describe('Year scope for the CVE ID, e.g. CVE-2026.'),
+      .describe(
+        'Year scope for the CVE ID, e.g. CVE-2026. Case and surrounding whitespace are normalized.',
+      ),
     dateAddedFrom: z
       .string()
       .regex(ISO_DATE_REGEX)
@@ -82,17 +89,15 @@ export const searchKevTool = tool('cisa_search_kev', {
     ransomware: z
       .boolean()
       .optional()
-      .describe('True selects entries CISA has linked to ransomware campaigns (360 entries).'),
+      .describe('True selects entries CISA has linked to ransomware campaigns.'),
     forensicTriage: z
       .boolean()
       .optional()
-      .describe('True selects the BOD 26-04 three-day forensic-triage tier (58 entries).'),
+      .describe('True selects the BOD 26-04 three-day forensic-triage tier.'),
     directive: z
       .enum(['BOD 26-04', 'BOD 22-01', 'none'])
       .optional()
-      .describe(
-        'Which directive the entry cites. "none" selects the 1,277 entries citing neither.',
-      ),
+      .describe('Which directive the entry cites. "none" selects the entries citing neither.'),
     sortBy: z.enum(['dueDate', 'dateAdded']).default('dateAdded').describe('Field to sort by.'),
     order: z.enum(['asc', 'desc']).default('desc').describe('Sort direction.'),
     limit: z
@@ -140,7 +145,12 @@ export const searchKevTool = tool('cisa_search_kev', {
       .string()
       .optional()
       .describe('Disclosure that additions are queryable but revisions are not detectable.'),
-    notice: z.string().optional().describe('Guidance when nothing matched.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when nothing matched, when a page was capped, or when nameContains dropped characters it cannot match.',
+      ),
   },
 
   enrichmentTrailer: {
@@ -176,6 +186,14 @@ export const searchKevTool = tool('cisa_search_kev', {
       when: 'A From bound is later than its matching To bound.',
       recovery:
         'Swap the range bounds so the From date is not later than the To date, then call this tool again.',
+    },
+    {
+      reason: 'empty_search_text',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'nameContains holds no letter a-z or digit 0-9 once case and accents are folded and punctuation is removed, so there is nothing to search for.',
+      recovery:
+        'Put at least one word or number in nameContains that uses the letters a-z, accented or not, or the digits 0-9, such as a product or vulnerability term, or omit nameContains to search by the other filters alone.',
+      thrownBy: 'service',
     },
   ],
 
@@ -252,12 +270,38 @@ export const searchKevTool = tool('cisa_search_kev', {
       });
     }
 
-    if (page.items.length >= input.limit && page.nextCursor) {
-      ctx.enrich.truncated({ shown: page.items.length, cap: input.limit });
+    /* `notice` is last-wins across enrich calls, `truncated()` included, so every
+     * notice source is collected here and written once. */
+    const notices: string[] = [];
+    if (filters.nameContains) {
+      const { tokens, dropped } = queryTokens(filters.nameContains);
+      if (dropped.length > 0) {
+        notices.push(
+          `nameContains dropped the characters of ${dropped.map((word) => `"${word}"`).join(', ')} outside the letters a-z and the digits 0-9 — matching folds case and accents and keeps only those, so the dropped characters can never match. Searched for: ${tokens.join(' ')}.`,
+        );
+      }
+    }
+    if (matched.length === 0) {
+      const counts = await catalog.filterCounts(filters, ctx);
+      notices.push(zeroHitNotice(filters, counts, snapshot.records, asOf));
     }
 
-    if (matched.length === 0) {
-      ctx.enrich.notice(zeroHitNotice(input));
+    if (page.items.length >= input.limit && page.nextCursor) {
+      const shown = page.items.length;
+      ctx.enrich.truncated({
+        shown,
+        cap: input.limit,
+        ...(notices.length > 0
+          ? {
+              guidance: [
+                `Results capped at ${input.limit}; showing ${shown}. Raise the cap or narrow with filters.`,
+                ...notices,
+              ].join(' '),
+            }
+          : {}),
+      });
+    } else if (notices.length > 0) {
+      ctx.enrich.notice(notices.join(' '));
     }
 
     return {
@@ -278,43 +322,116 @@ export const searchKevTool = tool('cisa_search_kev', {
   },
 });
 
-/** Compose the zero-hit notice from whichever filter most plausibly explains the miss. */
-function zeroHitNotice(input: {
-  cwe?: string | undefined;
-  dateAddedTo?: string | undefined;
-  directive?: string | undefined;
-  dueAfter?: string | undefined;
-  overdue?: boolean | undefined;
-  product?: string | undefined;
-  vendorProject?: string | undefined;
-}): string {
-  const fragments: string[] = [];
+/** A count as prose, thousands-grouped. */
+const formatCount = (count: number) => count.toLocaleString('en-US');
 
-  if (input.vendorProject || input.product) {
+/** A filter as the caller set it, e.g. `cveIdPrefix=CVE-2099`. */
+const setAs = (filters: KevSearchFilters, key: KevFilterKey) => `${key}=${String(filters[key])}`;
+
+/**
+ * The dateAdded range of the entries citing a directive, or `undefined` when no
+ * entry cites it.
+ */
+function directiveWindow(
+  records: KevRecord[],
+  directive: NonNullable<KevSearchFilters['directive']>,
+): { first: string; last: string } | undefined {
+  const wanted = directive === 'none' ? null : directive;
+  const added = records
+    .filter((record) => record.directive === wanted)
+    .map((record) => record.dateAdded)
+    .sort();
+  const [first] = added;
+  const last = added.at(-1);
+  return first && last ? { first, last } : undefined;
+}
+
+/**
+ * Explain a zero-hit search from the per-filter counts. A filter that matches no
+ * entry on its own is named — with the free-text-label or empty-cwes fragment for
+ * vendor/product and cwe — and, when it is the only one, so is what dropping it
+ * restores, which is nothing when the other filters also miss together. When
+ * every filter matches on its own, the combination is the miss: each filter
+ * whose removal restores results is named with that count. The directive-window and overdue/dueAfter fragments read the loaded
+ * snapshot and the echoed asOf date, never a fixed threshold or the wall clock.
+ */
+function zeroHitNotice(
+  filters: KevSearchFilters,
+  counts: KevFilterCount[],
+  records: KevRecord[],
+  asOf: string,
+): string {
+  const fragments: string[] = [];
+  const unmatchedCounts = counts.filter((count) => count.alone === 0);
+  const unmatched = unmatchedCounts.map((count) => count.filter);
+
+  const labels = unmatched.filter((key) => key === 'vendorProject' || key === 'product');
+  if (labels.length > 0) {
     fragments.push(
-      "Vendor and product are CISA's own free-text labels, not CPE names — call cisa_list_reference with topic kev_fields for the value domain, or drop the filter and match on nameContains instead.",
+      `${labels.map((key) => setAs(filters, key)).join(' and ')} ${labels.length === 1 ? 'matches no entry on its own' : 'each match no entry on their own'}. Vendor and product are CISA's own free-text labels, not CPE names — call cisa_list_reference with topic kev_fields for the value domain, or drop the ${labels.length === 1 ? 'filter' : 'filters'} and match on nameContains instead.`,
     );
   }
-  if (input.cwe) {
+  if (unmatched.includes('cwe')) {
+    const emptyCwes = records.filter((record) => record.cwes.length === 0).length;
     fragments.push(
-      'No KEV entry carries that CWE. 175 of 1,716 entries carry an empty cwes array, so a CWE filter excludes them regardless of relevance.',
+      `No KEV entry carries ${filters.cwe}. ${formatCount(emptyCwes)} of ${formatCount(records.length)} entries carry an empty cwes array, so a CWE filter excludes them regardless of relevance.`,
     );
   }
-  if (input.directive === 'BOD 26-04' && input.dateAddedTo && input.dateAddedTo < '2026-01-01') {
+  const others = unmatched.filter(
+    (key) => key !== 'vendorProject' && key !== 'product' && key !== 'cwe',
+  );
+  if (others.length > 0) {
     fragments.push(
-      'BOD 26-04 entries begin in 2026; earlier entries cite BOD 22-01 or no directive at all.',
+      `${others.map((key) => setAs(filters, key)).join(', ')} ${others.length === 1 ? 'matches no entry on its own — relax or drop it.' : 'each match no entry on their own — relax or drop them.'}`,
     );
   }
-  if (
-    input.overdue === true &&
-    input.dueAfter &&
-    input.dueAfter > new Date().toISOString().slice(0, 10)
-  ) {
-    fragments.push('overdue and dueAfter are contradictory as given — relax one.');
+  /* Every entry fails a filter that matches nothing, so what dropping it restores
+   * is exactly what the other filters match together — often nothing. */
+  const [onlyUnmatched] = unmatchedCounts;
+  if (onlyUnmatched && unmatchedCounts.length === 1 && counts.length > 1) {
+    const restored = onlyUnmatched.restoredByDropping;
+    fragments.push(
+      restored > 0
+        ? `Dropping ${onlyUnmatched.filter} restores ${formatCount(restored)} ${restored === 1 ? 'entry' : 'entries'}.`
+        : `Dropping ${onlyUnmatched.filter} alone restores nothing: the other filters match no entry together either.`,
+    );
   }
+
+  if (filters.overdue === true && filters.dueAfter && filters.dueAfter >= asOf) {
+    fragments.push(
+      `overdue and dueAfter are contradictory as given: overdue selects due dates before ${asOf}, and dueAfter=${filters.dueAfter} excludes all of them — relax one.`,
+    );
+  }
+  if (filters.directive && (filters.dateAddedFrom || filters.dateAddedTo)) {
+    const window = directiveWindow(records, filters.directive);
+    if (
+      window &&
+      ((filters.dateAddedTo && filters.dateAddedTo < window.first) ||
+        (filters.dateAddedFrom && filters.dateAddedFrom > window.last))
+    ) {
+      fragments.push(
+        `Entries citing ${filters.directive === 'none' ? 'no directive' : filters.directive} were added from ${window.first} through ${window.last}; the dateAdded window falls outside that range.`,
+      );
+    }
+  }
+
+  if (unmatched.length === 0 && counts.length > 1) {
+    const restorers = counts.filter((count) => count.restoredByDropping > 0);
+    fragments.push(
+      restorers.length > 0
+        ? `Every filter matches entries on its own; ${restorers
+            .map(
+              (count) =>
+                `dropping ${count.filter} restores ${formatCount(count.restoredByDropping)} ${count.restoredByDropping === 1 ? 'entry' : 'entries'}`,
+            )
+            .join(', ')}.`
+        : 'Every filter matches entries on its own, but no single filter explains the miss — only relaxing two or more of them together restores a result.',
+    );
+  }
+
   if (fragments.length === 0) {
     fragments.push(
-      'No KEV entry matches. Relax the narrowest filter, or call cisa_check_cve_status if you already have specific CVE IDs.',
+      'The loaded KEV catalog snapshot holds no entries. Call cisa_list_reference with topic sources to check its state.',
     );
   }
   return fragments.join(' ');

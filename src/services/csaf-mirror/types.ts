@@ -203,10 +203,11 @@ export interface AdvisorySearchResult {
 
 /** Filters accepted by the advisory search. All AND together. */
 export interface AdvisorySearchFilters {
+  /** Exact CVE membership through `advisory_cves`, in canonical uppercase form. */
   cve?: string | undefined;
   cvssMax?: number | undefined;
   cvssMin?: number | undefined;
-  /** Exact CWE membership, e.g. `CWE-787`, matched case-insensitively through `advisory_cwes`. */
+  /** Exact CWE membership through `advisory_cwes`, in canonical uppercase form, e.g. `CWE-787`. */
   cwe?: string | undefined;
   /**
    * `true` keeps advisories covering at least one CVE in the KEV set passed to

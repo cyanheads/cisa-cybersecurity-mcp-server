@@ -14,6 +14,7 @@ import {
   createMockContext,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
+import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ADVISORY_OUTLINE_BUDGET } from '@/mcp-server/schemas/advisory.js';
 import { getAdvisoryTool } from '@/mcp-server/tools/definitions/get-advisory.tool.js';
@@ -27,8 +28,10 @@ import {
   buildOversizedAdvisory,
   FULL_ADVISORY,
   SPARSE_ADVISORY,
+  sparseAdvisoryAs,
 } from '../../../fixtures/csaf-documents.js';
 import { buildTarGzResponse } from '../../../fixtures/tar.js';
+import { emittedOutputSchema, strictClientValidator } from '../../../helpers/emitted-schema.js';
 import { contentText, firstText } from '../../../helpers/format-text.js';
 
 async function seedMirror(entries: Array<{ name: string; data: string }>) {
@@ -468,8 +471,155 @@ describe('cisa_get_advisory', () => {
     });
   });
 
+  describe('advisory ID spellings', () => {
+    /*
+     * The oracle: the advisoryId input pattern and lookup key this tool shipped
+     * with while its patterns leaned on the /i flag. Every spelling it accepted
+     * must still resolve to the same advisory.
+     */
+    const PRIOR_INPUT_PATTERN = /^\s*ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[a-z]|-\d+)?(?:\.json)?\s*$/i;
+    const priorLookupKey = (spelling: string) =>
+      spelling
+        .trim()
+        .replace(/\.json$/i, '')
+        .toUpperCase();
+
+    const SEEDED = ['ICSA-26-260-07', 'ICSA-10-316-01A', 'ICSA-16-231-01-0', 'ICSMA-19-253-02'];
+
+    /** Every character's case flipped independently, by a bitmask. */
+    const recase = (value: string, mask: number) =>
+      [...value]
+        .map((char, index) => ((mask >> index) & 1 ? char.toLowerCase() : char.toUpperCase()))
+        .join('');
+
+    /** The one-to-one spellings a caller plausibly types for a canonical ID. */
+    function spellings(canonical: string): string[] {
+      const [prefix = '', ...rest] = canonical.split('-');
+      const lowerPrefix = [prefix.toLowerCase(), ...rest].join('-');
+      const lowerSuffix = canonical.replace(/[A-Z]$/, (letter) => letter.toLowerCase());
+      return [
+        canonical,
+        canonical.toLowerCase(),
+        lowerPrefix,
+        lowerSuffix,
+        `${canonical}.json`,
+        `${canonical.toLowerCase()}.json`,
+        `${lowerPrefix}.JSON`,
+        `${recase(canonical, 0b1010_0101)}.Json`,
+        ` ${canonical} `,
+        `\t${canonical.toLowerCase()}.json\n`,
+        ` ${lowerSuffix} `,
+        ` ${canonical}﻿`,
+      ];
+    }
+
+    beforeEach(async () => {
+      await seedMirror([
+        {
+          name: 'CSAF-develop/csaf_files/OT/white/2026/icsa-26-260-07.json',
+          data: JSON.stringify(FULL_ADVISORY),
+        },
+        {
+          name: 'CSAF-develop/csaf_files/OT/white/2010/icsa-10-316-01a.json',
+          data: JSON.stringify(sparseAdvisoryAs('ICSA-10-316-01A', '2010-11-12T00:00:00.000000Z')),
+        },
+        {
+          name: 'CSAF-develop/csaf_files/OT/white/2016/icsa-16-231-01-0.json',
+          data: JSON.stringify(sparseAdvisoryAs('ICSA-16-231-01-0', '2016-08-18T00:00:00.000000Z')),
+        },
+        {
+          name: 'CSAF-develop/csaf_files/OT/white/2019/icsma-19-253-02.json',
+          data: JSON.stringify(sparseAdvisoryAs('ICSMA-19-253-02', '2019-09-10T00:00:00.000000Z')),
+        },
+      ]);
+    }, 30000);
+
+    it.each(SEEDED)(
+      'every spelling of %s the prior pattern accepted resolves to it',
+      async (canonical) => {
+        for (const spelling of spellings(canonical)) {
+          expect(PRIOR_INPUT_PATTERN.test(spelling), JSON.stringify(spelling)).toBe(true);
+          expect(priorLookupKey(spelling)).toBe(canonical);
+          const result = await runToolContract(getAdvisoryTool, {
+            advisoryId: spelling,
+            sections: ['advisory'],
+          });
+          const structured = result.structuredContent as {
+            advisory?: { advisoryId: string };
+            found: boolean;
+          };
+          expect(structured.found, JSON.stringify(spelling)).toBe(true);
+          expect(structured.advisory?.advisoryId).toBe(canonical);
+        }
+      },
+    );
+
+    it('any casing and surrounding whitespace the prior pattern accepted resolves to the same advisory', async () => {
+      const whitespace = fc.constantFrom(' ', '\t', '\n', '\r', '\v', '\f', ' ', ' ', '　', '﻿');
+      const pad = fc.array(whitespace, { maxLength: 3 }).map((chars) => chars.join(''));
+      const spelling = fc
+        .tuple(
+          fc.constantFrom(...SEEDED),
+          fc.integer({ min: 0, max: 0xffff }),
+          fc.constantFrom('', '.json', '.JSON', '.Json', '.jSoN'),
+          pad,
+          pad,
+        )
+        .map(([canonical, mask, extension, before, after]) => ({
+          canonical,
+          spelling: `${before}${recase(canonical, mask)}${extension}${after}`,
+        }));
+
+      await fc.assert(
+        fc.asyncProperty(spelling, async ({ canonical, spelling: value }) => {
+          expect(PRIOR_INPUT_PATTERN.test(value)).toBe(true);
+          const result = await runToolContract(getAdvisoryTool, {
+            advisoryId: value,
+            sections: ['advisory'],
+          });
+          const structured = result.structuredContent as { advisory?: { advisoryId: string } };
+          expect(structured.advisory?.advisoryId).toBe(canonical);
+        }),
+        { numRuns: 150 },
+      );
+    });
+
+    it('an uppercase-suffix advisory validates against the emitted, flag-free output schema', async () => {
+      for (const spelling of ['ICSA-10-316-01A', 'icsa-10-316-01a']) {
+        const result = await runToolContract(getAdvisoryTool, { advisoryId: spelling });
+        const structured = result.structuredContent as { advisory?: { advisoryId: string } };
+        expect(structured.advisory?.advisoryId).toBe('ICSA-10-316-01A');
+        const verdict = strictClientValidator(getAdvisoryTool).safeParse(structured);
+        expect(verdict.error?.issues ?? []).toEqual([]);
+      }
+    });
+
+    it('advertises flag-free canonical patterns on the advisoryId input and output', () => {
+      const canonical = '"pattern":"^ICS(A|MA)-\\\\d{2}-\\\\d{3}-\\\\d{2}(?:[A-Z]|-\\\\d+)?$"';
+      const input = (
+        getAdvisoryTool.input['~standard'] as unknown as {
+          jsonSchema: { input: (options: { target: string }) => unknown };
+        }
+      ).jsonSchema.input({ target: 'draft-2020-12' });
+      expect(JSON.stringify(input)).toContain(canonical);
+      expect(JSON.stringify(emittedOutputSchema(getAdvisoryTool))).toContain(canonical);
+    });
+  });
+
   it('rejects an advisoryId that does not match the ICSA/ICSMA pattern', () => {
     expect(() => getAdvisoryTool.input.parse({ advisoryId: 'NOT-AN-ID' })).toThrow();
+  });
+
+  it.each([
+    'ICSA-26-260',
+    'ICSA-26-260-07 .json',
+    'ICSA-26-260-07.json.json',
+    'ICSA-26-260-07AB',
+    'ICSMA-26-260-07-',
+    'ICSX-26-260-07',
+    '   ',
+  ])('still rejects the malformed advisoryId %j at the schema', (advisoryId) => {
+    expect(getAdvisoryTool.input.safeParse({ advisoryId }).success).toBe(false);
   });
 
   it('rejects an unknown value in sections', () => {

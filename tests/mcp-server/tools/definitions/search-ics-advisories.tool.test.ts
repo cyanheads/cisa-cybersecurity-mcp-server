@@ -12,6 +12,8 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
   createMockContext,
@@ -37,9 +39,11 @@ import {
   FULL_ADVISORY,
   REPUBLISHED_ADVISORY,
   SPARSE_ADVISORY,
+  sparseAdvisoryAs,
 } from '../../../fixtures/csaf-documents.js';
 import { buildKevFeedBody, KEV_RECORDS } from '../../../fixtures/kev-feed.js';
 import { buildTarGzResponse } from '../../../fixtures/tar.js';
+import { emittedOutputSchema, strictClientValidator } from '../../../helpers/emitted-schema.js';
 import { contentText, firstText } from '../../../helpers/format-text.js';
 
 const BASE_ENTRIES = [
@@ -298,6 +302,58 @@ describe('cisa_search_ics_advisories', () => {
       expect(() => searchIcsAdvisoriesTool.input.parse({ severity: 'ULTRA' })).toThrow();
     });
 
+    describe('cve and cwe case and whitespace', () => {
+      const run = (args: Record<string, string>) =>
+        runToolContract(
+          searchIcsAdvisoriesTool,
+          args as z.input<typeof searchIcsAdvisoriesTool.input>,
+        );
+
+      it.each([
+        ['cve', 'CVE-2026-12345', ['ICSA-26-260-07']],
+        ['cve', 'CVE-2014-0002', ['ICSA-14-035-01']],
+        ['cwe', 'CWE-20', ['ICSA-26-260-07']],
+      ])('%s %s in canonical form matches its advisories', async (key, value, expected) => {
+        const structured = (await run({ [key]: value })).structuredContent as Structured;
+        expect(structured.results.map((item) => item.advisoryId)).toEqual(expected);
+        expect(structured.appliedFilters[key]).toBe(value);
+      });
+
+      it.each([
+        ['cve', ' cve-2026-12345 ', 'CVE-2026-12345'],
+        ['cve', 'Cve-2014-0002\t', 'CVE-2014-0002'],
+        ['cwe', 'cwe-20\n', 'CWE-20'],
+        ['cwe', ' Cwe-20 ', 'CWE-20'],
+      ])(
+        '%s %j returns what %s returns and echoes the canonical form on both surfaces',
+        async (key, variant, canonical) => {
+          const expected = (await run({ [key]: canonical })).structuredContent as Structured;
+          const result = await run({ [key]: variant });
+          expect(result.isError).toBeFalsy();
+          const structured = result.structuredContent as Structured;
+          expect(structured.totalCount).toBeGreaterThan(0);
+          expect(structured.results).toEqual(expected.results);
+          expect(structured.appliedFilters[key]).toBe(canonical);
+          expect(contentText(result)).toContain(`${key}=${canonical}`);
+        },
+      );
+
+      it.each([
+        ['cve', 'CVE-26'],
+        ['cve', 'cve_2026_12345'],
+        ['cve', '  '],
+        ['cwe', 'cwe_79'],
+        ['cwe', 'CWE-'],
+        ['cwe', '\t'],
+      ])('%s %j still fails the pattern as InvalidParams', async (key, value) => {
+        const result = await run({ [key]: value });
+        expect(result.isError).toBe(true);
+        const structured = result.structuredContent as { error: { code: number } };
+        expect(structured.error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(contentText(result)).toContain(key);
+      });
+    });
+
     describe('zero-hit notice fragments', () => {
       it('vendor set: notes vendor names are unnormalized', async () => {
         const ctx = createMockContext({ errors: searchIcsAdvisoriesTool.errors });
@@ -438,6 +494,51 @@ describe('cisa_search_ics_advisories', () => {
           );
         });
       });
+    });
+  });
+
+  describe('advisory IDs carrying a revision suffix', () => {
+    beforeEach(async () => {
+      await seedMirror([
+        ...BASE_ENTRIES,
+        {
+          name: 'CSAF-develop/csaf_files/OT/white/2010/icsa-10-316-01a.json',
+          data: JSON.stringify(sparseAdvisoryAs('ICSA-10-316-01A', '2010-11-12T00:00:00.000000Z')),
+        },
+        {
+          name: 'CSAF-develop/csaf_files/OT/white/2010/icsa-10-301-01.json',
+          data: JSON.stringify(sparseAdvisoryAs('ICSA-10-301-01', '2010-10-28T00:00:00.000000Z')),
+        },
+        {
+          name: 'CSAF-develop/csaf_files/OT/white/2016/icsa-16-231-01-0.json',
+          data: JSON.stringify(sparseAdvisoryAs('ICSA-16-231-01-0', '2016-08-18T00:00:00.000000Z')),
+        },
+      ]);
+    }, 30000);
+
+    it('a page holding an uppercase-suffix ID validates against the emitted, flag-free output schema', async () => {
+      const result = await runToolContract(searchIcsAdvisoriesTool, {
+        publishedTo: '2016-12-31',
+        sortBy: 'published',
+        order: 'asc',
+        limit: 5,
+      });
+      const structured = result.structuredContent as Structured;
+      expect(structured.results.map((item) => item.advisoryId)).toEqual([
+        'ICSA-10-301-01',
+        'ICSA-10-316-01A',
+        'ICSA-14-035-01',
+        'ICSA-16-231-01-0',
+      ]);
+      const verdict = strictClientValidator(searchIcsAdvisoriesTool).safeParse(structured);
+      expect(verdict.error?.issues ?? []).toEqual([]);
+    });
+
+    it('advertises the advisoryId pattern in its canonical uppercase form', () => {
+      const emitted = JSON.stringify(emittedOutputSchema(searchIcsAdvisoriesTool));
+      expect(emitted).toContain(
+        '"pattern":"^ICS(A|MA)-\\\\d{2}-\\\\d{3}-\\\\d{2}(?:[A-Z]|-\\\\d+)?$"',
+      );
     });
   });
 

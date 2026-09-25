@@ -14,7 +14,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
-import { ISO_DATE_REGEX } from '@/mcp-server/schemas/kev-record.js';
+import {
+  CveIdInputSchema,
+  CweIdInputSchema,
+  ISO_DATE_REGEX,
+} from '@/mcp-server/schemas/kev-record.js';
 import { SEVERITY_BANDS } from '@/reference/cvss.js';
 import { SECTOR_FILTER_VALUES } from '@/reference/sectors.js';
 import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
@@ -52,18 +56,12 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       .describe(
         'Case-insensitive substring of a product name, matched literally — % and _ are ordinary characters.',
       ),
-    cve: z
-      .string()
-      .regex(/^CVE-[0-9]{4}-[0-9]{4,19}$/)
-      .optional()
-      .describe('Exact CVE membership. The corpus covers 12,321 distinct CVEs.'),
-    cwe: z
-      .string()
-      .regex(/^CWE-[0-9]+$/)
-      .optional()
-      .describe(
-        'Exact CWE identifier, e.g. CWE-787, matched against every vulnerability entry in the advisory. A parent class does not match its children.',
-      ),
+    cve: CveIdInputSchema.optional().describe(
+      'Exact CVE membership, e.g. CVE-2021-44228. Case and surrounding whitespace are normalized. The corpus covers 12,321 distinct CVEs.',
+    ),
+    cwe: CweIdInputSchema.optional().describe(
+      'Exact CWE identifier, e.g. CWE-787, matched against every vulnerability entry in the advisory. Case and surrounding whitespace are normalized. A parent class does not match its children.',
+    ),
     inKev: z
       .boolean()
       .optional()

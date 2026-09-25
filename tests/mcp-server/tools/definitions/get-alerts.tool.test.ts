@@ -6,7 +6,12 @@
  * @module tests/mcp-server/tools/definitions/get-alerts.tool.test
  */
 
-import { createFetchMock, createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getAlertsTool } from '@/mcp-server/tools/definitions/get-alerts.tool.js';
 import {
@@ -16,6 +21,7 @@ import {
   resetCisaFeeds,
 } from '@/services/cisa-feeds/cisa-feeds-service.js';
 import { buildAdvisoriesFeed } from '../../../fixtures/rss-feeds.js';
+import { strictClientValidator } from '../../../helpers/emitted-schema.js';
 import { firstText } from '../../../helpers/format-text.js';
 
 describe('cisa_get_alerts', () => {
@@ -56,6 +62,36 @@ describe('cisa_get_alerts', () => {
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.windowCaveat).toContain('rolling window of the 30 most recent items');
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('an ICS item whose slug carries a revision suffix validates against the emitted, flag-free output schema', async () => {
+    const feed = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>CISA ICS Advisories</title>
+<item>
+  <title>Revised ICS Advisory</title>
+  <link>https://www.cisa.gov/news-events/ics-advisories/icsa-24-100-01a</link>
+  <description>Update A.</description>
+  <pubDate>Fri, 18 Sep 26 12:00:00 +0000</pubDate>
+  <guid>/node/25520</guid>
+</item>
+</channel></rss>`;
+    const http = createFetchMock([
+      {
+        match: FEED_URLS.ics,
+        respond: new Response(feed, { headers: { 'content-type': 'application/xml' } }),
+      },
+    ]);
+    http.install();
+    try {
+      const result = await runToolContract(getAlertsTool, { feed: 'ics' });
+      const structured = result.structuredContent as { items: Array<{ advisoryId?: string }> };
+      expect(structured.items[0]?.advisoryId).toBe('ICSA-24-100-01A');
+      const verdict = strictClientValidator(getAlertsTool).safeParse(structured);
+      expect(verdict.error?.issues ?? []).toEqual([]);
     } finally {
       http.restore();
     }

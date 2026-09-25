@@ -108,13 +108,12 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
         key: 'vendorProject',
         label: 'Vendor / project',
         description:
-          "CISA's own vendor label, 283 distinct values across the catalog. Free text, not a CPE vendor component, and not normalized against any registry.",
+          "CISA's own vendor label. Free text, not a CPE vendor component, and not normalized against any registry.",
       },
       {
         key: 'product',
         label: 'Product',
-        description:
-          "CISA's own product label, 694 distinct values. Free text, like vendorProject.",
+        description: "CISA's own product label. Free text, like vendorProject.",
       },
       {
         key: 'dateAdded',
@@ -138,27 +137,26 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
       {
         key: 'forensicTriage',
         label: 'Forensic triage',
-        description:
-          'Whether the entry falls in the BOD 26-04 three-day forensic-triage tier. 58 of 1,716 entries are flagged Yes.',
+        description: 'Whether the entry falls in the BOD 26-04 three-day forensic-triage tier.',
         values: ['Yes', 'No'],
       },
       {
         key: 'cwes',
         label: 'CWEs',
         description:
-          'Associated CWE identifiers, matching ^CWE-[0-9]+$. Up to four per entry, and empty on 175 entries — a CWE filter excludes those regardless of relevance.',
+          'Associated CWE identifiers, matching ^CWE-[0-9]+$. Empty on some entries — a CWE filter excludes those regardless of relevance.',
       },
       {
         key: 'notes',
         label: 'Notes',
         description:
-          'A semicolon-delimited field carrying reference URLs and, on 116 entries, leading prose. This server parses it into a references array (each classified nvd, cisa, bod_guidance, forensic_triage, vendor, or other) plus notesCommentary. Every entry carries an NVD detail URL.',
+          'A semicolon-delimited field carrying reference URLs, alone, comma-joined, or inside prose. This server parses every URL into a references array, in notes order (each classified nvd, cisa, bod_guidance, forensic_triage, vendor, or other), and keeps the prose segments verbatim as notesCommentary. Every entry carries an NVD detail URL.',
       },
       {
         key: 'directive',
         label: 'Directive cited',
         description:
-          "Which binding operational directive the entry cites in requiredAction or notes. 1,277 of 1,716 entries cite neither, and this server reports null for those rather than inferring one from the entry's age.",
+          "Which binding operational directive the entry cites in requiredAction or notes. Most entries cite neither, and this server reports null for those rather than inferring one from the entry's age.",
         values: ['BOD 26-04', 'BOD 22-01', 'none'],
       },
     ],
@@ -232,7 +230,7 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
   advisory_id_formats: {
     title: 'ICS advisory ID formats',
     summary:
-      'Advisory IDs are uppercase in the document and lowercase in the filename. This server accepts either and normalizes to uppercase, also stripping a trailing .json.',
+      'Advisory IDs are uppercase in the document and lowercase in the filename. This server accepts either — case, surrounding whitespace, and a trailing .json are normalized — and returns every ID in the uppercase form.',
     entries: [
       {
         key: 'ICSA',
@@ -252,7 +250,7 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
         key: 'suffix',
         label: 'Revision suffix',
         description:
-          'Most IDs carry no suffix (3,805 documents). 120 carry a single letter a through f marking a revision, and exactly one carries a numeric suffix, ICSA-16-231-01-0.',
+          'Most IDs carry no suffix (3,805 documents). 120 carry a single letter A through F marking a revision, and exactly one carries a numeric suffix, ICSA-16-231-01-0.',
         values: ['ICSA-26-260-07', 'ICSA-10-316-01A', 'ICSA-16-231-01-0'],
       },
     ],

@@ -1,7 +1,7 @@
 /**
  * @fileoverview The KEV record output schema shared by `cisa_check_cve_status`,
- * `cisa_search_kev`, and the `cisa://kev/{cveId}` resource, plus the projection
- * and the markdown renderer both tools use.
+ * `cisa_search_kev`, and the `cisa://kev/{cveId}` resource, plus the full and
+ * summary projections and the markdown renderer both tools use.
  *
  * One shape across all three surfaces is the point: a caller that learns to read
  * a KEV record from a batch check reads the identical object out of a search hit
@@ -23,6 +23,13 @@ export const CVE_ID_REGEX = /^CVE-[0-9]{4}-[0-9]{4,19}$/;
  * `CVE-2026-53266` rather than rejected.
  */
 export const CveIdInputSchema = z.string().trim().toUpperCase().regex(CVE_ID_REGEX);
+
+/** A CWE identifier as callers type it, normalized the same way — `" cwe-79 "` is `CWE-79`. */
+export const CweIdInputSchema = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(/^CWE-[0-9]+$/);
 
 /** An ISO calendar date, `YYYY-MM-DD`. */
 export const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -74,14 +81,22 @@ export const KevRecordSchema = z
       .nullable()
       .optional()
       .describe(
-        'The binding operational directive the entry cites, or null when it cites neither — 1,277 of 1,716 entries name none, and none is never inferred from age.',
+        'The binding operational directive the entry cites, or null when it cites neither — most entries name none, and none is never inferred from age.',
       ),
     requiredAction: z
       .string()
       .optional()
-      .describe("CISA's required-action text for the entry, verbatim."),
-    vulnerabilityName: z.string().optional().describe("CISA's short name for the vulnerability."),
-    shortDescription: z.string().optional().describe("CISA's one-paragraph description."),
+      .describe(
+        'CISA\'s required-action text for the entry, verbatim. Absent under detail "summary".',
+      ),
+    vulnerabilityName: z
+      .string()
+      .optional()
+      .describe('CISA\'s short name for the vulnerability. Absent under detail "summary".'),
+    shortDescription: z
+      .string()
+      .optional()
+      .describe('CISA\'s one-paragraph description. Absent under detail "summary".'),
     vendorProject: z
       .string()
       .optional()
@@ -105,18 +120,31 @@ export const KevRecordSchema = z
           .describe('One CWE identifier.'),
       )
       .optional()
-      .describe('Associated CWEs. Empty on 175 entries, so a CWE filter excludes those.'),
+      .describe(
+        'Associated CWEs. Empty on some entries, and a CWE filter excludes those. Absent under detail "summary".',
+      ),
     references: z
       .array(KevReferenceSchema)
       .optional()
-      .describe('Reference URLs parsed from the notes field, each classified by kind.'),
+      .describe(
+        'Every reference URL in the notes field, in notes order, each classified by kind. Absent under detail "summary".',
+      ),
     notesCommentary: z
       .string()
       .optional()
-      .describe('Free prose from the notes field, present when the entry opens with prose.'),
-    kevUrl: z.string().optional().describe('Absolute URL of the KEV catalog page for this CVE.'),
+      .describe(
+        'The prose segments of the notes field, verbatim with any URLs they contain; present when the notes carry prose. Absent under detail "summary".',
+      ),
+    kevUrl: z
+      .string()
+      .optional()
+      .describe(
+        'Absolute URL of the KEV catalog page for this CVE. Absent under detail "summary".',
+      ),
   })
-  .describe('One KEV catalog entry, or a not-in-KEV result carrying only cveId and inKev.');
+  .describe(
+    'One KEV catalog entry, or a not-in-KEV result carrying only cveId and inKev. Under cisa_check_cve_status detail "summary" an entry carries only cveId, inKev, the dates and deadline status, directive, vendor and product labels, and the ransomware and forensic-triage flags.',
+  );
 
 /** The inferred output shape of {@link KevRecordSchema}. */
 export type KevRecordOutput = z.infer<typeof KevRecordSchema>;
@@ -143,6 +171,28 @@ export function toKevRecordOutput(record: KevRecord, asOf: string): KevRecordOut
     references: record.references,
     ...(record.notesCommentary ? { notesCommentary: record.notesCommentary } : {}),
     kevUrl: record.kevUrl,
+  };
+}
+
+/**
+ * The triage view `cisa_check_cve_status` returns under `detail: "summary"`:
+ * identity, deadline and overdue status, directive, CISA's labels, and the two
+ * tier flags, in full-record order. It drops the prose, CWEs, references, and
+ * the catalog URL, which is derivable from the CVE ID.
+ */
+export function toKevRecordSummary(record: KevRecord, asOf: string): KevRecordOutput {
+  return {
+    cveId: record.cveId,
+    inKev: true,
+    dateAdded: record.dateAdded,
+    dueDate: record.dueDate,
+    daysUntilDue: daysBetween(asOf, record.dueDate),
+    overdue: record.dueDate < asOf,
+    directive: record.directive,
+    vendorProject: record.vendorProject,
+    product: record.product,
+    knownRansomwareCampaignUse: record.knownRansomwareCampaignUse,
+    forensicTriage: record.forensicTriage,
   };
 }
 

@@ -6,13 +6,14 @@
  * @module tests/services/kev-catalog/kev-catalog-service.test
  */
 
-import { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   getKevCatalog,
   initKevCatalog,
   KEV_FEED_URL,
+  queryTokens,
   resetKevCatalog,
 } from '@/services/kev-catalog/kev-catalog-service.js';
 import type { KevSnapshot } from '@/services/kev-catalog/types.js';
@@ -360,6 +361,132 @@ describe('KevCatalogService', () => {
         ctx,
       );
       expect(results).toEqual([]);
+    });
+
+    it.each([
+      ['punctuation', '--'],
+      ['whitespace', '  '],
+      ['CJK', '漏洞'],
+    ])('throws empty_search_text when nameContains is %s', async (_label, nameContains) => {
+      const ctx = await loadedCatalog();
+      await expect(
+        getKevCatalog().search({ nameContains }, 'dateAdded', 'desc', ctx),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'empty_search_text',
+          field: 'nameContains',
+          recovery: { hint: expect.any(String) },
+        },
+      });
+    });
+
+    it('a word in another script beside a surviving token searches the survivor alone', async () => {
+      const ctx = await loadedCatalog();
+      const mixed = await getKevCatalog().search(
+        { nameContains: '漏洞 widget ΠΡΟ' },
+        'dateAdded',
+        'asc',
+        ctx,
+      );
+      const plain = await getKevCatalog().search(
+        { nameContains: 'widget' },
+        'dateAdded',
+        'asc',
+        ctx,
+      );
+      expect(mixed.map((r) => r.cveId)).toEqual(plain.map((r) => r.cveId));
+      expect(mixed.map((r) => r.cveId)).toEqual(['CVE-2026-00001']);
+    });
+  });
+
+  describe('queryTokens', () => {
+    it.each([
+      ['a word in another script', '漏洞 siemens', ['siemens'], ['漏洞']],
+      ['two dropped words', 'ΑΘΗΝΑ acme 漏洞', ['acme'], ['ΑΘΗΝΑ', '漏洞']],
+      ['a script run fused to a Latin word', '漏洞siemens', ['siemens'], ['漏洞siemens']],
+      ['a letter with no Latin fold', 'straße', ['stra', 'e'], ['straße']],
+      ['digits outside 0-9', 'acme ١٢٣', ['acme'], ['١٢٣']],
+      ['accents, which fold', 'Café crème', ['cafe', 'creme'], []],
+      ['punctuation, which is not a letter or digit', 'log4j—exploit --', ['log4j', 'exploit'], []],
+      ['Latin only', 'Widget Pro', ['widget', 'pro'], []],
+    ])('%s: %j searches %j and reports %j dropped', (_label, query, tokens, dropped) => {
+      expect(queryTokens(query)).toEqual({ tokens, dropped });
+    });
+
+    it('still throws empty_search_text when every word is dropped', () => {
+      expect(() => queryTokens('漏洞 ΑΘΗΝΑ')).toThrow(
+        expect.objectContaining({ data: expect.objectContaining({ reason: 'empty_search_text' }) }),
+      );
+    });
+  });
+
+  describe('filterCounts', () => {
+    async function loadedCatalog() {
+      const http = createFetchMock([
+        {
+          match: KEV_FEED_URL,
+          respond: new Response(buildKevFeedBody(), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        },
+      ]);
+      http.install();
+      try {
+        const ctx = createMockContext();
+        await getKevCatalog().snapshot(ctx);
+        return ctx;
+      } finally {
+        http.restore();
+      }
+    }
+
+    it('counts each applied filter alone and what dropping it restores, in filter order', async () => {
+      const ctx = await loadedCatalog();
+      const counts = await getKevCatalog().filterCounts(
+        { vendorProject: 'Acme', product: 'Gadget', forensicTriage: true },
+        ctx,
+      );
+      expect(counts).toEqual([
+        { filter: 'vendorProject', alone: 2, restoredByDropping: 0 },
+        { filter: 'product', alone: 1, restoredByDropping: 1 },
+        { filter: 'forensicTriage', alone: 1, restoredByDropping: 1 },
+      ]);
+    });
+
+    it('reports no restorer when every pair of filters is disjoint', async () => {
+      const ctx = await loadedCatalog();
+      const counts = await getKevCatalog().filterCounts(
+        { vendorProject: 'OldVendor', cveIdPrefix: 'CVE-2026', directive: 'none' },
+        ctx,
+      );
+      expect(counts).toEqual([
+        { filter: 'vendorProject', alone: 1, restoredByDropping: 0 },
+        { filter: 'cveIdPrefix', alone: 3, restoredByDropping: 0 },
+        { filter: 'directive', alone: 1, restoredByDropping: 0 },
+      ]);
+    });
+
+    it('resolves overdue against asOf and counts a filter that matches nothing as zero', async () => {
+      const ctx = await loadedCatalog();
+      /* asOf 2026-09-10: only CVE-2026-00002 (due 2026-09-19) is not overdue, and it
+       * passes every filter but cveIdPrefix — so dropping cveIdPrefix restores it. */
+      const counts = await getKevCatalog().filterCounts(
+        { overdue: false, cveIdPrefix: 'CVE-2099', ransomware: false, forensicTriage: false },
+        ctx,
+      );
+      expect(counts).toEqual([
+        { filter: 'cveIdPrefix', alone: 0, restoredByDropping: 1 },
+        { filter: 'overdue', alone: 1, restoredByDropping: 0 },
+        { filter: 'ransomware', alone: 3, restoredByDropping: 0 },
+        { filter: 'forensicTriage', alone: 4, restoredByDropping: 0 },
+      ]);
+    });
+
+    it('returns no counts when no filter is applied', async () => {
+      const ctx = await loadedCatalog();
+      expect(await getKevCatalog().filterCounts({ vendorProject: '' }, ctx)).toEqual([]);
     });
   });
 });
