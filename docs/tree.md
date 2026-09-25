@@ -1,6 +1,6 @@
 # cisa-cybersecurity-mcp-server - Directory Structure
 
-Generated on: 2026-09-25 12:41:20
+Generated on: 2026-09-25 15:21:22
 
 ```text
 cisa-cybersecurity-mcp-server/
@@ -26,6 +26,7 @@ cisa-cybersecurity-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -173,6 +174,7 @@ cisa-cybersecurity-mcp-server/
 │   │   │   ├── ingest.ts
 │   │   │   ├── normalize.ts
 │   │   │   ├── schema.ts
+│   │   │   ├── sync-lease.ts
 │   │   │   ├── tar.ts
 │   │   │   └── types.ts
 │   │   ├── kev-catalog/
@@ -183,10 +185,13 @@ cisa-cybersecurity-mcp-server/
 │   │   │   ├── paths.ts
 │   │   │   ├── types.ts
 │   │   │   └── vulnrichment-service.ts
+│   │   ├── refresh-schedule.ts
 │   │   ├── search-text.ts
 │   │   └── upstream-http.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
 │   ├── fixtures/
 │   │   ├── csaf-documents.ts
 │   │   ├── kev-feed.ts
@@ -198,8 +203,10 @@ cisa-cybersecurity-mcp-server/
 │   ├── helpers/
 │   │   ├── catalog-counts.ts
 │   │   ├── emitted-schema.ts
-│   │   └── format-text.ts
+│   │   ├── format-text.ts
+│   │   └── linear-time.ts
 │   ├── integration/
+│   │   ├── csaf-mirror-lease.test.ts
 │   │   └── csaf-mirror.test.ts
 │   ├── mcp-server/
 │   │   ├── resources/
@@ -209,15 +216,16 @@ cisa-cybersecurity-mcp-server/
 │   │   ├── schemas/
 │   │   │   ├── advisory.test.ts
 │   │   │   └── kev-record.test.ts
-│   │   └── tools/
-│   │       └── definitions/
-│   │           ├── check-cve-status.tool.test.ts
-│   │           ├── get-advisory.tool.test.ts
-│   │           ├── get-alerts.tool.test.ts
-│   │           ├── get-ssvc.tool.test.ts
-│   │           ├── list-reference.tool.test.ts
-│   │           ├── search-ics-advisories.tool.test.ts
-│   │           └── search-kev.tool.test.ts
+│   │   ├── tools/
+│   │   │   └── definitions/
+│   │   │       ├── check-cve-status.tool.test.ts
+│   │   │       ├── get-advisory.tool.test.ts
+│   │   │       ├── get-alerts.tool.test.ts
+│   │   │       ├── get-ssvc.tool.test.ts
+│   │   │       ├── list-reference.tool.test.ts
+│   │   │       ├── search-ics-advisories.tool.test.ts
+│   │   │       └── search-kev.tool.test.ts
+│   │   └── unopenable-index.test.ts
 │   ├── reference/
 │   │   ├── bod-2604.test.ts
 │   │   ├── cvss.test.ts
@@ -235,6 +243,7 @@ cisa-cybersecurity-mcp-server/
 │   │   ├── vulnrichment/
 │   │   │   ├── paths.test.ts
 │   │   │   └── vulnrichment-service.test.ts
+│   │   ├── refresh-schedule.test.ts
 │   │   └── upstream-http.test.ts
 │   └── smoke/
 │       └── surface.test.ts

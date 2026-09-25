@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-25 · ⚠️ Breaking
+
+The ICS advisory index moves to a per-user cache directory and refreshes at boot and on schedule on every transport, under a cross-process sync lease; ICS zero-hit notices are computed from per-filter counts, and an invalid refresh cron now fails startup.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-09-25 · ⚠️ Breaking
 
 Adds a summary detail to cisa_check_cve_status, reads every KEV notes URL into references, and computes zero-hit notices from per-filter counts; a nameContains with nothing to search is now rejected, and advisoryId patterns are advertised in their canonical, flag-free form.
