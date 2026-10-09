@@ -237,7 +237,6 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
       throw ctx.fail(
         'enrichment_source_unavailable',
         `All ${records.length} Vulnrichment fetches failed.`,
-        { ...ctx.recoveryFor('enrichment_source_unavailable') },
       );
     }
 

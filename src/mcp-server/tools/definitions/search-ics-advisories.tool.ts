@@ -334,28 +334,24 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       throw ctx.fail(
         'invalid_cvss_range',
         `cvssMin ${input.cvssMin} exceeds cvssMax ${input.cvssMax}.`,
-        { ...ctx.recoveryFor('invalid_cvss_range') },
       );
     }
     if (input.publishedFrom && input.publishedTo && input.publishedFrom > input.publishedTo) {
       throw ctx.fail(
         'invalid_date_range',
         `publishedFrom ${input.publishedFrom} is later than publishedTo ${input.publishedTo}.`,
-        { ...ctx.recoveryFor('invalid_date_range') },
       );
     }
     if (input.revisedFrom && input.revisedTo && input.revisedFrom > input.revisedTo) {
       throw ctx.fail(
         'invalid_date_range',
         `revisedFrom ${input.revisedFrom} is later than revisedTo ${input.revisedTo}.`,
-        { ...ctx.recoveryFor('invalid_date_range') },
       );
     }
     if (input.sortBy === 'relevance' && !input.q) {
       throw ctx.fail(
         'relevance_sort_without_query',
         'sortBy relevance needs a q value to rank against.',
-        { ...ctx.recoveryFor('relevance_sort_without_query') },
       );
     }
 
@@ -365,14 +361,12 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       throw ctx.fail(
         'mirror_unavailable',
         `The ICS advisory index cannot be opened (${availability.reason.replaceAll('_', ' ')}).`,
-        { ...ctx.recoveryFor('mirror_unavailable') },
       );
     }
     if (availability.status === 'not_ready') {
       throw ctx.fail(
         'mirror_not_ready',
         'The ICS advisory index has not completed its first sync.',
-        { ...ctx.recoveryFor('mirror_not_ready') },
       );
     }
 

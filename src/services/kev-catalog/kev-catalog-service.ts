@@ -231,11 +231,7 @@ export class KevCatalogService {
       if (this.current) return this.current;
       throw serviceUnavailable(
         'The KEV catalog snapshot is not loaded and the fetch from cisa.gov failed.',
-        {
-          reason: 'catalog_unavailable',
-          retryable: true,
-          ...ctx.recoveryFor('catalog_unavailable'),
-        },
+        { reason: 'catalog_unavailable', retryable: true },
         { cause: error },
       );
     }

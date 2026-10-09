@@ -119,7 +119,7 @@ export class CisaFeedsService {
       }
       throw serviceUnavailable(
         `The CISA ${feed} feed could not be fetched or parsed.`,
-        { reason: 'feed_unavailable', retryable: true, ...ctx.recoveryFor('feed_unavailable') },
+        { reason: 'feed_unavailable', retryable: true },
         { cause: error },
       );
     }

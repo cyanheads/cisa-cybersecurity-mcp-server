@@ -202,14 +202,12 @@ export const searchKevTool = tool('cisa_search_kev', {
       throw ctx.fail(
         'invalid_date_range',
         `dateAddedFrom ${input.dateAddedFrom} is later than dateAddedTo ${input.dateAddedTo}.`,
-        { ...ctx.recoveryFor('invalid_date_range') },
       );
     }
     if (input.dueAfter && input.dueBefore && input.dueAfter > input.dueBefore) {
       throw ctx.fail(
         'invalid_date_range',
         `dueAfter ${input.dueAfter} is later than dueBefore ${input.dueBefore}.`,
-        { ...ctx.recoveryFor('invalid_date_range') },
       );
     }
 

@@ -150,7 +150,6 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       throw ctx.fail(
         'cves_need_vulnerabilities_section',
         `cves narrows the vulnerabilities section, but sections requests only ${requested.join(', ')}.`,
-        { ...ctx.recoveryFor('cves_need_vulnerabilities_section') },
       );
     }
 
@@ -160,14 +159,12 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       throw ctx.fail(
         'mirror_unavailable',
         `The ICS advisory index cannot be opened (${availability.reason.replaceAll('_', ' ')}).`,
-        { ...ctx.recoveryFor('mirror_unavailable') },
       );
     }
     if (availability.status === 'not_ready') {
       throw ctx.fail(
         'mirror_not_ready',
         'The ICS advisory index has not completed its first sync.',
-        { ...ctx.recoveryFor('mirror_not_ready') },
       );
     }
 
@@ -191,7 +188,6 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
         throw ctx.fail(
           'unknown_section',
           `${advisoryId} carries no ${missing.join(', ')} section. It carries: ${available.join(', ')}.`,
-          { ...ctx.recoveryFor('unknown_section') },
         );
       }
       const selected = selectSections(doc as unknown as Record<string, unknown>, [...requested], {
@@ -204,7 +200,6 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
           throw ctx.fail(
             'unknown_cve',
             `${advisoryId} does not cover ${unknown.join(', ')}; its vulnerabilities section holds ${covered.size} CVE${covered.size === 1 ? '' : 's'}.`,
-            { ...ctx.recoveryFor('unknown_cve') },
           );
         }
         const wanted = new Set(cves);

@@ -240,16 +240,20 @@ describe('classifyStoreOpenFailure', () => {
     expect(classifyStoreOpenFailure(errno('ENOTDIR'))).toBe('not_a_directory');
     expect(classifyStoreOpenFailure(errno('EEXIST'))).toBe('not_a_directory');
     expect(classifyStoreOpenFailure(errno('SQLITE_NOTADB'))).toBe('not_a_database');
-    /* The framework wraps a driver open failure in an McpError whose cause carries the code. */
-    const wrapped = new McpError(
-      JsonRpcErrorCode.DatabaseError,
-      'Failed to open mirror store',
-      {},
-      {
-        cause: errno('EROFS'),
-      },
-    );
-    expect(classifyStoreOpenFailure(wrapped)).toBe('read_only');
+    /* The framework raises every open failure as a DatabaseError naming only the
+     * file, with the errno or driver error on its cause. */
+    for (const message of [
+      'Failed to open mirror store "csaf.sqlite3".',
+      'Failed to initialize mirror store "csaf.sqlite3".',
+    ]) {
+      const wrapped = new McpError(
+        JsonRpcErrorCode.DatabaseError,
+        message,
+        { recovery: { hint: 'Point the store at a writable location.' } },
+        { cause: errno('EROFS') },
+      );
+      expect(classifyStoreOpenFailure(wrapped)).toBe('read_only');
+    }
   });
 
   it('leaves anything else unclassified, so a transient lock is never reported as misconfiguration', () => {

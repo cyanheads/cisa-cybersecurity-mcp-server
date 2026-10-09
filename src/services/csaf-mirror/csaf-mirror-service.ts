@@ -158,12 +158,14 @@ function errorCodes(error: unknown): string[] {
 }
 
 /**
- * Classify a failure to open the index store. The framework raises it in three
- * shapes — the raw `mkdir` errno, a `DatabaseError` whose cause is the driver's
- * error, and a raw SQLite error from the connection pragmas — so every code on
+ * Classify a failure to open the index store. The framework raises every such
+ * failure as a `DatabaseError` naming only the file — `Failed to open mirror
+ * store` for the parent-directory `mkdir`, the connection, and its pragmas, and
+ * `Failed to initialize mirror store` for the schema and migrations — with the
+ * errno or driver error that decides the reason on its `cause`, so every code on
  * the cause chain is read. `undefined` for anything that is not a known open
- * failure (a busy lock, an abort, a bug), which callers must not report as
- * misconfiguration.
+ * failure (a busy lock, an abort, a missing SQLite driver, a bug), which callers
+ * must not report as misconfiguration.
  */
 export function classifyStoreOpenFailure(error: unknown): StoreUnavailableReason | undefined {
   for (const code of errorCodes(error)) {
