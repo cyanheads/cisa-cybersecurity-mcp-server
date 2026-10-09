@@ -1,6 +1,6 @@
 # cisa-cybersecurity-mcp-server - Directory Structure
 
-Generated on: 2026-09-25 15:21:22
+Generated on: 2026-10-09 06:44:53
 
 ```text
 cisa-cybersecurity-mcp-server/
@@ -132,9 +132,11 @@ cisa-cybersecurity-mcp-server/
 │   ├── csaf-mirror-refresh.ts
 │   ├── csaf-mirror-verify.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/

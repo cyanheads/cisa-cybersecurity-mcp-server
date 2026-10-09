@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-10-08
+
+mcp-ts-core 0.13.14: error results carry their request ID; a numeric string for a number, a lone string for a list, and null for an optional field are repaired before validation; and an advisory index that cannot be opened no longer names its directory.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-25 · ⚠️ Breaking
 
 The ICS advisory index moves to a per-user cache directory and refreshes at boot and on schedule on every transport, under a cross-process sync lease; ICS zero-hit notices are computed from per-filter counts, and an invalid refresh cron now fails startup.
