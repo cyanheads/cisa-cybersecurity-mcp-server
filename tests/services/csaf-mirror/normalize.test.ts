@@ -34,6 +34,56 @@ import {
 import { bestMsBySize } from '../../helpers/linear-time.js';
 
 describe('normalizeAdvisoryId', () => {
+  it('characterizes empty product trees without manufacturing definitions', () => {
+    expect(
+      flattenProductTree({ relationships: [{ product_reference: 'missing' }] }).productCount,
+    ).toBe(0);
+  });
+
+  it('preserves standalone and relationship definitions once per ID after nested branches', () => {
+    const products = flattenProductTree({
+      branches: [
+        {
+          category: 'vendor',
+          name: 'Vendor',
+          branches: [
+            {
+              category: 'product_name',
+              name: 'Device',
+              branches: [
+                {
+                  category: 'product_version',
+                  name: '1',
+                  product: { product_id: 'base', name: 'Device 1' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      full_product_names: [
+        { product_id: 'standalone', name: 'Standalone' },
+        { product_id: 'base', name: 'Device 1' },
+      ],
+      relationships: [
+        {
+          category: 'installed_on',
+          product_reference: 'standalone',
+          relates_to_product_reference: 'missing',
+          full_product_name: { product_id: 'combined', name: 'Standalone on missing' },
+        },
+      ],
+    });
+    const rows = products.vendors.flatMap((v) => v.products.flatMap((p) => p.versions));
+    expect(rows.map((r) => r.productId)).toEqual(['base', 'standalone', 'combined']);
+    expect(products.productCount).toBe(3);
+    expect(rows[2]).toMatchObject({
+      name: 'Standalone on missing',
+      relationshipCategory: 'installed_on',
+      productReference: 'standalone',
+      relatesToProductReference: 'missing',
+    });
+  });
   it('uppercases, trims, and strips a trailing .json', () => {
     expect(normalizeAdvisoryId('  icsa-26-260-07.json  ')).toBe('ICSA-26-260-07');
   });
@@ -136,8 +186,18 @@ describe('flattenProductTree', () => {
     expect(vendor?.name).toBe('Acme Industries');
     expect(vendor?.products[0]?.name).toBe('Widget Controller X200');
     expect(vendor?.products[0]?.versions).toEqual([
-      { kind: 'product_version_range', value: 'prior to 2.4.1', productId: 'CSAFPID-0001' },
-      { kind: 'product_version', value: '2.4.1', productId: 'CSAFPID-0002' },
+      {
+        kind: 'product_version_range',
+        value: 'prior to 2.4.1',
+        name: 'Widget Controller X200',
+        productId: 'CSAFPID-0001',
+      },
+      {
+        kind: 'product_version',
+        value: '2.4.1',
+        name: 'Widget Controller X200',
+        productId: 'CSAFPID-0002',
+      },
     ]);
   });
 
@@ -188,7 +248,14 @@ describe('flattenProductTree', () => {
     expect(last).toEqual({
       name: 'V2 Product 84',
       family: 'Family 2',
-      versions: [{ kind: 'product_version', value: '1.84', productId: 'CSAFPID-584' }],
+      versions: [
+        {
+          kind: 'product_version',
+          value: '1.84',
+          name: 'V2 Product 84 1.84',
+          productId: 'CSAFPID-584',
+        },
+      ],
     });
     const productIds = result.vendors.flatMap((vendor) =>
       vendor.products.flatMap((product) => product.versions.map((version) => version.productId)),

@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cisa-cybersecurity-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cisa-cybersecurity-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cisa-cybersecurity-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cisa-cybersecurity-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cisa-cybersecurity-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cisa-cybersecurity-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -92,23 +92,24 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 - Results carry `advisoryId`, up to 20 `cves` with `cveCount`, `kevCves`, `maxCvss` with `severityDerived`, `sectors`, `url`, `csafUrl`, and `attribution`; without `inKev`, an unloaded KEV snapshot leaves `kevCves` out and says so rather than failing
 - Reports `totalCount` and `appliedFilters`; a zero-hit result names the filter that matches nothing on its own and what dropping it restores, or the filters whose removal restores results and how many
 - `vendor` and `product` are case-insensitive substrings matched literally, non-ASCII capitals included, so a label copied from a result matches its own advisories
-- Typed errors: `mirror_not_ready` and `catalog_unavailable` (retryable), `mirror_unavailable`, `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
+- Typed errors: `mirror_not_ready`, `mirror_busy`, and `catalog_unavailable` (retryable), `mirror_unavailable`, `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
 
 ---
 
 ### `cisa_get_advisory` <sub>tool</sub>
 
-- `advisoryId` (optional revision suffix; case, surrounding whitespace, and a trailing `.json` are normalized, and every ID comes back in its uppercase form), optional `sections` (`advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`), and optional `cves` to narrow `vulnerabilities` to named entries
+- `advisoryId` (optional revision suffix; case, surrounding whitespace, and a trailing `.json` are normalized), optional `sections` (`advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`), `cves` to select vulnerability entries, and `productIds` to select exact, case-sensitive product definitions
+- Nonempty selectors imply their target sections when `sections` is omitted or empty; explicit sections must include those targets. Empty selectors behave as omitted. Product selection preserves whole-document `productCount`/`vendorCount` and reports returned definitions in `shownProducts`; relationship components are referenced without automatic expansion
 - Returns `kind: "full"`, or `kind: "outline"` when a document read without `sections` exceeds the 24,000-byte budget: per-section byte sizes plus the CVE IDs in `vulnerabilities`, for a stateless re-call
 - An ID not in the index returns `found: false` with `guidance`, `indexCheckpoint`, and `indexLastSyncedAt`; the guidance says when the ID's own date is later than the last sync, so the advisory may be newer than the index
-- Typed errors: `mirror_not_ready` (retryable), `mirror_unavailable`, `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`
+- Typed errors: `mirror_not_ready` and `mirror_busy` (retryable), `mirror_unavailable`, `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`, `unknown_product_id`, `product_ids_need_products_section`
 
 ---
 
 ### `cisa_get_alerts` <sub>tool</sub>
 
 - `feed`: `advisories` (default), `alerts`, or `ics`; `limit` up to 30, the upstream window size; `since` (`YYYY-MM-DD`) filters within that window and cannot reach past it
-- Items carry `title`, `link`, `pubDate`, `summary` (HTML stripped, capped at 1,200 characters, flagged by `summaryTruncated`), and on ICS items an `advisoryId` for `cisa_get_advisory`; `window` reports `itemCount`, `oldest`, `newest`, and `upstreamWindowSize`. Typed error: `feed_unavailable` (retryable)
+- Items carry `title`, `link`, `pubDate`, `summary` (HTML stripped, capped at 1,200 characters, flagged by `summaryTruncated`), and on ICS items an `advisoryId` for `cisa_get_advisory`; `window` reports `itemCount`, `oldest`, `newest`, and `upstreamWindowSize`. Every response carries `fetchedAt` and `stale`; refresh failure retains the last window with retry guidance, within a 45-second total budget. A stale empty result cannot confirm current publication absence. Cold failure returns `feed_unavailable` (retryable)
 
 ---
 
@@ -121,7 +122,7 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 ### `cisa://advisory/{advisoryId}` <sub>resource</sub>
 
-- One flattened advisory as `application/json`, with the same 24,000-byte outline-on-overflow as `cisa_get_advisory`; the template takes no `sections` or `cves`, so follow an outline up with the tool
+- One flattened advisory as `application/json`, with the same 24,000-byte outline-on-overflow as `cisa_get_advisory`; the template takes no `sections`, `cves`, or `productIds`, so follow an outline up with the tool
 - Listing returns the 30 most recently revised advisories; `advisoryId` completes from the index, up to 100 suggestions
 
 ## Features
@@ -131,7 +132,8 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 CISA-specific:
 
 - Four public sources, no account or key: the KEV JSON feed, Vulnrichment, the CSAF ICS advisory repository, and CISA's RSS feeds
-- None of them offers search, so every filter runs locally: KEV as an in-memory snapshot kept current by a conditional-GET poll, ICS advisories as a SQLite index with FTS5
+- None of them offers search, so every filter runs locally: KEV as an in-memory snapshot kept current by a conditional-GET poll, ICS advisories as a SQLite index with FTS5. All date filters require real calendar dates in `YYYY-MM-DD`
+- KEV snapshots are accepted whole: unusable membership records, duplicate normalized CVEs, or inconsistent envelope/counts reject the refresh and retain the last valid snapshot and conditional-fetch state. Without a valid snapshot, reads return retryable `catalog_unavailable`
 - Boot never waits on the advisory index; the KEV, SSVC, and alert tools serve from the first request while it seeds in the background
 - BOD 26-04 Table 1 ships as data, so a computed timeline is a table lookup over published decision points. It is not a compliance determination, and it is reported beside CISA's assigned KEV due date, never reconciled with it
 
@@ -303,9 +305,13 @@ On every transport, the server refreshes the index once at startup and then on `
 
 ```sh
 bun run mirror:init      # full build, idempotent, safe to re-run after an interrupt
-bun run mirror:refresh   # incremental: fetches only documents whose revision date moved
+bun run mirror:refresh   # requires a completed mirror:init; fetches changed documents only
 bun run mirror:verify    # readiness, sync status, checkpoint, count, content version, SQLite integrity; non-zero on failure
 ```
+
+A transient SQLite lock returns retryable `mirror_busy`; retry shortly. When an automatic first seed finds another process syncing, it rechecks in the background with a delay capped at five seconds, even with the refresh cron `off`. It reuses an index the other process finishes, or seeds after the lease expires. Shutdown cancels boot work and retries, aborts active sync, and releases only its own lease.
+
+A partial refresh keeps successfully applied rows readable and retries unresolved documents on the next refresh. Topic `sources` reports `syncStatus: partial` and `failedDocumentCount`; `lastCompletedAt` and `lastSuccessfulCheckpoint` stay at the last wholly successful sync, while `checkpoint` remains the newest revision ingested. Document and coverage counts reflect applied rows immediately. `mirror:refresh` and `mirror:verify` exit non-zero for a partial refresh; the manifest ETag is committed only after every changed document succeeds.
 
 ### Docker
 

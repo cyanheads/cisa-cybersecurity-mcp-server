@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext as baseContext, createFetchMock } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { icsAdvisoryResource } from '@/mcp-server/resources/definitions/ics-advisory.resource.js';
 import {
@@ -33,6 +33,7 @@ import { buildTarGzResponse } from '../../../fixtures/tar.js';
 const advisoryParams = icsAdvisoryResource.params as NonNullable<typeof icsAdvisoryResource.params>;
 const listExtra = {} as Parameters<NonNullable<typeof icsAdvisoryResource.list>>[0];
 const advisoryOutput = icsAdvisoryResource.output as NonNullable<typeof icsAdvisoryResource.output>;
+const createMockContext = () => baseContext({ errors: icsAdvisoryResource.errors });
 
 async function seedMirror(entries: Array<{ name: string; data: string }>) {
   const http = createFetchMock([

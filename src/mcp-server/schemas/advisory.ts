@@ -89,6 +89,12 @@ export const AdvisorySummarySchema = z
 export const AdvisoryProductsSchema = z
   .object({
     vendorCount: z.number().int().describe('Distinct vendors in the product tree.'),
+    selected: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when productIds selects only requested definitions; whole-document totals are retained.',
+      ),
     productCount: z.number().int().describe('Flattened product entries in the whole product tree.'),
     vendors: z
       .array(
@@ -108,21 +114,51 @@ export const AdvisoryProductsSchema = z
                       .array(
                         z
                           .object({
+                            name: z
+                              .string()
+                              .optional()
+                              .describe('Exact full product name supplied upstream.'),
+                            identificationHelper: z
+                              .string()
+                              .optional()
+                              .describe(
+                                'Lossless JSON text of upstream CSAF product identification metadata, when supplied.',
+                              ),
+                            relationshipCategory: z
+                              .string()
+                              .optional()
+                              .describe('CSAF relationship category supplied upstream.'),
+                            productReference: z
+                              .string()
+                              .optional()
+                              .describe(
+                                'First relationship component ID; not automatically expanded.',
+                              ),
+                            relatesToProductReference: z
+                              .string()
+                              .optional()
+                              .describe(
+                                'Second relationship component ID; not automatically expanded.',
+                              ),
                             kind: z
                               .string()
                               .describe(
-                                'CSAF branch category this entry came from, e.g. product_version or product_version_range.',
+                                'CSAF branch category, or full_product_name or relationship for definitions outside branches.',
                               ),
-                            value: z.string().describe('The version or version-range expression.'),
+                            value: z
+                              .string()
+                              .describe(
+                                'Version/range expression for a branch row, or full name for a standalone or relationship definition.',
+                              ),
                             productId: z
                               .string()
                               .describe(
-                                'The CSAFPID token vulnerability entries reference — how a CVE maps to exact affected versions.',
+                                'Exact opaque CSAF product ID referenced by vulnerability entries; case-sensitive and not restricted to CSAFPID tokens.',
                               ),
                           })
-                          .describe('One affected version or version range.'),
+                          .describe('One branch, standalone, or relationship product definition.'),
                       )
-                      .describe('Version entries under this product.'),
+                      .describe('Product definitions grouped under this product label.'),
                   })
                   .describe('One product under the vendor.'),
               )
@@ -141,7 +177,7 @@ export const AdvisoryProductsSchema = z
       .number()
       .int()
       .describe(
-        'Flattened version rows returned — equal to productCount except on a truncated copy.',
+        'Product definitions returned — equal to productCount except under productIds selection or on a legacy truncated copy.',
       ),
   })
   .describe('Affected products, flattened from the CSAF product tree.');
@@ -392,6 +428,46 @@ type Revision = z.infer<typeof AdvisoryRevisionSchema>;
 type Reference = z.infer<typeof AdvisoryReferenceSchema>;
 type Acknowledgment = z.infer<typeof AdvisoryAcknowledgmentSchema>;
 
+/** Escape upstream strings only in the Markdown projection; stored strings stay verbatim. */
+function literalText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/[\\`*_{}[\]|~]/g, '\\$&')
+    .replace(/^([\t ]*)([#+.=-])/gm, '$1\\$2')
+    .replace(/^([\t ]*\d+)([.)])(?=[\t ])/gm, '$1\\$2');
+}
+
+/** Project nested advisory fields to literal Markdown, retaining usable URL destinations. */
+function literalFields<T>(value: T, key = ''): T {
+  if (typeof value === 'string') {
+    if (key === 'productId' || key === 'vectorString') {
+      let longest = 0;
+      let run = 0;
+      for (const char of value) {
+        run = char === '`' ? run + 1 : 0;
+        longest = Math.max(longest, run);
+      }
+      const fence = '`'.repeat(longest + 1);
+      const padding = longest ? ' ' : '';
+      return `${fence}${padding}${value}${padding}${fence}` as T;
+    }
+    return (
+      key === 'url' || key === 'csafUrl'
+        ? `<${value.replace(/[<>\\\s]/g, (char) => encodeURIComponent(char))}>`
+        : literalText(value)
+    ) as T;
+  }
+  if (Array.isArray(value)) return value.map((item) => literalFields(item)) as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([name, field]) => [name, literalFields(field, name)]),
+    ) as T;
+  }
+  return value;
+}
+
 /**
  * Render the CVE IDs an outline's vulnerabilities entry lists — the part of the
  * outline the framework's `formatOutline` does not know about.
@@ -405,6 +481,7 @@ export function renderOutlineCves(sections: readonly OutlineSection[]): string[]
 
 /** Render the advisory header block. */
 export function renderAdvisoryHeader(advisory: Header): string[] {
+  advisory = literalFields(advisory);
   return [
     `# ${advisory.advisoryId} — ${advisory.title}`,
     `**Series:** ${advisory.series} · **Status:** ${advisory.status} · **CSAF version:** ${advisory.csafVersion}`,
@@ -418,6 +495,7 @@ export function renderAdvisoryHeader(advisory: Header): string[] {
 
 /** Render the summary block. */
 export function renderAdvisorySummary(summary: Summary): string[] {
+  summary = literalFields(summary);
   const lines = ['## Summary'];
   if (summary.summaryText) lines.push(summary.summaryText);
   if (summary.riskEvaluation) lines.push(`**Risk evaluation:** ${summary.riskEvaluation}`);
@@ -434,6 +512,7 @@ export function renderAdvisorySummary(summary: Summary): string[] {
 
 /** Render the products block. */
 export function renderAdvisoryProducts(products: Products): string[] {
+  products = literalFields(products);
   const lines = [
     '## Affected products',
     `**Vendors:** ${products.vendorCount} · **Products:** ${products.productCount} · **Shown:** ${products.shownProducts}`,
@@ -443,12 +522,21 @@ export function renderAdvisoryProducts(products: Products): string[] {
         : 'no'
     }`,
   ];
+  if (products.selected)
+    lines.push('**Selected:** requested product IDs only; totals describe the whole advisory.');
   for (const vendor of products.vendors) {
     lines.push(`### ${vendor.name}`);
     for (const product of vendor.products) {
       lines.push(`- **${product.name}**${product.family ? ` (family: ${product.family})` : ''}`);
       for (const version of product.versions) {
-        lines.push(`  - [${version.kind}] ${version.value} → \`${version.productId}\``);
+        lines.push(`  - [${version.kind}] ${version.value} → ${version.productId}`);
+        if (version.name) lines.push(`    **Full name:** ${version.name}`);
+        if (version.relationshipCategory)
+          lines.push(
+            `    **Relationship:** ${version.relationshipCategory} · ${version.productReference} → ${version.relatesToProductReference}`,
+          );
+        if (version.identificationHelper)
+          lines.push(`    **Identification metadata (JSON):** ${version.identificationHelper}`);
       }
     }
   }
@@ -458,6 +546,7 @@ export function renderAdvisoryProducts(products: Products): string[] {
 
 /** Render the vulnerabilities block. */
 export function renderAdvisoryVulnerabilities(vulnerabilities: Vulnerability[]): string[] {
+  vulnerabilities = literalFields(vulnerabilities);
   const lines = ['## Vulnerabilities'];
   for (const vulnerability of vulnerabilities) {
     lines.push(`### ${vulnerability.cve}${vulnerability.title ? ` — ${vulnerability.title}` : ''}`);
@@ -473,7 +562,7 @@ export function renderAdvisoryVulnerabilities(vulnerabilities: Vulnerability[]):
         lines.push(
           `**CVSS v${score.version}:** ${score.baseScore} ${score.baseSeverity}${
             score.severityDerived ? ' (band derived)' : ''
-          } \`${score.vectorString}\` → ${score.productIds.join(', ') || 'no product ids'}`,
+          } ${score.vectorString} → ${score.productIds.join(', ') || 'no product ids'}`,
         );
       }
     }
@@ -504,6 +593,7 @@ export function renderAdvisoryVulnerabilities(vulnerabilities: Vulnerability[]):
 
 /** Render the revision-history block. */
 export function renderAdvisoryRevisions(revisions: Revision[]): string[] {
+  revisions = literalFields(revisions);
   const lines = ['## Revision history'];
   for (const revision of revisions) {
     lines.push(
@@ -518,6 +608,7 @@ export function renderAdvisoryRevisions(revisions: Revision[]): string[] {
 
 /** Render the references block. */
 export function renderAdvisoryReferences(references: Reference[]): string[] {
+  references = literalFields(references);
   const lines = ['## References'];
   for (const reference of references) {
     lines.push(
@@ -530,6 +621,7 @@ export function renderAdvisoryReferences(references: Reference[]): string[] {
 
 /** Render the acknowledgments block. */
 export function renderAdvisoryAcknowledgments(acknowledgments: Acknowledgment[]): string[] {
+  acknowledgments = literalFields(acknowledgments);
   const lines = ['## Acknowledgments'];
   for (const entry of acknowledgments) {
     lines.push(

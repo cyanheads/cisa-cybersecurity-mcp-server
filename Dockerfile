@@ -14,7 +14,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS build
 
 WORKDIR /usr/src/app
 
@@ -46,7 +46,7 @@ RUN bun run build
 # A clean image rather than `FROM build`: the build stage's node_modules holds
 # devDependencies.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS deps
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS deps
 
 WORKDIR /usr/src/app
 
@@ -114,7 +114,7 @@ RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 # dependencies and build artifacts. Its only Bun invocations are HEALTHCHECK
 # and CMD, which run on the real target at container start.
 # ==============================================================================
-FROM oven/bun:1.4.2-slim AS production
+FROM oven/bun:1.4.3-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -146,11 +146,10 @@ COPY --from=build /usr/src/app/scripts/csaf-mirror-init.ts \
                   /usr/src/app/scripts/_mirror-context.ts \
                   ./scripts/
 
-# Bun honors tsconfig `paths` at runtime — map `@/` to the compiled `./dist/` so
-# the .ts scripts resolve their alias imports against the build output. In a dev
-# checkout the source tsconfig.json maps @/* → ./src/*; in the image this emitted
-# one maps @/* → ./dist/*. Same `bun run mirror:*` command in both environments.
-RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > tsconfig.json
+# Bun honors tsconfig `paths` at runtime. Each `mirror:*` command selects this
+# config, which maps `@/` to `./src/` and falls back to `./dist/` — current source
+# in a checkout, the build output here. Same command in both environments.
+COPY tsconfig.mirror.json ./
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.

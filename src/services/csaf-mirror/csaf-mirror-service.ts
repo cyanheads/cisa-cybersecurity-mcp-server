@@ -34,7 +34,12 @@ import { logger } from '@cyanheads/mcp-ts-core/utils';
 import type { SeverityBand } from '@/reference/cvss.js';
 import type { SectorName } from '@/reference/sectors.js';
 import { assertSearchTextLength } from '@/services/search-text.js';
-import { createCsafIngester, INGEST_CONTENT_VERSION, readIngestContentVersion } from './ingest.js';
+import {
+  createCsafIngester,
+  INGEST_CONTENT_VERSION,
+  readIngestCompletion,
+  readIngestContentVersion,
+} from './ingest.js';
 import { toFtsMatch, toSubstringGlob } from './normalize.js';
 import {
   ADVISORIES_FTS,
@@ -136,20 +141,23 @@ export interface CsafMirrorOptions {
 export type IndexAvailability =
   | { status: 'ready' }
   | { status: 'not_ready' }
+  | { status: 'busy' }
   | { status: 'unavailable'; reason: StoreUnavailableReason };
 
 /** One sync attempt: run to completion, or skipped because a sync was already running. */
 export type SyncOutcome =
   | { mode: SyncMode; ran: true; result: SyncResult }
-  | { mode: SyncMode; ran: false; reason: 'in_progress' | 'lease_held' };
+  | { mode: SyncMode; ran: false; reason: 'in_progress' | 'lease_held' | 'already_ready' };
 
 const noop = (): void => {};
 
 /** Every string `code` on an error and its `cause` chain — errno, SQLite, or neither. */
 function errorCodes(error: unknown): string[] {
   const codes: string[] = [];
+  const seen = new Set<Error>();
   let current: unknown = error;
-  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
     const code = (current as { code?: unknown }).code;
     if (typeof code === 'string') codes.push(code);
     current = current.cause;
@@ -163,12 +171,20 @@ function errorCodes(error: unknown): string[] {
  * store` for the parent-directory `mkdir`, the connection, and its pragmas, and
  * `Failed to initialize mirror store` for the schema and migrations — with the
  * errno or driver error that decides the reason on its `cause`, so every code on
- * the cause chain is read. `undefined` for anything that is not a known open
- * failure (a busy lock, an abort, a missing SQLite driver, a bug), which callers
- * must not report as misconfiguration.
+ * the cause chain is read. SQLite busy/locked families return transient `busy`;
+ * unknown failures (an abort, a missing driver, a bug) stay unclassified.
  */
-export function classifyStoreOpenFailure(error: unknown): StoreUnavailableReason | undefined {
+export function classifyStoreOpenFailure(
+  error: unknown,
+): StoreUnavailableReason | 'busy' | undefined {
   for (const code of errorCodes(error)) {
+    if (
+      code === 'SQLITE_BUSY' ||
+      code.startsWith('SQLITE_BUSY_') ||
+      code === 'SQLITE_LOCKED' ||
+      code.startsWith('SQLITE_LOCKED_')
+    )
+      return 'busy';
     if (code === 'EROFS' || code.startsWith('SQLITE_READONLY')) return 'read_only';
     if (
       code === 'EACCES' ||
@@ -286,8 +302,12 @@ function escapeLike(value: string): string {
 }
 
 export class CsafMirrorService {
-  /** The last coverage scan and the sync completion it was taken after. */
-  private coverage: { counts: AdvisoryCoverage; syncedAt: string | null } | undefined;
+  /** The last coverage scan and its connection-local/cross-connection mutation token. */
+  private coverage: { counts: AdvisoryCoverage; mutation: string } | undefined;
+  private readonly shutdown = new AbortController();
+  private readonly maintenance = new Set<Promise<SyncOutcome | undefined>>();
+  private readonly preflights = new Set<Promise<IndexAvailability>>();
+  private closing: Promise<void> | undefined;
   private readonly mirror: Mirror;
   /** This instance's identity in the sync lease row. */
   private readonly owner = `${hostname()}/${process.pid}/${randomUUID().slice(0, 8)}`;
@@ -319,6 +339,11 @@ export class CsafMirrorService {
     return this.mirror;
   }
 
+  /** Cancels background preflight and first-seed retries when this service closes. */
+  get shutdownSignal(): AbortSignal {
+    return this.shutdown.signal;
+  }
+
   /** `true` once a full sync has ever completed; stays true during and after a refresh. */
   ready(): Promise<boolean> {
     return this.mirror.ready();
@@ -331,12 +356,24 @@ export class CsafMirrorService {
    * failure this cannot classify rethrows rather than being reported as
    * misconfiguration.
    */
-  async availability(): Promise<IndexAvailability> {
+  availability(): Promise<IndexAvailability> {
+    if (this.shutdown.signal.aborted) return Promise.resolve({ status: 'not_ready' });
+    const pending = this.checkAvailability();
+    this.preflights.add(pending);
+    void pending.then(
+      () => this.preflights.delete(pending),
+      () => this.preflights.delete(pending),
+    );
+    return pending;
+  }
+
+  private async checkAvailability(): Promise<IndexAvailability> {
     try {
       return (await this.mirror.ready()) ? { status: 'ready' } : { status: 'not_ready' };
     } catch (error) {
       const reason = classifyStoreOpenFailure(error);
       if (!reason) throw error;
+      if (reason === 'busy') return { status: 'busy' };
       return { status: 'unavailable', reason };
     }
   }
@@ -351,12 +388,23 @@ export class CsafMirrorService {
   async state(): Promise<CsafMirrorState> {
     try {
       const status = await this.mirror.status();
+      const handle = await this.store.raw();
+      const completion = readIngestCompletion(handle);
       return {
         ready: status.ready,
-        documentCount: status.total ?? null,
+        documentCount: status.ready ? await this.store.count() : null,
         checkpoint: status.checkpoint ?? null,
-        syncStatus: status.status,
+        syncStatus:
+          status.status === 'error' && completion.failedDocumentCount > 0
+            ? 'partial'
+            : status.status,
         lastCompletedAt: status.completedAt ?? null,
+        failedDocumentCount: completion.failedDocumentCount,
+        lastSuccessfulCheckpoint:
+          completion.lastSuccessfulCheckpoint ??
+          (status.completedAt && completion.failedDocumentCount === 0
+            ? (status.checkpoint ?? null)
+            : null),
       };
     } catch (error) {
       const reason = classifyStoreOpenFailure(error);
@@ -364,9 +412,11 @@ export class CsafMirrorService {
         ready: false,
         documentCount: null,
         checkpoint: null,
-        syncStatus: 'unavailable',
+        syncStatus: reason === 'busy' ? 'busy' : 'unavailable',
         lastCompletedAt: null,
-        ...(reason ? { unavailableReason: reason } : {}),
+        lastSuccessfulCheckpoint: null,
+        failedDocumentCount: null,
+        ...(reason && reason !== 'busy' ? { unavailableReason: reason } : {}),
       };
     }
   }
@@ -396,20 +446,35 @@ export class CsafMirrorService {
    * stale, so the next pass runs it again. A store that cannot be opened is
    * logged — with its path, which never reaches a caller — and skipped.
    */
-  async maintain(options: {
+  maintain(options: { autoInit: boolean; refresh: boolean }): Promise<SyncOutcome | undefined> {
+    if (this.shutdown.signal.aborted) return Promise.resolve(undefined);
+    const pass = this.runMaintenance(options);
+    this.maintenance.add(pass);
+    void pass.then(
+      () => this.maintenance.delete(pass),
+      () => this.maintenance.delete(pass),
+    );
+    return pass;
+  }
+
+  private async runMaintenance(options: {
     autoInit: boolean;
     refresh: boolean;
   }): Promise<SyncOutcome | undefined> {
     const availability = await this.availability();
+    if (this.shutdown.signal.aborted) return;
     if (availability.status === 'unavailable') {
       logger.warning(
         `ICS advisory index at ${this.path} cannot be opened (${availability.reason}); the ICS tools report mirror_unavailable until CISA_CSAF_MIRROR_PATH names a writable location.`,
       );
       return;
     }
+    if (availability.status === 'busy') return;
     if (availability.status === 'not_ready' || (await this.contentState()).stale) {
-      return options.autoInit ? this.sync('init', AbortSignal.timeout(3_600_000)) : undefined;
+      if (this.shutdown.signal.aborted) return;
+      return options.autoInit ? this.sync('init', AbortSignal.timeout(3_600_000), true) : undefined;
     }
+    if (this.shutdown.signal.aborted) return;
     return options.refresh ? this.sync('refresh', AbortSignal.timeout(1_800_000)) : undefined;
   }
 
@@ -425,13 +490,19 @@ export class CsafMirrorService {
    * boot or on a schedule simply skips. The lease is renewed while the sync runs,
    * and a renewal that finds it taken over aborts the sync.
    */
-  async sync(mode: SyncMode, signal: AbortSignal): Promise<SyncOutcome> {
+  async sync(mode: SyncMode, signal: AbortSignal, onlyIfNeeded = false): Promise<SyncOutcome> {
+    this.shutdown.signal.throwIfAborted();
     if (this.running) {
       logger.info(`ICS advisory index ${mode} skipped: a sync is already running in this process.`);
       return { ran: false, mode, reason: 'in_progress' };
     }
     const controller = new AbortController();
-    const run = this.runLeased(mode, AbortSignal.any([signal, controller.signal]), controller);
+    const run = this.runLeased(
+      mode,
+      AbortSignal.any([signal, controller.signal, this.shutdown.signal]),
+      controller,
+      onlyIfNeeded,
+    );
     const running = { controller, settled: run.then(noop, noop) };
     this.running = running;
     try {
@@ -446,12 +517,20 @@ export class CsafMirrorService {
    * store. Runs from `teardown()` on every shutdown path, so a stdio process that
    * exits mid-refresh does not leave its lease to block the next one for a TTL.
    */
-  async close(): Promise<void> {
-    const running = this.running;
-    if (running) {
-      running.controller.abort(new Error('The ICS advisory index is closing.'));
-      await running.settled;
+  close(): Promise<void> {
+    if (!this.closing) {
+      this.shutdown.abort(new Error('The ICS advisory index is closing.'));
+      this.closing = this.finishClose();
     }
+    return this.closing;
+  }
+
+  private async finishClose(): Promise<void> {
+    await Promise.allSettled([
+      ...this.maintenance,
+      ...this.preflights,
+      ...(this.running ? [this.running.settled] : []),
+    ]);
     await this.mirror.close();
   }
 
@@ -459,8 +538,10 @@ export class CsafMirrorService {
     mode: SyncMode,
     signal: AbortSignal,
     controller: AbortController,
+    onlyIfNeeded: boolean,
   ): Promise<SyncOutcome> {
     const handle = await this.store.raw();
+    signal.throwIfAborted();
     const claim = claimSyncLease(handle, this.owner, mode);
     if (!claim.acquired) {
       logger.info(
@@ -488,6 +569,21 @@ export class CsafMirrorService {
     renewal.unref();
 
     try {
+      signal.throwIfAborted();
+      if (mode === 'refresh' && !(await this.mirror.ready())) {
+        throw new Error(
+          'ICS advisory mirror refresh requires a completed seed. Run mirror:init first.',
+        );
+      }
+      if (
+        mode === 'init' &&
+        onlyIfNeeded &&
+        (await this.mirror.ready()) &&
+        !(await this.contentState()).stale
+      ) {
+        return { ran: false, mode, reason: 'already_ready' };
+      }
+      signal.throwIfAborted();
       const result = await this.mirror.runSync({ mode, signal });
       return { ran: true, mode, result };
     } finally {
@@ -506,14 +602,16 @@ export class CsafMirrorService {
   /**
    * Corpus-wide coverage counts behind the sector- and score-filter disclosures,
    * which would otherwise hardcode numbers that drift as the corpus grows. The
-   * scan is kept until a sync completes: the memo is keyed on the completion
-   * time the index itself records, so a sync by this process, another server
-   * process, or a mirror script all replace it without a restart.
+   * memo uses `total_changes()` for this connection and `PRAGMA data_version`
+   * for commits by other connections. Partial applied pages therefore invalidate
+   * it even when successful-completion metadata has not advanced.
    */
   async coverageCounts(): Promise<AdvisoryCoverage> {
-    const syncedAt = (await this.mirror.status()).completedAt ?? null;
-    if (this.coverage?.syncedAt === syncedAt) return this.coverage.counts;
     const handle = await this.store.raw();
+    const version = handle.prepare<{ data_version: number }>('PRAGMA data_version').get();
+    const changes = handle.prepare<{ changes: number }>('SELECT total_changes() AS changes').get();
+    const mutation = `${version?.data_version}/${changes?.changes}`;
+    if (this.coverage?.mutation === mutation) return this.coverage.counts;
     const row = handle
       .prepare<{ noCvss: number; noSector: number; total: number; v2Only: number }>(
         `SELECT COUNT(*) AS total,
@@ -529,7 +627,7 @@ export class CsafMirrorService {
       v2Only: row?.v2Only ?? 0,
       noCvss: row?.noCvss ?? 0,
     };
-    this.coverage = { syncedAt, counts };
+    this.coverage = { mutation, counts };
     return counts;
   }
 

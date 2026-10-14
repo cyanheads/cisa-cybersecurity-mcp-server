@@ -712,7 +712,7 @@ describe('cisa_search_kev', () => {
   });
 
   describe('upstream records that do not fit the advertised shape', () => {
-    it('still returns a page the output schema accepts', async () => {
+    it('preserves usable membership when optional CWE metadata is off shape', async () => {
       await loadCatalog([
         {
           cveID: 'CVE-2026-00009',
@@ -728,7 +728,6 @@ describe('cisa_search_kev', () => {
           notes: 'https://nvd.nist.gov/vuln/detail/CVE-2026-00009',
           cwes: ['CWE-20', 'Improper Input Validation'],
         },
-        { cveID: 'CVE-2026-9', dateAdded: '2026-09-02', dueDate: '2026-09-23' },
       ]);
 
       const ctx = createMockContext({ errors: searchKevTool.errors });
@@ -736,7 +735,9 @@ describe('cisa_search_kev', () => {
       const result = await searchKevTool.handler(input, ctx);
 
       expect(() => searchKevTool.output.parse(result)).not.toThrow();
-      expect(result.results.map((entry) => entry.cveId)).not.toContain('CVE-2026-9');
+      expect(result.results.find((entry) => entry.cveId === 'CVE-2026-00009')?.cwes).toEqual([
+        'CWE-20',
+      ]);
     });
 
     it('rejects a nameContains value past the search-text ceiling', async () => {

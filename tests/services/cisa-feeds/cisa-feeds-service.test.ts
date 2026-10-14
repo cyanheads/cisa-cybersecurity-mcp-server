@@ -45,12 +45,44 @@ describe('CisaFeedsService', () => {
       const ctx = createMockContext();
       const window = await getCisaFeeds().window('advisories', ctx);
       expect(window.items).toHaveLength(2);
+      expect(window).toMatchObject({ stale: false, fetchedAt: expect.any(String) });
       expect(window.items[0]?.title).toBe('Acme Widget Advisory');
       expect(window.items[0]?.advisoryId).toBe('ICSA-26-260-07');
       expect(window.items[0]?.pubDate).toBe('2026-09-18T12:00:00.000Z');
       expect(window.items[0]?.guid).toBe('/node/25513');
       expect(window.items[1]?.advisoryId).toBeUndefined();
       expect(window.feedTitle).toBe('CISA Advisories');
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('normalizes numeric and attributed text while dropping empty or non-record items', async () => {
+    const http = createFetchMock([
+      {
+        match: FEED_URLS.alerts,
+        respond: new Response(
+          '<rss><channel><title lang="en"> Alerts </title><item>noise</item><item></item><item><title>123</title><description lang="en">body</description></item><item><link>https://example.test/item</link></item></channel></rss>',
+        ),
+      },
+    ]);
+    http.install();
+    try {
+      const window = await getCisaFeeds().window('alerts', createMockContext());
+      expect(window.feedTitle).toBe('Alerts');
+      expect(window.items).toEqual([
+        { title: '123', link: '', summary: 'body', summaryTruncated: false, pubDate: '', guid: '' },
+        {
+          title: '',
+          link: 'https://example.test/item',
+          summary: '',
+          summaryTruncated: false,
+          pubDate: '',
+          guid: '',
+        },
+      ]);
+      expect(window.oldest).toBeNull();
+      expect(window.newest).toBeNull();
     } finally {
       http.restore();
     }
@@ -191,8 +223,9 @@ describe('CisaFeedsService', () => {
       },
     ]);
     httpWarm.install();
+    let earlier: Awaited<ReturnType<ReturnType<typeof getCisaFeeds>['window']>>;
     try {
-      await getCisaFeeds().window('advisories', ctx);
+      earlier = await getCisaFeeds().window('advisories', ctx);
     } finally {
       httpWarm.restore();
     }
@@ -209,6 +242,8 @@ describe('CisaFeedsService', () => {
     try {
       const window = await getCisaFeeds().window('advisories', ctx);
       expect(window.items).toHaveLength(2);
+      expect(window).toMatchObject({ stale: true, fetchedAt: earlier!.fetchedAt });
+      expect(earlier!.stale).toBe(false);
     } finally {
       httpFail.restore();
     }

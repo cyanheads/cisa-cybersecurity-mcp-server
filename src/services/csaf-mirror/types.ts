@@ -47,10 +47,15 @@ export interface AdvisorySummary {
   summaryText?: string;
 }
 
-/** One version entry under a product, tagged with the CSAF branch category it came from. */
+/** One CSAF product definition, tagged with its branch category or definition source. */
 export interface AdvisoryVersion {
+  identificationHelper?: string;
   kind: string;
+  name?: string;
   productId: string;
+  productReference?: string;
+  relatesToProductReference?: string;
+  relationshipCategory?: string;
   value: string;
 }
 
@@ -68,12 +73,13 @@ export interface AdvisoryVendor {
 }
 
 /**
- * Products block — every flattened version row. `truncated` is never written by
+ * Products block — every deduplicated product definition. `truncated` is never written by
  * current ingest; it survives only on documents stored by an older build that
  * capped rows, until the ingest-content re-ingest replaces them.
  */
 export interface AdvisoryProducts {
   productCount: number;
+  selected?: boolean;
   shownProducts: number;
   truncated?: boolean;
   vendorCount: number;
@@ -288,7 +294,9 @@ export type StoreUnavailableReason = (typeof STORE_UNAVAILABLE_REASONS)[number];
 export interface CsafMirrorState {
   checkpoint: string | null;
   documentCount: number | null;
+  failedDocumentCount: number | null;
   lastCompletedAt: string | null;
+  lastSuccessfulCheckpoint: string | null;
   ready: boolean;
   syncStatus: string;
   /** Present only when the store cannot be opened and the failure was classified. */

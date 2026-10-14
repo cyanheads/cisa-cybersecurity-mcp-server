@@ -21,6 +21,121 @@ import {
 } from '../../fixtures/vulnrichment-records.js';
 
 describe('normalizeVulnrichment', () => {
+  const normalize = (raw: unknown) =>
+    normalizeVulnrichment('CVE-2026-12345', 'https://example.test/record.json', raw);
+  const container = (fields: Record<string, unknown>) => ({
+    containers: { adp: [{ providerMetadata: { shortName: 'CISA-ADP' }, ...fields }] },
+  });
+
+  it.each([
+    null,
+    {},
+    { containers: null },
+    { containers: {} },
+    { containers: { adp: [null, {}, { providerMetadata: null }] } },
+  ])('preserves absent CISA enrichment as an explicit outcome for %j', (raw) => {
+    expect(normalize(raw)).toMatchObject({ outcome: 'no_cisa_container', cwes: [] });
+  });
+
+  it('ignores malformed metrics and CWE entries while preserving usable sparse data', () => {
+    const record = normalize(
+      container({
+        metrics: [
+          null,
+          {},
+          { other: {} },
+          { other: { type: 'ssvc', content: null } },
+          { cvssV4_0: { baseScore: '9.0' } },
+          { cvssV3_0: { baseScore: 7.5 } },
+        ],
+        problemTypes: [
+          null,
+          {},
+          { descriptions: [null, {}, { cweId: ' ' }, { cweId: ' CWE-79 ', description: '' }] },
+        ],
+      }),
+    );
+    expect(record.outcome).toBe('no_ssvc_metric');
+    expect(record.cvss).toEqual({
+      version: 'cvssV3_0',
+      baseScore: 7.5,
+      baseSeverity: '',
+      vectorString: '',
+    });
+    expect(record.cwes).toEqual([{ cweId: 'CWE-79', description: '' }]);
+  });
+
+  it.each([
+    {},
+    { metrics: {}, problemTypes: {} },
+    { metrics: [{ other: { type: 'ssvc', content: {} } }] },
+    {
+      metrics: [
+        {
+          other: {
+            type: 'ssvc',
+            content: { options: [null, { Automatable: 1 }, { 'Technical Impact': 'total' }] },
+          },
+        },
+      ],
+    },
+  ])('does not invent SSVC points from incomplete enrichment %j', (fields) => {
+    const record = normalize(container(fields));
+    expect(record).toMatchObject({ outcome: 'no_ssvc_metric', cwes: [] });
+    expect(record.cvss).toBeUndefined();
+    expect(record.automatable).toBeUndefined();
+  });
+
+  it('returns complete sparse SSVC points without inventing optional metadata or CVSS', () => {
+    const record = normalize(
+      container({
+        metrics: [
+          {
+            other: {
+              type: 'ssvc',
+              content: {
+                options: [{ Automatable: 'no' }, { 'Technical Impact': 'partial' }],
+              },
+            },
+          },
+        ],
+      }),
+    );
+    expect(record).toEqual({
+      cveId: 'CVE-2026-12345',
+      sourceUrl: 'https://example.test/record.json',
+      outcome: 'ssvc',
+      automatable: 'no',
+      technicalImpact: 'partial',
+      cwes: [],
+    });
+  });
+
+  it('prefers a usable v4 score over v3 while skipping an unusable earlier v4 score', () => {
+    const record = normalize(
+      container({
+        metrics: [
+          { cvssV4_0: {} },
+          { cvssV3_1: { baseScore: 9.8 } },
+          {
+            cvssV4_0: {
+              version: '4.0',
+              baseScore: 0,
+              baseSeverity: 'NONE',
+              vectorString: 'CVSS:4.0/AV:N',
+            },
+          },
+        ],
+      }),
+    );
+    expect(record.cvss).toEqual({
+      version: '4.0',
+      baseScore: 0,
+      baseSeverity: 'NONE',
+      vectorString: 'CVSS:4.0/AV:N',
+    });
+  });
+
   it('reads exploitation, automatable, technicalImpact — Technical Impact carries a space upstream', () => {
     const record = normalizeVulnrichment(
       'CVE-2026-12345',

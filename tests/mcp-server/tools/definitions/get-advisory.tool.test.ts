@@ -71,6 +71,56 @@ describe('cisa_get_advisory', () => {
     });
   });
 
+  it('selects relationship definitions without expanding components, preserving metadata on both surfaces', async () => {
+    const raw = {
+      ...FULL_ADVISORY,
+      product_tree: {
+        full_product_names: [{ product_id: 'component', name: 'Component' }],
+        relationships: [
+          {
+            category: 'installed_on',
+            product_reference: 'component',
+            relates_to_product_reference: 'dangling',
+            full_product_name: {
+              product_id: 'combined',
+              name: 'Component on Host <literal>',
+              product_identification_helper: { model_numbers: ['<MODEL>', 12] },
+            },
+          },
+        ],
+      },
+    };
+    await seedMirror([
+      {
+        name: 'CSAF-develop/csaf_files/OT/white/2026/icsa-26-260-07.json',
+        data: JSON.stringify(raw),
+      },
+    ]);
+    const result = await runToolContract(getAdvisoryTool, {
+      advisoryId: 'ICSA-26-260-07',
+      productIds: ['combined'],
+    });
+    expect(result.isError).toBeFalsy();
+    const output = getAdvisoryTool.output.parse(result.structuredContent);
+    const rows = output.products?.vendors.flatMap((v) => v.products.flatMap((p) => p.versions));
+    expect(rows).toHaveLength(1);
+    expect(rows?.[0]).toMatchObject({
+      productId: 'combined',
+      name: 'Component on Host <literal>',
+      relationshipCategory: 'installed_on',
+      productReference: 'component',
+      relatesToProductReference: 'dangling',
+    });
+    expect(JSON.parse(rows![0]!.identificationHelper!)).toEqual({ model_numbers: ['<MODEL>', 12] });
+    expect(output.products).toMatchObject({ productCount: 2, shownProducts: 1, selected: true });
+    const text = contentText(result);
+    expect(text).toContain('Component on Host &lt;literal&gt;');
+    expect(text).toContain('installed\\_on');
+    expect(text).toContain('component → dangling');
+    expect(text).toContain('&lt;MODEL&gt;');
+    expect(text).not.toContain('**Component**');
+  });
+
   describe('once seeded with a normal advisory', () => {
     beforeEach(async () => {
       await seedMirror([
@@ -80,6 +130,111 @@ describe('cisa_get_advisory', () => {
         },
       ]);
     }, 30000);
+
+    it('characterizes empty CVE and section selectors as omitted', async () => {
+      const control = await runToolContract(getAdvisoryTool, { advisoryId: 'ICSA-26-260-07' });
+      const empty = await runToolContract(getAdvisoryTool, {
+        advisoryId: 'ICSA-26-260-07',
+        cves: [],
+        sections: [],
+      });
+      expect(empty).toEqual(control);
+    });
+
+    it('empty product selectors preserve default output, including empty sections', async () => {
+      const control = await runToolContract(getAdvisoryTool, { advisoryId: 'ICSA-26-260-07' });
+      expect(
+        await runToolContract(getAdvisoryTool, {
+          advisoryId: 'ICSA-26-260-07',
+          productIds: [],
+          sections: [],
+        }),
+      ).toEqual(control);
+    });
+
+    it('combines product and CVE selectors, retaining whole-document totals and source order', async () => {
+      const result = await runToolContract(getAdvisoryTool, {
+        advisoryId: 'ICSA-26-260-07',
+        sections: [],
+        cves: ['CVE-2026-12345'],
+        productIds: ['CSAFPID-0002', 'CSAFPID-0001', 'CSAFPID-0002'],
+      });
+      expect(result.isError).toBeFalsy();
+      const output = getAdvisoryTool.output.parse(result.structuredContent);
+      expect(
+        output.products?.vendors.flatMap((v) =>
+          v.products.flatMap((p) => p.versions.map((r) => r.productId)),
+        ),
+      ).toEqual(['CSAFPID-0001', 'CSAFPID-0002']);
+      expect(output.products?.shownProducts).toBe(2);
+      expect(output.vulnerabilities?.map((v) => v.cve)).toEqual(['CVE-2026-12345']);
+      expect(contentText(result)).toContain('CSAFPID-0002');
+      expect(contentText(result)).toContain('CVE-2026-12345');
+    });
+
+    it.each([
+      [
+        { productIds: ['CSAFPID-0001'], sections: ['summary' as const] },
+        'product_ids_need_products_section',
+      ],
+      [
+        { productIds: ['CSAFPID-0001'], cves: ['CVE-2026-12345'], sections: ['products' as const] },
+        'cves_need_vulnerabilities_section',
+      ],
+      [{ productIds: ['CSAFPID-0001', 'csafpid-0001', 'missing'] }, 'unknown_product_id'],
+    ])(
+      'returns typed selector failures with recovery on both surfaces: %s',
+      async (selectors, reason) => {
+        const result = await runToolContract(getAdvisoryTool, {
+          advisoryId: 'ICSA-26-260-07',
+          ...selectors,
+        });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: { data: { reason, recovery: { hint: expect.any(String) } } },
+        });
+        expect(contentText(result)).toContain(
+          reason === 'unknown_product_id' ? 'csafpid-0001, missing' : 'sections',
+        );
+        if (reason === 'unknown_product_id')
+          expect(contentText(result)).not.toContain('CSAFPID-0001,');
+      },
+    );
+
+    it.each([[''], ['   '], [true], true])(
+      'rejects invalid product selectors before the handler: %s',
+      async (productIds) => {
+        const result = await runToolContract(getAdvisoryTool, {
+          advisoryId: 'ICSA-26-260-07',
+          productIds: productIds as never,
+        });
+        expect(result.isError).toBe(true);
+        expect(contentText(result)).toContain('productIds');
+      },
+    );
+
+    it('selects exact product IDs in document order on both surfaces with whole-document totals', async () => {
+      const full = await runToolContract(getAdvisoryTool, {
+        advisoryId: 'ICSA-26-260-07',
+        sections: ['products'],
+      });
+      const selected = await runToolContract(getAdvisoryTool, {
+        advisoryId: 'ICSA-26-260-07',
+        productIds: [' CSAFPID-0001 ', 'CSAFPID-0001'],
+      });
+      expect(selected.isError).toBeFalsy();
+      const output = selected.structuredContent as typeof full.structuredContent & {
+        products: { productCount: number; shownProducts: number };
+        vulnerabilities?: unknown;
+      };
+      expect(output.products.shownProducts).toBe(1);
+      expect(output.products.productCount).toBe(
+        (full.structuredContent as typeof output).products.productCount,
+      );
+      expect(output.vulnerabilities).toBeUndefined();
+      expect(contentText(selected)).toContain('CSAFPID-0001');
+      expect(contentText(selected)).toContain('Selected');
+    });
 
     it('returns found: false with guidance for an unknown advisoryId', async () => {
       const ctx = createMockContext({ errors: getAdvisoryTool.errors });
@@ -521,6 +676,7 @@ describe('cisa_get_advisory', () => {
       expect(versions).toHaveLength(585);
       expect(versions.at(-1)).toEqual({
         kind: 'product_name',
+        name: 'Product 584',
         value: 'Product 584',
         productId: 'CSAFPID-584',
       });

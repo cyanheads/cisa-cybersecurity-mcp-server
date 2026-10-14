@@ -7,8 +7,16 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  createFetchMock,
+  createMockContext,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { kevEntryResource } from '@/mcp-server/resources/definitions/kev-entry.resource.js';
+import { checkCveStatusTool } from '@/mcp-server/tools/definitions/check-cve-status.tool.js';
+import { getSsvcTool } from '@/mcp-server/tools/definitions/get-ssvc.tool.js';
+import { searchKevTool } from '@/mcp-server/tools/definitions/search-kev.tool.js';
 import {
   getKevCatalog,
   initKevCatalog,
@@ -18,6 +26,11 @@ import {
   resetKevCatalog,
 } from '@/services/kev-catalog/kev-catalog-service.js';
 import type { KevSnapshot } from '@/services/kev-catalog/types.js';
+import { cveToVulnrichmentUrl } from '@/services/vulnrichment/paths.js';
+import {
+  initVulnrichment,
+  resetVulnrichment,
+} from '@/services/vulnrichment/vulnrichment-service.js';
 import { buildKevFeedBody } from '../../fixtures/kev-feed.js';
 import { bestMsBySize } from '../../helpers/linear-time.js';
 
@@ -31,11 +44,85 @@ describe('KevCatalogService', () => {
 
   afterEach(() => {
     resetKevCatalog();
+    resetVulnrichment();
+    vi.useRealTimers();
   });
 
   it('asOf() reads the injected clock, not the real one', () => {
     expect(getKevCatalog().asOf()).toBe('2026-09-10');
   });
+
+  it('preserves sparse optional metadata without losing membership', async () => {
+    const http = createFetchMock([
+      {
+        match: KEV_FEED_URL,
+        respond: new Response(
+          buildKevFeedBody([
+            { cveID: ' cve-2026-99999 ', dateAdded: '2026-09-01', dueDate: '2026-09-04' },
+          ]),
+        ),
+      },
+    ]);
+    http.install();
+    try {
+      const snapshot = await getKevCatalog().snapshot(createMockContext());
+      expect(snapshot.byId.get('CVE-2026-99999')).toMatchObject({
+        cwes: [],
+        references: [],
+        vendorProject: '',
+      });
+      expect(snapshot.records).toHaveLength(6);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it.each([
+    ['missing envelope', '{}'],
+    [
+      'non-array membership',
+      JSON.stringify({
+        catalogVersion: 'v',
+        dateReleased: '2026-09-01',
+        count: 0,
+        vulnerabilities: {},
+      }),
+    ],
+    [
+      'invalid record',
+      buildKevFeedBody([{ cveID: 'CVE-2026-99999', dateAdded: '2026-09-01', dueDate: '' }]),
+    ],
+    ['null record', buildKevFeedBody([null])],
+    [
+      'duplicate normalized CVE',
+      buildKevFeedBody([
+        { cveID: ' cve-2026-00001 ', dateAdded: '2026-09-01', dueDate: '2026-09-04' },
+      ]),
+    ],
+    ['count mismatch', buildKevFeedBody().replace('"count":5', '"count":6')],
+  ])(
+    'rejects a %s snapshot as unavailable',
+    async (_name, body) => {
+      vi.useFakeTimers();
+      const http = createFetchMock([{ match: KEV_FEED_URL, respond: () => new Response(body) }]);
+      http.install();
+      try {
+        const pending = getKevCatalog()
+          .snapshot(createMockContext())
+          .catch((error: unknown) => error);
+        await vi.runAllTimersAsync();
+        await expect(pending).resolves.toMatchObject({
+          data: { reason: 'catalog_unavailable', retryable: true },
+        });
+        expect(http.calls.length).toBeGreaterThan(1);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(getKevCatalog().currentSnapshot()).toBeUndefined();
+      } finally {
+        http.restore();
+      }
+    },
+    20000,
+  );
 
   it('loads the snapshot on first call and indexes every record', async () => {
     const http = createFetchMock([
@@ -92,6 +179,84 @@ describe('KevCatalogService', () => {
       http.restore();
     }
   });
+
+  it('retains membership and Last-Modified after an invalid refresh, then recovers', async () => {
+    vi.useFakeTimers();
+    let body = buildKevFeedBody();
+    let lastModified = 'Fri, 18 Sep 2026 00:00:00 GMT';
+    const http = createFetchMock([
+      {
+        match: KEV_FEED_URL,
+        respond: () => new Response(body, { headers: { 'last-modified': lastModified } }),
+      },
+      {
+        match: cveToVulnrichmentUrl('CVE-2026-00001') as string,
+        respond: () => new Response('', { status: 404 }),
+      },
+    ]);
+    http.install();
+    try {
+      const catalog = getKevCatalog();
+      const ctx = createMockContext();
+      const original = await catalog.snapshot(ctx);
+      body = '{}';
+      lastModified = 'Sat, 19 Sep 2026 00:00:00 GMT';
+      const refresh = catalog.refresh(ctx);
+      await vi.runAllTimersAsync();
+      await refresh;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(catalog.currentSnapshot()).toBe(original);
+      expect(await catalog.search({}, 'dateAdded', 'asc', ctx)).toHaveLength(5);
+      expect(catalog.state().lastModified).toBe(original.lastModified);
+      initVulnrichment({ cacheTtlSeconds: 100, timeoutMs: 5000 });
+      const check = await runToolContract(checkCveStatusTool, { cveIds: ['CVE-2026-00001'] });
+      const search = await runToolContract(searchKevTool, { vendorProject: 'acme' });
+      const ssvc = await runToolContract(getSsvcTool, { cveIds: ['CVE-2026-00001'] });
+      for (const result of [check, search, ssvc]) {
+        expect(result.isError).not.toBe(true);
+        expect(JSON.stringify(result.structuredContent)).toContain('"inKev":true');
+        expect(JSON.stringify(result.content)).toContain('In KEV:** yes');
+      }
+      const resource = await kevEntryResource.handler({ cveId: 'CVE-2026-00001' }, ctx);
+      expect(resource.inKev).toBe(true);
+      body = buildKevFeedBody([
+        { cveID: 'CVE-2026-99999', dateAdded: '2026-09-01', dueDate: '2026-09-04' },
+      ]);
+      await catalog.refresh(ctx);
+      expect(http.calls.at(-1)?.request.headers.get('if-modified-since')).toBe(
+        original.lastModified,
+      );
+      expect(catalog.currentSnapshot()?.byId.has('CVE-2026-99999')).toBe(true);
+      expect(catalog.state().lastModified).toBe(lastModified);
+    } finally {
+      http.restore();
+    }
+  }, 20000);
+
+  it('reports cold snapshot rejection and recovery guidance on both tool surfaces', async () => {
+    vi.useFakeTimers();
+    const http = createFetchMock([{ match: KEV_FEED_URL, respond: () => new Response('{}') }]);
+    http.install();
+    try {
+      const pending = runToolContract(checkCveStatusTool, { cveIds: ['CVE-2026-00001'] });
+      await vi.runAllTimersAsync();
+      const result = await pending;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'catalog_unavailable', retryable: true } },
+      });
+      for (const surface of [
+        JSON.stringify(result.structuredContent),
+        JSON.stringify(result.content),
+      ]) {
+        expect(surface).toContain('retry in a few seconds');
+        expect(surface).toContain('catalog_unavailable');
+      }
+    } finally {
+      http.restore();
+    }
+  }, 20000);
 
   it('a 304 response leaves the snapshot in place and only advances lastCheckedAt', async () => {
     const ctx = createMockContext();

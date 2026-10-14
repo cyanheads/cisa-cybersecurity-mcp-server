@@ -228,8 +228,9 @@ function str(value: unknown): string {
  * these patterns on the surfaces that return them — so one entry that drifts off
  * shape would fail validation for the whole page it lands on, taking a search
  * down rather than itself. All three are required by the published KEV schema
- * and present on every record in the live catalog; dropping one that is not
- * costs an entry nothing can look up anyway.
+ * and present on every record in the live catalog. The snapshot loader rejects
+ * the entire feed when normalization fails, preserving membership from the last
+ * valid snapshot rather than treating an unusable record as absent.
  */
 export function toKevRecord(raw: RawKevRecord): KevRecord | null {
   const cveId = str(raw.cveID).toUpperCase();

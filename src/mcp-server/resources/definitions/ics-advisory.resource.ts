@@ -5,14 +5,14 @@
  *
  * Nothing about reading an advisory through a resource template makes a 1.38 MB,
  * 585-product document cheaper to hand back whole, and a resource client has no
- * `sections` or `cves` parameter to opt out with — so a caller who lands on the
+ * `sections`, `cves`, or `productIds` parameter to opt out with — so a caller who lands on the
  * outline arm follows up with `cisa_get_advisory` to name the sections, or the
  * vulnerability CVE IDs, it needs. The outline lists both.
  * @module mcp-server/resources/definitions/ics-advisory.resource
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { configurationError, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { outlineOnOverflow } from '@cyanheads/mcp-ts-core/utils';
 import {
   ADVISORY_OUTLINE_BUDGET,
@@ -45,15 +45,55 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
 
   output: z.object(AdvisoryDocumentOutputShape),
 
-  async handler(params) {
+  errors: [
+    {
+      reason: 'advisory_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The advisory identifier is absent from the ready index.',
+      recovery:
+        'Call cisa_search_ics_advisories to find an advisory ID; cisa_list_reference with topic sources reports index freshness.',
+    },
+    {
+      reason: 'mirror_busy',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'A transient SQLite lock prevents the advisory index from opening.',
+      retryable: true,
+      recovery:
+        'Retry this resource read shortly; another process temporarily holds the advisory index lock. Call cisa_list_reference with topic sources to check its state.',
+    },
+    {
+      reason: 'mirror_not_ready',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The advisory index has never completed a full sync.',
+      retryable: true,
+      recovery:
+        'Call cisa_list_reference with topic sources to check the index progress, then read this resource again.',
+    },
+    {
+      reason: 'mirror_unavailable',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The advisory index cannot be opened at its configured location.',
+      retryable: false,
+      recovery:
+        'The server operator must set CISA_CSAF_MIRROR_PATH to a writable path and restart. Retrying will not help, but the cisa://kev resource and the KEV, SSVC, and alert tools still work.',
+    },
+  ],
+
+  async handler(params, ctx) {
     const mirror = getCsafMirror();
     const availability = await mirror.availability();
+    if (availability.status === 'busy') {
+      throw ctx.fail('mirror_busy', 'The ICS advisory index is temporarily busy.', {
+        recovery: {
+          hint: 'Retry this resource read shortly; another process temporarily holds the advisory index lock. Call cisa_list_reference with topic sources to check its state.',
+        },
+      });
+    }
     if (availability.status === 'unavailable') {
-      throw configurationError(
+      throw ctx.fail(
+        'mirror_unavailable',
         `The ICS advisory index cannot be opened (${availability.reason.replaceAll('_', ' ')}).`,
         {
-          reason: 'mirror_unavailable',
-          retryable: false,
           recovery: {
             hint: 'The server operator must set CISA_CSAF_MIRROR_PATH to a writable path and restart. Retrying will not help, but the cisa://kev resource and the KEV, SSVC, and alert tools still work.',
           },
@@ -61,9 +101,7 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
       );
     }
     if (availability.status === 'not_ready') {
-      throw serviceUnavailable('The ICS advisory index is still building.', {
-        reason: 'mirror_not_ready',
-        retryable: true,
+      throw ctx.fail('mirror_not_ready', 'The ICS advisory index is still building.', {
         recovery: {
           hint: 'Call cisa_list_reference with topic sources to check the index progress, then read this resource again.',
         },
@@ -74,7 +112,8 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
     const doc = await mirror.getAdvisory(advisoryId);
     if (!doc) {
       const index = await mirror.state();
-      throw notFound(
+      throw ctx.fail(
+        'advisory_not_found',
         `No advisory with ID ${advisoryId} is in the index. ${indexFreshnessNote(advisoryId, index)} Call cisa_search_ics_advisories to find the right ID.`,
         {
           advisoryId,

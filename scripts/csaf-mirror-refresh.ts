@@ -17,13 +17,19 @@ import { exitIfSkipped, getMirror } from './_mirror-context.js';
 const mirror = await getMirror();
 logger.info('Starting ICS advisory mirror refresh.');
 
-const { result } = await exitIfSkipped(
-  mirror,
-  await mirror.sync('refresh', AbortSignal.timeout(1_800_000)),
-);
-
-logger.info(
-  `ICS advisory mirror refresh complete: ${result.recordsApplied} advisories applied, ${result.tombstonesApplied} removed (total ${result.total}).`,
-);
-await mirror.close();
-process.exit(0);
+let exitCode = 0;
+try {
+  const { result } = await exitIfSkipped(
+    mirror,
+    await mirror.sync('refresh', AbortSignal.timeout(1_800_000)),
+  );
+  logger.info(
+    `ICS advisory mirror refresh complete: ${result.recordsApplied} advisories applied, ${result.tombstonesApplied} removed (total ${result.total}).`,
+  );
+} catch (error) {
+  logger.warning(error instanceof Error ? error.message : String(error));
+  exitCode = 1;
+} finally {
+  await mirror.close();
+}
+process.exit(exitCode);

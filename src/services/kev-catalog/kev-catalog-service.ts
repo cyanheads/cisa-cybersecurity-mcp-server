@@ -488,16 +488,35 @@ function buildSnapshot(body: string, lastModified: string | null): KevSnapshot {
     vulnerabilities?: unknown;
   };
 
-  const rawRecords = Array.isArray(parsed.vulnerabilities)
-    ? (parsed.vulnerabilities as RawKevRecord[])
-    : [];
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    typeof parsed.catalogVersion !== 'string' ||
+    !parsed.catalogVersion.trim() ||
+    typeof parsed.dateReleased !== 'string' ||
+    !Number.isFinite(Date.parse(parsed.dateReleased)) ||
+    !Array.isArray(parsed.vulnerabilities) ||
+    !Number.isSafeInteger(parsed.count) ||
+    parsed.count !== parsed.vulnerabilities.length
+  )
+    throw serviceUnavailable('The KEV feed envelope is incomplete or inconsistent.');
+
+  const rawRecords = parsed.vulnerabilities as RawKevRecord[];
   const records: KevRecord[] = [];
+  const byId = new Map<string, KevRecord>();
   for (const raw of rawRecords) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw serviceUnavailable('The KEV feed contains an unusable membership record.');
+    }
     const record = toKevRecord(raw);
-    if (record) records.push(record);
+    if (!record || byId.has(record.cveId)) {
+      throw serviceUnavailable('The KEV feed contains an unusable or duplicate membership record.');
+    }
+    records.push(record);
+    byId.set(record.cveId, record);
   }
 
-  const byId = new Map(records.map((record) => [record.cveId, record]));
   const byDateAdded = records
     .slice()
     .sort((a, b) => a.dateAdded.localeCompare(b.dateAdded) || a.cveId.localeCompare(b.cveId));
@@ -506,9 +525,9 @@ function buildSnapshot(body: string, lastModified: string | null): KevSnapshot {
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.cveId.localeCompare(b.cveId));
 
   return {
-    catalogVersion: typeof parsed.catalogVersion === 'string' ? parsed.catalogVersion : '',
-    dateReleased: typeof parsed.dateReleased === 'string' ? parsed.dateReleased : '',
-    count: typeof parsed.count === 'number' ? parsed.count : records.length,
+    catalogVersion: parsed.catalogVersion,
+    dateReleased: parsed.dateReleased,
+    count: records.length,
     fetchedAt: new Date().toISOString(),
     ...(lastModified ? { lastModified } : {}),
     records,

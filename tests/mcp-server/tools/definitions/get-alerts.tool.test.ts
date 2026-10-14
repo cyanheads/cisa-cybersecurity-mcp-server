@@ -12,7 +12,7 @@ import {
   getEnrichment,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAlertsTool } from '@/mcp-server/tools/definitions/get-alerts.tool.js';
 import {
   FEED_URLS,
@@ -32,6 +32,125 @@ describe('cisa_get_alerts', () => {
 
   afterEach(() => {
     resetCisaFeeds();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('discloses stale empty results safely on both surfaces, preserves earlier responses and recovers', async () => {
+    initCisaFeeds({ cacheTtlSeconds: 0, timeoutMs: 5000 });
+    let fail = false;
+    const http = createFetchMock([
+      {
+        match: FEED_URLS.advisories,
+        respond: () =>
+          fail
+            ? new Response('private diagnostic body', { status: 400 })
+            : new Response(buildAdvisoriesFeed()),
+      },
+    ]);
+    http.install();
+    try {
+      const fresh = await runToolContract(getAlertsTool, {});
+      const before = JSON.stringify(fresh);
+      expect(fresh.structuredContent).toMatchObject({
+        stale: false,
+        fetchedAt: expect.any(String),
+      });
+      fail = true;
+      const stale = await runToolContract(getAlertsTool, { since: '2099-01-01' });
+      expect(stale.structuredContent).toMatchObject({
+        stale: true,
+        fetchedAt: (fresh.structuredContent as { fetchedAt: string }).fetchedAt,
+        items: [],
+      });
+      for (const surface of [
+        JSON.stringify(stale.structuredContent),
+        JSON.stringify(stale.content),
+      ]) {
+        expect(surface).toContain('retry in a few minutes');
+        expect(surface).toContain('does not establish current publication absence');
+        expect(surface).not.toContain('private diagnostic body');
+      }
+      expect(JSON.stringify(fresh)).toBe(before);
+      fail = false;
+      const recovered = await runToolContract(getAlertsTool, { limit: 1 });
+      expect(recovered.structuredContent).toMatchObject({
+        stale: false,
+        truncated: true,
+        shown: 1,
+        cap: 1,
+      });
+      expect(JSON.stringify(stale.structuredContent)).toContain('"stale":true');
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('returns cancellation instead of stale success when the caller aborts during refresh', async () => {
+    vi.useFakeTimers();
+    initCisaFeeds({ cacheTtlSeconds: 0, timeoutMs: 5000 });
+    const controller = new AbortController();
+    let cancel = false;
+    const http = createFetchMock([
+      {
+        match: FEED_URLS.advisories,
+        respond: () => {
+          if (cancel) {
+            controller.abort();
+            throw controller.signal.reason;
+          }
+          return new Response(buildAdvisoriesFeed());
+        },
+      },
+    ]);
+    http.install();
+    try {
+      await runToolContract(getAlertsTool, {});
+      cancel = true;
+      const result = await runToolContract(
+        getAlertsTool,
+        {},
+        { context: { signal: controller.signal } },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ error: { code: -32011 } });
+      expect(JSON.stringify(result.content)).toContain('This operation was aborted');
+      expect(http.calls).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(http.calls).toHaveLength(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('shares a 45-second deadline across attempts and backoff before stale fallback', async () => {
+    vi.useFakeTimers();
+    initCisaFeeds({ cacheTtlSeconds: 0, timeoutMs: 30_000 });
+    let attempts = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      attempts++;
+      if (attempts === 1) return new Response(buildAdvisoriesFeed());
+      if (attempts === 2)
+        return new Response('', { status: 503, headers: { 'retry-after': '30' } });
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    await runToolContract(getAlertsTool, {});
+    const started = Date.now();
+    const pending = runToolContract(getAlertsTool, {}).then((result) => ({
+      result,
+      settledAt: Date.now(),
+    }));
+    await vi.advanceTimersByTimeAsync(45_000);
+    const { result, settledAt } = await pending;
+    expect(settledAt - started).toBe(45_000);
+    expect(result.structuredContent).toMatchObject({ stale: true });
+    expect(attempts).toBe(3);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(attempts).toBe(3);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('returns items with normalized pubDate, trimmed title, and the advisoryId chain', async () => {
@@ -192,6 +311,29 @@ describe('cisa_get_alerts', () => {
     const input = getAlertsTool.input.parse({});
     expect(input.feed).toBe('advisories');
     expect(input.limit).toBe(30);
+  });
+
+  it('keeps the cold feed_unavailable recovery contract on both surfaces', async () => {
+    const http = createFetchMock([
+      { match: FEED_URLS.alerts, respond: () => new Response('private failure', { status: 400 }) },
+    ]);
+    http.install();
+    try {
+      const result = await runToolContract(getAlertsTool, { feed: 'alerts' });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'feed_unavailable', retryable: true } },
+      });
+      for (const surface of [
+        JSON.stringify(result.structuredContent),
+        JSON.stringify(result.content),
+      ]) {
+        expect(surface).toContain('retry in a few minutes');
+        expect(surface).not.toContain('private failure');
+      }
+    } finally {
+      http.restore();
+    }
   });
 
   it('rejects a limit above 30 (the upstream ceiling)', () => {

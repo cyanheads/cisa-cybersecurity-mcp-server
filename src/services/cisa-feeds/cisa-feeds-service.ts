@@ -110,12 +110,13 @@ export class CisaFeedsService {
       this.cache.set(feed, { window: fresh, fetchedAtMs: Date.now() });
       return fresh;
     } catch (error) {
+      ctx.signal?.throwIfAborted();
       if (cached) {
         ctx.log.warning('CISA feed refresh failed; serving the cached window', {
           feed,
           error: error instanceof Error ? error.message : String(error),
         });
-        return cached.window;
+        return { ...cached.window, stale: true };
       }
       throw serviceUnavailable(
         `The CISA ${feed} feed could not be fetched or parsed.`,
@@ -128,11 +129,11 @@ export class CisaFeedsService {
   private fetchWindow(feed: FeedId, ctx: Context): Promise<FeedWindow> {
     const url = FEED_URLS[feed];
     return withRetry(
-      async () => {
+      async ({ signal, remainingMs }) => {
         const response = await fetchUpstream(url, {
           service: 'CISA advisories feed',
-          timeoutMs: this.options.timeoutMs,
-          signal: ctx.signal,
+          timeoutMs: Math.max(1, Math.min(this.options.timeoutMs, remainingMs)),
+          signal,
         });
         const body = await readUpstreamText(response, {
           maxBytes: FEED_MAX_BYTES,
@@ -163,6 +164,8 @@ export class CisaFeedsService {
           .sort();
 
         return {
+          fetchedAt: new Date().toISOString(),
+          stale: false,
           feed,
           feedUrl: url,
           feedTitle: text(channel.title).trim(),
@@ -174,6 +177,7 @@ export class CisaFeedsService {
       {
         operation: 'CisaFeedsService.fetchWindow',
         baseDelayMs: 1000,
+        deadlineMs: 45_000,
         context: ctx,
         signal: ctx.signal,
       },

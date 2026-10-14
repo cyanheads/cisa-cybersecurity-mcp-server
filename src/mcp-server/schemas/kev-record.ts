@@ -34,6 +34,11 @@ export const CweIdInputSchema = z
 /** An ISO calendar date, `YYYY-MM-DD`. */
 export const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
+/** A real calendar date for input filters; output date schemas retain their published shape. */
+export const CalendarDateInputSchema = z.iso.date({
+  error: 'Use a real calendar date in YYYY-MM-DD format, e.g. 2024-02-29.',
+});
+
 /** One reference URL parsed out of a KEV entry's `notes` field. */
 export const KevReferenceSchema = z
   .object({

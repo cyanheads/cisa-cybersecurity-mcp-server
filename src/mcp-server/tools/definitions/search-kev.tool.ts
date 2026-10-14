@@ -9,8 +9,8 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { extractCursor, paginateArray } from '@cyanheads/mcp-ts-core/utils';
 import {
+  CalendarDateInputSchema,
   CweIdInputSchema,
-  ISO_DATE_REGEX,
   KevRecordSchema,
   renderKevRecord,
   toKevRecordOutput,
@@ -62,26 +62,18 @@ export const searchKevTool = tool('cisa_search_kev', {
       .describe(
         'Year scope for the CVE ID, e.g. CVE-2026. Case and surrounding whitespace are normalized.',
       ),
-    dateAddedFrom: z
-      .string()
-      .regex(ISO_DATE_REGEX)
-      .optional()
-      .describe('Earliest date added, inclusive, YYYY-MM-DD.'),
-    dateAddedTo: z
-      .string()
-      .regex(ISO_DATE_REGEX)
-      .optional()
-      .describe('Latest date added, inclusive, YYYY-MM-DD.'),
-    dueBefore: z
-      .string()
-      .regex(ISO_DATE_REGEX)
-      .optional()
-      .describe('Latest due date, inclusive, YYYY-MM-DD.'),
-    dueAfter: z
-      .string()
-      .regex(ISO_DATE_REGEX)
-      .optional()
-      .describe('Earliest due date, inclusive, YYYY-MM-DD.'),
+    dateAddedFrom: CalendarDateInputSchema.optional().describe(
+      'Earliest date added, inclusive, YYYY-MM-DD.',
+    ),
+    dateAddedTo: CalendarDateInputSchema.optional().describe(
+      'Latest date added, inclusive, YYYY-MM-DD.',
+    ),
+    dueBefore: CalendarDateInputSchema.optional().describe(
+      'Latest due date, inclusive, YYYY-MM-DD.',
+    ),
+    dueAfter: CalendarDateInputSchema.optional().describe(
+      'Earliest due date, inclusive, YYYY-MM-DD.',
+    ),
     overdue: z
       .boolean()
       .optional()

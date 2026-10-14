@@ -68,6 +68,12 @@ const REFRESH_CONCURRENCY = 6;
 /** `mirror_meta` key holding the ETag of the last successfully applied manifest. */
 const CHANGES_ETAG_KEY = 'changes_csv_etag';
 
+/** Failed documents from the last attempted manifest application. */
+const FAILED_DOCUMENTS_KEY = 'failed_document_count';
+
+/** High-water mark of the last wholly successful application, separate from applied pages. */
+const SUCCESSFUL_CHECKPOINT_KEY = 'last_successful_checkpoint';
+
 /**
  * What the current ingest derives from an unchanged upstream document. Raise it
  * whenever normalization changes a stored row, the stored document, or a junction
@@ -78,7 +84,7 @@ const CHANGES_ETAG_KEY = 'changes_csv_etag';
  *     aliases, and the `advisory_cwes` junction. An index with no recorded
  *     version predates versioning and counts as older.
  */
-export const INGEST_CONTENT_VERSION = 1;
+export const INGEST_CONTENT_VERSION = 2;
 
 /** `mirror_meta` key holding the content version of the last completed `init`. */
 const CONTENT_VERSION_KEY = 'ingest_content_version';
@@ -179,6 +185,22 @@ function deleteJunctions(handle: SqliteHandle, advisoryIds: string[]): void {
 export function readIngestContentVersion(handle: SqliteHandle): number | null {
   const value = readMeta(handle, CONTENT_VERSION_KEY);
   return value === undefined ? null : Number(value);
+}
+
+/** Durable completion metadata, including partial refresh failures. */
+export function readIngestCompletion(handle: SqliteHandle): {
+  failedDocumentCount: number;
+  lastSuccessfulCheckpoint: string | null;
+} {
+  return {
+    failedDocumentCount: Number(readMeta(handle, FAILED_DOCUMENTS_KEY) ?? 0),
+    lastSuccessfulCheckpoint: readMeta(handle, SUCCESSFUL_CHECKPOINT_KEY) ?? null,
+  };
+}
+
+function recordCompletion(handle: SqliteHandle, checkpoint: string | undefined): void {
+  writeMeta(handle, FAILED_DOCUMENTS_KEY, '0');
+  if (checkpoint) writeMeta(handle, SUCCESSFUL_CHECKPOINT_KEY, checkpoint);
 }
 
 function readMeta(handle: SqliteHandle, key: string): string | undefined {
@@ -304,6 +326,7 @@ async function* runInit(
   /* The runner applies a page before resuming the generator, so every page is
    * already written when this line runs. */
   writeMeta(handle, CONTENT_VERSION_KEY, String(INGEST_CONTENT_VERSION));
+  recordCompletion(handle, maxRevised);
   logger.info(`ICS advisory mirror init: ${total} advisories normalized.`);
 }
 
@@ -315,6 +338,10 @@ async function* runRefresh(
   checkpoint: string | undefined,
 ): AsyncGenerator<SyncPage> {
   const etag = readMeta(handle, CHANGES_ETAG_KEY);
+  /* Upgrade a previously completed index without changing its existing high-water semantics. */
+  if (!readMeta(handle, SUCCESSFUL_CHECKPOINT_KEY) && checkpoint) {
+    writeMeta(handle, SUCCESSFUL_CHECKPOINT_KEY, checkpoint);
+  }
   const fetched = await withRetry(
     async () => {
       const response = await fetchUpstream(CSAF_CHANGES_URL, {
@@ -378,6 +405,7 @@ async function* runRefresh(
   let maxRevised = checkpoint;
   let batch: IngestRecord[] = [];
   let index = 0;
+  let failedDocuments = 0;
 
   const fetchOne = (path: string): Promise<IngestRecord | null> => {
     const url = `${CSAF_OT_BASE}/${path}`;
@@ -407,6 +435,7 @@ async function* runRefresh(
 
     for (const [position, outcome] of settled.entries()) {
       if (outcome.status === 'rejected') {
+        failedDocuments += 1;
         logger.warning(
           `ICS advisory mirror refresh: ${slice[position]?.path} failed — ${
             outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)
@@ -415,7 +444,13 @@ async function* runRefresh(
         continue;
       }
       const record = outcome.value;
-      if (!record) continue;
+      if (!record) {
+        failedDocuments += 1;
+        logger.warning(
+          `ICS advisory mirror refresh: ${slice[position]?.path} is not a usable advisory.`,
+        );
+        continue;
+      }
       if (record.revised && (maxRevised === undefined || record.revised > maxRevised)) {
         maxRevised = record.revised;
       }
@@ -438,6 +473,14 @@ async function* runRefresh(
     };
   }
 
+  signal.throwIfAborted();
+  if (failedDocuments > 0) {
+    writeMeta(handle, FAILED_DOCUMENTS_KEY, String(failedDocuments));
+    throw new Error(
+      `ICS advisory mirror refresh is partial: ${failedDocuments} document(s) failed; applied rows remain readable. Run mirror:refresh again to retry unresolved documents.`,
+    );
+  }
+  recordCompletion(handle, maxRevised);
   const newEtag = response.headers.get('etag');
-  if (newEtag && !signal.aborted) writeMeta(handle, CHANGES_ETAG_KEY, newEtag);
+  if (newEtag) writeMeta(handle, CHANGES_ETAG_KEY, newEtag);
 }

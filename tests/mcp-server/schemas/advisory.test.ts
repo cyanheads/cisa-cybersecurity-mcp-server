@@ -6,6 +6,7 @@
  * @module tests/mcp-server/schemas/advisory.test
  */
 
+import { execFileSync } from 'node:child_process';
 import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
 import {
@@ -140,6 +141,40 @@ describe('cvesNarrowingHint / renderOutlineCves', () => {
 });
 
 describe('renderAdvisoryHeader', () => {
+  it('renders upstream text literally across every shared section renderer', () => {
+    const doc = normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json');
+    if (!doc) throw new Error('expected document');
+    const literal = '<b>tag</b> [brackets] *stars* _under_ `ticks` \\path';
+    doc.advisory.title = literal;
+    doc.summary.summaryText = literal;
+    doc.products.vendors[0]!.name = literal;
+    doc.products.vendors[0]!.products[0]!.name = literal;
+    doc.products.vendors[0]!.products[0]!.versions[0]!.value = literal;
+    doc.revisionHistory[0]!.summary = literal;
+    doc.references[0]!.summary = literal;
+    doc.references[0]!.url = 'https://example.com/path_(x)?q=<literal>&x=1';
+    doc.acknowledgments[0]!.names = [literal];
+    const sections = [
+      renderAdvisoryHeader(doc.advisory),
+      renderAdvisorySummary(doc.summary),
+      renderAdvisoryProducts(doc.products),
+      renderAdvisoryRevisions(doc.revisionHistory),
+      renderAdvisoryReferences(doc.references),
+      renderAdvisoryAcknowledgments(doc.acknowledgments),
+    ];
+    for (const lines of sections) {
+      const html = execFileSync(
+        'bun',
+        ['-e', 'process.stdout.write(Bun.markdown.html(await Bun.stdin.text()))'],
+        { input: lines.join('\n'), encoding: 'utf8' },
+      );
+      expect(html).toContain('&lt;b&gt;tag&lt;/b&gt; [brackets] *stars* _under_ `ticks` \\path');
+      expect(html).not.toContain('<b>tag</b>');
+    }
+    const rendered = renderAdvisoryReferences(doc.references).join('\n');
+    expect(rendered).toContain('<https://example.com/path_(x)?q=%3Cliteral%3E&x=1>');
+    expect(doc.advisory.title).toBe(literal);
+  });
   it('renders identity, dates, and attribution', () => {
     const doc = normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json');
     if (!doc) throw new Error('expected a normalized document');
@@ -147,11 +182,38 @@ describe('renderAdvisoryHeader', () => {
     expect(lines).toContain('ICSA-26-260-07');
     expect(lines).toContain('Acme Widgets PLC Remote Code Execution');
     expect(lines).toContain('coordinator');
-    expect(lines).toContain(doc.advisory.attribution);
+    expect(lines).toContain('Authored by CISA');
+    expect(lines).toContain('cite the source when redistributing');
   });
 });
 
 describe('renderAdvisorySummary', () => {
+  it('retains literal setext markers in upstream prose', () => {
+    const summary = { sectors: [], summaryText: 'Literal heading\n====' };
+    const markdown = renderAdvisorySummary(summary).join('\n');
+    const html = execFileSync(
+      'bun',
+      ['-e', 'process.stdout.write(Bun.markdown.html(await Bun.stdin.text()))'],
+      { input: markdown, encoding: 'utf8' },
+    );
+    expect(html).not.toContain('<h1>');
+    expect(html).toContain('Literal heading\n====');
+    expect(summary.summaryText).toBe('Literal heading\n====');
+  });
+  it('retains literal ordered-list markers in upstream prose', () => {
+    const markdown = renderAdvisorySummary({
+      sectors: [],
+      summaryText: 'Steps:\n\n1. <LABEL>\n2) value',
+    }).join('\n');
+    const html = execFileSync(
+      'bun',
+      ['-e', 'process.stdout.write(Bun.markdown.html(await Bun.stdin.text()))'],
+      { input: markdown, encoding: 'utf8' },
+    );
+    expect(html).not.toContain('<ol>');
+    expect(html).toContain('1. &lt;LABEL&gt;');
+    expect(html).toContain('2) value');
+  });
   it('renders sector text and the verbatim note', () => {
     const doc = normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json');
     if (!doc) throw new Error('expected a normalized document');
@@ -194,6 +256,24 @@ describe('renderAdvisoryProducts', () => {
 });
 
 describe('renderAdvisoryVulnerabilities', () => {
+  it('renders command placeholders and metacharacters as visible literal text', () => {
+    const doc = normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json');
+    if (!doc) throw new Error('expected document');
+    const details =
+      'where <LABEL> certificate <LABEL> <install_dir> <b>tag</b> [x] *stars* _under_ `ticks` \\path';
+    doc.vulnerabilities[0]!.remediations[0]!.details = details;
+    const markdown = renderAdvisoryVulnerabilities(doc.vulnerabilities).join('\n');
+    const html = execFileSync(
+      'bun',
+      ['-e', 'process.stdout.write(Bun.markdown.html(await Bun.stdin.text()))'],
+      { input: markdown, encoding: 'utf8' },
+    );
+    expect(html).toContain('&lt;LABEL&gt;');
+    expect(html).not.toContain('<LABEL>');
+    expect(html).toContain('&lt;b&gt;tag&lt;/b&gt;');
+    expect(html).toContain('*stars* _under_ `ticks` \\path');
+    expect(doc.vulnerabilities[0]!.remediations[0]!.details).toBe(details);
+  });
   it('renders CVE, CWE, scores, remediations, and product status', () => {
     const doc = normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json');
     if (!doc) throw new Error('expected a normalized document');
@@ -201,7 +281,7 @@ describe('renderAdvisoryVulnerabilities', () => {
     expect(lines).toContain('CVE-2026-12345');
     expect(lines).toContain('CWE-20');
     expect(lines).toContain('9.8 CRITICAL');
-    expect(lines).toContain('vendor_fix');
+    expect(lines).toContain('vendor\\_fix');
     expect(lines).toContain('known_affected CSAFPID-0001');
   });
 

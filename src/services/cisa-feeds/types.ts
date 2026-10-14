@@ -25,9 +25,11 @@ export interface FeedWindow {
   feed: FeedId;
   feedTitle: string;
   feedUrl: string;
+  fetchedAt: string;
   items: FeedItem[];
   newest: string | null;
   oldest: string | null;
+  stale: boolean;
 }
 
 /** What `cisa_list_reference` topic `sources` reports about the feed tier. */

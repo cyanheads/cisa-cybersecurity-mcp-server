@@ -10,6 +10,8 @@
  * @module tests/mcp-server/unopenable-index.test
  */
 
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,10 +30,12 @@ import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference
 import { searchIcsAdvisoriesTool } from '@/mcp-server/tools/definitions/search-ics-advisories.tool.js';
 import { initCisaFeeds, resetCisaFeeds } from '@/services/cisa-feeds/cisa-feeds-service.js';
 import {
+  CsafMirrorService,
   classifyStoreOpenFailure,
   initCsafMirror,
   resetCsafMirror,
 } from '@/services/csaf-mirror/csaf-mirror-service.js';
+import { CSAF_ARCHIVE_URL } from '@/services/csaf-mirror/ingest.js';
 import {
   getKevCatalog,
   initKevCatalog,
@@ -42,7 +46,9 @@ import {
   initVulnrichment,
   resetVulnrichment,
 } from '@/services/vulnrichment/vulnrichment-service.js';
+import { FULL_ADVISORY } from '../fixtures/csaf-documents.js';
 import { buildKevFeedBody } from '../fixtures/kev-feed.js';
+import { buildTarGzResponse } from '../fixtures/tar.js';
 import { contentText, firstText } from '../helpers/format-text.js';
 
 const listExtra = {} as Parameters<NonNullable<typeof icsAdvisoryResource.list>>[0];
@@ -175,7 +181,10 @@ describe.each(CASES)('an unopenable advisory index: $label', ({ reason, build, l
   it('a cisa://advisory read fails with the same reason, non-retryable, without the path', async () => {
     const params = advisoryParams.parse({ advisoryId: 'ICSA-26-260-07' });
     const error = await Promise.resolve(
-      icsAdvisoryResource.handler(params, createMockContext()),
+      icsAdvisoryResource.handler(
+        params,
+        createMockContext({ errors: icsAdvisoryResource.errors }),
+      ),
     ).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(McpError);
     expect((error as McpError).code).toBe(JsonRpcErrorCode.ConfigurationError);
@@ -256,11 +265,117 @@ describe('classifyStoreOpenFailure', () => {
     }
   });
 
-  it('leaves anything else unclassified, so a transient lock is never reported as misconfiguration', () => {
-    expect(classifyStoreOpenFailure(errno('SQLITE_BUSY'))).toBeUndefined();
+  it('leaves unrelated failures unclassified', () => {
     expect(classifyStoreOpenFailure(new Error('boom'))).toBeUndefined();
     expect(classifyStoreOpenFailure('a string')).toBeUndefined();
     const aborted = new DOMException('The operation was aborted.', 'AbortError');
     expect(classifyStoreOpenFailure(aborted)).toBeUndefined();
   });
+
+  it.each(['SQLITE_BUSY', 'SQLITE_BUSY_SNAPSHOT', 'SQLITE_LOCKED', 'SQLITE_LOCKED_SHAREDCACHE'])(
+    'classifies %s on a nested cause as transient busy',
+    (code) => {
+      expect(
+        classifyStoreOpenFailure(
+          new Error('open failed', { cause: new Error('driver failed', { cause: errno(code) }) }),
+        ),
+      ).toBe('busy');
+    },
+  );
+
+  it('reads deep cause chains and terminates a circular chain without classifying it', () => {
+    let wrapped: Error = errno('SQLITE_BUSY_TIMEOUT');
+    for (let depth = 0; depth < 8; depth += 1) wrapped = new Error('wrapper', { cause: wrapped });
+    expect(classifyStoreOpenFailure(wrapped)).toBe('busy');
+    const circular = new Error('cycle');
+    circular.cause = circular;
+    expect(classifyStoreOpenFailure(circular)).toBeUndefined();
+  });
 });
+
+it('real SQLite contention reports path-free retryable errors on every ICS read and recovers after release', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'busy-index-'));
+  const path = join(base, 'csaf.sqlite3');
+  const seed = new CsafMirrorService({ mirrorPath: path, timeoutMs: 5000 });
+  const http = createFetchMock([
+    {
+      match: CSAF_ARCHIVE_URL,
+      respond: () =>
+        buildTarGzResponse([
+          {
+            name: 'CSAF-develop/csaf_files/OT/white/2026/icsa-26-260-07.json',
+            data: JSON.stringify(FULL_ADVISORY),
+          },
+        ]),
+    },
+  ]);
+  http.install();
+  try {
+    await seed.autoInit();
+  } finally {
+    http.restore();
+    await seed.close();
+  }
+  const holder = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import Database from 'better-sqlite3'; const db = new Database(process.argv[1]); db.exec('BEGIN IMMEDIATE'); process.stdout.write('locked'); process.stdin.once('end', () => { db.exec('ROLLBACK'); db.close(); }); process.stdin.resume();`,
+      path,
+    ],
+    { stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  const exited = once(holder, 'exit');
+  await once(holder.stdout, 'data');
+  const mirror = initCsafMirror({ mirrorPath: path, timeoutMs: 5000 });
+  initKevCatalog({ refreshCron: 'off', timeoutMs: 5000 });
+  try {
+    for (const result of [
+      await runToolContract(searchIcsAdvisoriesTool, {}),
+      await runToolContract(getAdvisoryTool, { advisoryId: 'ICSA-26-260-07' }),
+    ]) {
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: { reason: 'mirror_busy', retryable: true },
+        },
+      });
+      expect(contentText(result)).toMatch(/retry.*shortly/i);
+      expect(contentText(result)).not.toContain(base);
+      expect(JSON.stringify(result.structuredContent)).not.toContain(base);
+    }
+    await expect(
+      icsAdvisoryResource.handler(
+        advisoryParams.parse({ advisoryId: 'ICSA-26-260-07' }),
+        createMockContext({ errors: icsAdvisoryResource.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'mirror_busy',
+        retryable: true,
+        recovery: { hint: expect.stringMatching(/shortly/) },
+      },
+    });
+    expect(await icsAdvisoryResource.list?.(listExtra)).toEqual({ resources: [] });
+    expect(await icsAdvisoryResource.complete?.advisoryId?.('ICSA')).toEqual([]);
+    expect(await mirror.state()).toMatchObject({ syncStatus: 'busy', ready: false });
+    holder.stdin.end();
+    await exited;
+    expect(await mirror.availability()).toEqual({ status: 'ready' });
+    const result = await runToolContract(getAdvisoryTool, { advisoryId: 'ICSA-26-260-07' });
+    expect(result.isError).not.toBe(true);
+    expect(contentText(result)).toContain('ICSA-26-260-07');
+  } finally {
+    if (holder.exitCode === null) {
+      holder.stdin.end();
+      await exited;
+    }
+    await mirror.close();
+    resetCsafMirror();
+    resetKevCatalog();
+    rmSync(base, { recursive: true, force: true });
+  }
+}, 60000);

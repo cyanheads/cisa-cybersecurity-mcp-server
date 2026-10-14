@@ -7,7 +7,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { ISO_DATE_REGEX } from '@/mcp-server/schemas/kev-record.js';
+import { CalendarDateInputSchema } from '@/mcp-server/schemas/kev-record.js';
 import { getCisaFeeds, UPSTREAM_WINDOW_SIZE } from '@/services/cisa-feeds/cisa-feeds-service.js';
 import { ADVISORY_ID_PATTERN } from '@/services/csaf-mirror/normalize.js';
 
@@ -36,16 +36,16 @@ export const getAlertsTool = tool('cisa_get_alerts', {
       .describe(
         'Maximum items to return. The 30 ceiling is the upstream window, not a server choice.',
       ),
-    since: z
-      .string()
-      .regex(ISO_DATE_REGEX)
-      .optional()
-      .describe(
-        'Keep only items published on or after this date, YYYY-MM-DD. Filters within the fetched window; it cannot reach back beyond it.',
-      ),
+    since: CalendarDateInputSchema.optional().describe(
+      'Keep only items published on or after this date, YYYY-MM-DD. Filters within the fetched window; it cannot reach back beyond it.',
+    ),
   }),
 
   output: z.object({
+    stale: z
+      .boolean()
+      .describe('True when refresh failed and this response uses the last cached window.'),
+    fetchedAt: z.string().describe('UTC timestamp when this window was successfully fetched.'),
     feed: z.enum(['advisories', 'alerts', 'ics']).describe('The feed that was read.'),
     feedUrl: z.string().describe('The absolute feed URL this window came from.'),
     feedTitle: z.string().describe('The channel title the feed declares.'),
@@ -81,7 +81,9 @@ export const getAlertsTool = tool('cisa_get_alerts', {
           })
           .describe('One feed item.'),
       )
-      .describe('Items from the current window, newest first as published.'),
+      .describe(
+        'Items from the fetched window, newest first as published; stale identifies cached fallback.',
+      ),
     window: z
       .object({
         itemCount: z.number().int().describe('Items returned after limit and since were applied.'),
@@ -112,7 +114,12 @@ export const getAlertsTool = tool('cisa_get_alerts', {
     truncated: z.boolean().optional().describe('True when the limit capped the returned items.'),
     shown: z.number().int().optional().describe('Items returned.'),
     cap: z.number().int().optional().describe('The limit that was applied.'),
-    notice: z.string().optional().describe('Guidance when the since filter excluded every item.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Safe retry guidance on refresh failure, or guidance when the since filter excluded every item.',
+      ),
   },
 
   enrichmentTrailer: {
@@ -155,15 +162,21 @@ export const getAlertsTool = tool('cisa_get_alerts', {
     if (items.length < filtered.length) {
       ctx.enrich.truncated({ shown: items.length, cap: input.limit });
     }
+    if (window.stale)
+      ctx.enrich.notice(
+        'The feed refresh failed; this cached window may omit newer publications. Retry in a few minutes, or use cisa_search_ics_advisories for ICS advisory history.',
+      );
     if (input.since && filtered.length === 0) {
       ctx.enrich.notice(
-        `No item in the current 30-item window is on or after ${input.since}. The window's oldest item is ${
+        `No item in the ${window.stale ? 'cached' : 'current'} 30-item window is on or after ${input.since}.${window.stale ? ' Refresh failed, so this does not establish current publication absence; retry in a few minutes.' : ''} The window's oldest item is ${
           window.oldest ?? 'unknown'
         }; anything earlier is not in this feed.`,
       );
     }
 
     return {
+      stale: window.stale,
+      fetchedAt: window.fetchedAt,
       feed: window.feed,
       feedUrl: window.feedUrl,
       feedTitle: window.feedTitle,
@@ -181,6 +194,7 @@ export const getAlertsTool = tool('cisa_get_alerts', {
     const lines: string[] = [
       `# ${result.feedTitle || result.feed}`,
       `**Feed:** ${result.feed} · **Source:** ${result.feedUrl}`,
+      `**Fetched:** ${result.fetchedAt} · **Stale:** ${result.stale ? 'yes — refresh failed; newer publications may be missing. Retry in a few minutes.' : 'no'}`,
       `**Window:** ${result.window.itemCount} item(s) shown, covering ${
         result.window.oldest ?? 'unknown'
       } → ${result.window.newest ?? 'unknown'} out of an upstream window of ${result.window.upstreamWindowSize}.`,

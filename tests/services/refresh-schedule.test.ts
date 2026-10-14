@@ -14,6 +14,7 @@ import { createFetchMock } from '@cyanheads/mcp-ts-core/testing';
 import { logger, schedulerService } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CsafMirrorService,
   getCsafMirror,
   initCsafMirror,
   resetCsafMirror,
@@ -48,6 +49,7 @@ describe('startBackgroundRefresh', () => {
     schedulerService.destroyAll();
     vi.restoreAllMocks();
     await getCsafMirror().close();
+    vi.useRealTimers();
     resetCsafMirror();
     rmSync(dir, { recursive: true, force: true });
     kev.refresh.mockClear();
@@ -106,6 +108,24 @@ describe('startBackgroundRefresh', () => {
   }
 
   describe('cron jobs', () => {
+    it('shutdown during scheduler registration cannot start a late cron job', async () => {
+      const held = Promise.withResolvers<void>();
+      const requested = Promise.withResolvers<void>();
+      const schedule = schedulerService.schedule.bind(schedulerService);
+      vi.spyOn(schedulerService, 'schedule').mockImplementationOnce(async (...args) => {
+        requested.resolve();
+        await held.promise;
+        return schedule(...args);
+      });
+      const starting = startBackgroundRefresh(options({ csafRefreshCron: 'off' }));
+      await requested.promise;
+      await getCsafMirror().close();
+      schedulerService.destroyAll();
+      held.resolve();
+      await starting;
+      expect(jobs()).toEqual([]);
+    });
+
     /* The wiring takes no transport, so stdio registers exactly what HTTP does;
      * the live stdio run is covered by the field test. */
     it('valid expressions register both jobs on those expressions', async () => {
@@ -154,6 +174,115 @@ describe('startBackgroundRefresh', () => {
   });
 
   describe('boot pass', () => {
+    it('retries a skipped first seed after lease expiry with both crons off', async () => {
+      vi.useFakeTimers();
+      const mirror = getCsafMirror();
+      const maintain = mirror.maintain.bind(mirror);
+      const runs: Promise<unknown>[] = [];
+      vi.spyOn(mirror, 'maintain').mockImplementation((...args) => {
+        const running = maintain(...args);
+        runs.push(running);
+        return running;
+      });
+      const handle = await getCsafMirror().mirrorInstance.raw();
+      handle
+        .prepare("INSERT INTO mirror_meta (key, value) VALUES ('sync_lease', ?)")
+        .run(JSON.stringify({ owner: 'crashed/1/test', mode: 'init', expiresAt: Date.now() + 50 }));
+      const http = createFetchMock([{ match: CSAF_ARCHIVE_URL, respond: () => archive() }]);
+      http.install();
+      try {
+        await startBackgroundRefresh(
+          options({ csafMirrorAutoInit: true, csafRefreshCron: 'off', kevRefreshCron: 'off' }),
+        );
+        expect(await getCsafMirror().ready()).toBe(false);
+        expect(http.calls).toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(1000);
+        await Promise.all(runs);
+        expect(runs).toHaveLength(2);
+        expect(await mirror.ready()).toBe(true);
+        expect(http.calls.map((call) => call.request.url)).toEqual([CSAF_ARCHIVE_URL]);
+      } finally {
+        http.restore();
+      }
+    });
+
+    it('close cancels a queued first-seed retry and does not release another owner lease', async () => {
+      vi.useFakeTimers();
+      const mirror = getCsafMirror();
+      const handle = await mirror.mirrorInstance.raw();
+      handle
+        .prepare("INSERT INTO mirror_meta (key, value) VALUES ('sync_lease', ?)")
+        .run(JSON.stringify({ owner: 'other/2/test', mode: 'init', expiresAt: Date.now() + 50 }));
+      const http = createFetchMock([{ match: CSAF_ARCHIVE_URL, respond: () => archive() }]);
+      http.install();
+      try {
+        await startBackgroundRefresh(
+          options({ csafMirrorAutoInit: true, csafRefreshCron: 'off', kevRefreshCron: 'off' }),
+        );
+        await mirror.close();
+        const observer = new CsafMirrorService({
+          mirrorPath: join(dir, 'csaf.sqlite3'),
+          timeoutMs: 5000,
+        });
+        try {
+          const lease = (await observer.mirrorInstance.raw())
+            .prepare<{ value: string }>("SELECT value FROM mirror_meta WHERE key = 'sync_lease'")
+            .get();
+          expect(JSON.parse(lease?.value ?? '{}').owner).toBe('other/2/test');
+        } finally {
+          await observer.close();
+        }
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(http.calls).toHaveLength(0);
+        expect(mirror.shutdownSignal.aborted).toBe(true);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        http.restore();
+      }
+    });
+
+    it('a retry reuses an index seeded by another process without requesting a second archive', async () => {
+      vi.useFakeTimers();
+      const mirror = getCsafMirror();
+      const maintain = mirror.maintain.bind(mirror);
+      const runs: Promise<unknown>[] = [];
+      vi.spyOn(mirror, 'maintain').mockImplementation((...args) => {
+        const running = maintain(...args);
+        runs.push(running);
+        return running;
+      });
+      const handle = await mirror.mirrorInstance.raw();
+      handle
+        .prepare("INSERT INTO mirror_meta (key, value) VALUES ('sync_lease', ?)")
+        .run(
+          JSON.stringify({ owner: 'other/2/test', mode: 'init', expiresAt: Date.now() + 60_000 }),
+        );
+      const http = createFetchMock([{ match: CSAF_ARCHIVE_URL, respond: () => archive() }]);
+      http.install();
+      try {
+        await startBackgroundRefresh(
+          options({ csafMirrorAutoInit: true, csafRefreshCron: 'off', kevRefreshCron: 'off' }),
+        );
+        handle.exec("DELETE FROM mirror_meta WHERE key = 'sync_lease'");
+        const other = new CsafMirrorService({
+          mirrorPath: join(dir, 'csaf.sqlite3'),
+          timeoutMs: 5000,
+        });
+        try {
+          await other.autoInit();
+        } finally {
+          await other.close();
+        }
+        await vi.advanceTimersByTimeAsync(1000);
+        await Promise.all(runs);
+        expect(runs).toHaveLength(2);
+        expect(await mirror.ready()).toBe(true);
+        expect(http.calls.map((call) => call.request.url)).toEqual([CSAF_ARCHIVE_URL]);
+      } finally {
+        http.restore();
+      }
+    });
+
     it('a synced, content-current index runs one background refresh', async () => {
       await seed();
       const before = (await getCsafMirror().state()).lastCompletedAt;

@@ -8,7 +8,11 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference.tool.js';
 import { REFERENCE_TOPICS } from '@/reference/tables.js';
@@ -198,7 +202,15 @@ describe('cisa_list_reference', () => {
     /* The ready-index arm keeps exactly these fields and this rendered line. */
     const mirror = result.sources?.csafMirror;
     expect(Object.keys(mirror ?? {}).sort()).toEqual(
-      ['checkpoint', 'documentCount', 'lastCompletedAt', 'ready', 'syncStatus'].sort(),
+      [
+        'checkpoint',
+        'documentCount',
+        'failedDocumentCount',
+        'lastCompletedAt',
+        'lastSuccessfulCheckpoint',
+        'ready',
+        'syncStatus',
+      ].sort(),
     );
     expect(mirror?.syncStatus).toBe('complete');
     const text = firstText(listReferenceTool.format?.(result));
@@ -206,5 +218,39 @@ describe('cisa_list_reference', () => {
       `- **ICS advisory index** — ready: yes, 1 documents, sync status complete, checkpoint ${mirror?.checkpoint}, last completed ${mirror?.lastCompletedAt}.`,
     );
     expect(text).toContain('refresh cron `*/30 * * * *`.');
+    expect(text).toContain(
+      `Last successful checkpoint: ${mirror?.lastSuccessfulCheckpoint}; failed documents: 0.`,
+    );
+    const service = getCsafMirror();
+    (await service.mirrorInstance.raw())
+      .prepare(
+        "INSERT INTO mirror_meta (key, value) VALUES ('failed_document_count', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run();
+    await service.mirrorInstance.store.writeState({
+      status: 'error',
+      error: 'one document failed',
+      checkpoint: '2026-10-01T00:00:00Z',
+    });
+    const partial = await runToolContract(listReferenceTool, { topic: 'sources' });
+    expect(partial.isError).not.toBe(true);
+    expect(partial.structuredContent).toMatchObject({
+      sources: {
+        csafMirror: {
+          ready: true,
+          syncStatus: 'partial',
+          failedDocumentCount: 1,
+          documentCount: 1,
+          lastCompletedAt: mirror?.lastCompletedAt,
+          lastSuccessfulCheckpoint: mirror?.lastSuccessfulCheckpoint,
+          checkpoint: '2026-10-01T00:00:00Z',
+        },
+      },
+    });
+    const partialText = firstText(partial.content);
+    expect(partialText).toContain('sync status partial');
+    expect(partialText).toContain(
+      `Last successful checkpoint: ${mirror?.lastSuccessfulCheckpoint}; failed documents: 1.`,
+    );
   }, 20000);
 });

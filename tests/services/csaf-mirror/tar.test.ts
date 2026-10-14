@@ -19,6 +19,52 @@ async function collect(response: Response, include: (name: string) => boolean) {
 }
 
 describe('iterateTarGz', () => {
+  it.each([
+    ['L', 'deep/advisory.json\0'],
+    ['x', '27 path=deep/advisory.json\n'],
+    ['g', '27 path=deep/advisory.json\n'],
+  ])('uses %s metadata for the next file only', async (typeFlag, data) => {
+    const entries = await collect(
+      buildTarGzResponse([
+        { name: 'metadata', typeFlag, data },
+        { name: 'short.json', data: 'first' },
+        { name: 'second.json', prefix: 'directory', data: 'second' },
+      ]),
+      () => true,
+    );
+    expect(entries).toEqual([
+      { name: 'deep/advisory.json', text: 'first' },
+      { name: 'directory/second.json', text: 'second' },
+    ]);
+  });
+
+  it('ignores pax records without a path and skips nonregular entries', async () => {
+    const entries = await collect(
+      buildTarGzResponse([
+        { name: 'metadata', typeFlag: 'x', data: '12 uid=1000\n' },
+        { name: 'link.json', typeFlag: '2', data: 'target' },
+        { name: 'directory', typeFlag: '5', data: '' },
+        { name: 'kept.json', data: 'kept' },
+      ]),
+      () => true,
+    );
+    expect(entries).toEqual([{ name: 'kept.json', text: 'kept' }]);
+  });
+
+  it.each(['L', 'x', 'g'])(
+    'rejects oversized %s metadata before buffering it',
+    async (typeFlag) => {
+      await expect(
+        collect(
+          buildTarGzResponse([
+            { name: 'metadata', typeFlag, data: 'x', declaredSize: MAX_TAR_ENTRY_BYTES + 1 },
+          ]),
+          () => true,
+        ),
+      ).rejects.toThrow('CSAF archive metadata entry declares');
+    },
+  );
+
   it('yields every entry whose name satisfies the include predicate', async () => {
     const response = buildTarGzResponse([
       { name: 'CSAF-develop/csaf_files/OT/white/2026/icsa-26-260-07.json', data: '{"a":1}' },

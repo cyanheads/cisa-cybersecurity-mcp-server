@@ -15,9 +15,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
 import {
+  CalendarDateInputSchema,
   CveIdInputSchema,
   CweIdInputSchema,
-  ISO_DATE_REGEX,
 } from '@/mcp-server/schemas/kev-record.js';
 import { SEVERITY_BANDS } from '@/reference/cvss.js';
 import { SECTOR_FILTER_VALUES } from '@/reference/sectors.js';
@@ -106,26 +106,18 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       .describe(
         'coordinator selects CISA-authored advisories; other selects vendor advisories CISA republished, over a quarter of the corpus.',
       ),
-    publishedFrom: z
-      .string()
-      .regex(ISO_DATE_REGEX)
-      .optional()
-      .describe('Earliest initial release date, inclusive, YYYY-MM-DD.'),
-    publishedTo: z
-      .string()
-      .regex(ISO_DATE_REGEX)
-      .optional()
-      .describe('Latest initial release date, inclusive, YYYY-MM-DD.'),
-    revisedFrom: z
-      .string()
-      .regex(ISO_DATE_REGEX)
-      .optional()
-      .describe('Earliest current release date, inclusive, YYYY-MM-DD.'),
-    revisedTo: z
-      .string()
-      .regex(ISO_DATE_REGEX)
-      .optional()
-      .describe('Latest current release date, inclusive, YYYY-MM-DD.'),
+    publishedFrom: CalendarDateInputSchema.optional().describe(
+      'Earliest initial release date, inclusive, YYYY-MM-DD.',
+    ),
+    publishedTo: CalendarDateInputSchema.optional().describe(
+      'Latest initial release date, inclusive, YYYY-MM-DD.',
+    ),
+    revisedFrom: CalendarDateInputSchema.optional().describe(
+      'Earliest current release date, inclusive, YYYY-MM-DD.',
+    ),
+    revisedTo: CalendarDateInputSchema.optional().describe(
+      'Latest current release date, inclusive, YYYY-MM-DD.',
+    ),
     sortBy: z
       .enum(['relevance', 'published', 'revised', 'maxCvss'])
       .default('revised')
@@ -272,6 +264,14 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
 
   errors: [
     {
+      reason: 'mirror_busy',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'A transient SQLite lock prevents the advisory index from opening.',
+      retryable: true,
+      recovery:
+        'Retry this search shortly; another process temporarily holds the advisory index lock. Call cisa_list_reference with topic sources to check its state.',
+    },
+    {
       reason: 'mirror_not_ready',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The advisory index has never completed a full sync.',
@@ -357,6 +357,9 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
 
     const mirror = getCsafMirror();
     const availability = await mirror.availability();
+    if (availability.status === 'busy') {
+      throw ctx.fail('mirror_busy', 'The ICS advisory index is temporarily busy.');
+    }
     if (availability.status === 'unavailable') {
       throw ctx.fail(
         'mirror_unavailable',

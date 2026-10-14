@@ -15,12 +15,14 @@ import { getMirror } from './_mirror-context.js';
 
 const context = requestContextService.createRequestContext({ operation: 'mirror:verify' });
 
-const mirror = (await getMirror()).mirrorInstance;
+const service = await getMirror();
+const mirror = service.mirrorInstance;
 const status = await mirror.status();
+const state = await service.state();
 const contentVersion = readIngestContentVersion(await mirror.raw());
 
 logger.info(
-  `ICS advisory mirror status: ready=${status.ready}, status=${status.status}, total=${status.total ?? 0}, checkpoint=${status.checkpoint ?? 'none'}, completedAt=${status.completedAt ?? 'never'}, contentVersion=${contentVersion ?? 'none'} (current ${INGEST_CONTENT_VERSION})`,
+  `ICS advisory mirror status: ready=${state.ready}, status=${state.syncStatus}, total=${state.documentCount ?? 0}, checkpoint=${state.checkpoint ?? 'none'}, lastSuccessfulCheckpoint=${state.lastSuccessfulCheckpoint ?? 'none'}, failedDocumentCount=${state.failedDocumentCount ?? 'unknown'}, completedAt=${state.lastCompletedAt ?? 'never'}, contentVersion=${contentVersion ?? 'none'} (current ${INGEST_CONTENT_VERSION})`,
 );
 if (status.error) logger.warning(`Last sync error: ${status.error}`);
 
@@ -44,5 +46,5 @@ if (!integrity.ok) {
 }
 
 logger.info('ICS advisory mirror integrity check passed.');
-await mirror.close();
-process.exit(0);
+await service.close();
+process.exit(state.syncStatus === 'partial' ? 1 : 0);

@@ -153,14 +153,31 @@ export const listReferenceTool = tool('cisa_list_reference', {
               .number()
               .int()
               .nullable()
-              .describe('Advisories held in the index; null before the first sync completes.'),
+              .describe(
+                'Advisories currently held in the index, including partial updates; null before the first sync completes or when the store cannot be read.',
+              ),
+            failedDocumentCount: z
+              .number()
+              .int()
+              .nullable()
+              .describe(
+                'Changed documents that failed in the last manifest application; zero after a successful sync, null when the store cannot be read.',
+              ),
+            lastSuccessfulCheckpoint: z
+              .string()
+              .nullable()
+              .describe(
+                'Newest current_release_date at the last wholly successful sync; unchanged after partial updates, null before completion.',
+              ),
             checkpoint: z
               .string()
               .nullable()
               .describe('Durable high-water mark — the newest current_release_date ingested.'),
             syncStatus: z
               .string()
-              .describe('Lifecycle state: pending, in_progress, complete, error, or unavailable.'),
+              .describe(
+                'Lifecycle state: pending, in_progress, complete, partial, error, busy, or unavailable. A partial refresh keeps applied rows and retries unresolved documents on the next refresh.',
+              ),
             lastCompletedAt: z
               .string()
               .nullable()
@@ -325,6 +342,14 @@ export const listReferenceTool = tool('cisa_list_reference', {
           csafMirror.checkpoint ?? 'none'
         }, last completed ${csafMirror.lastCompletedAt ?? 'never'}.`,
       );
+      lines.push(
+        `  - Last successful checkpoint: ${csafMirror.lastSuccessfulCheckpoint ?? 'none'}; failed documents: ${csafMirror.failedDocumentCount ?? 'unknown'}.`,
+      );
+      if (csafMirror.syncStatus === 'busy') {
+        lines.push(
+          '  - The index is temporarily busy; retry the ICS tools or resource shortly. Every other tool works.',
+        );
+      }
       if (csafMirror.unavailableReason) {
         lines.push(
           `  - The index cannot be opened — unavailable: ${csafMirror.unavailableReason.replaceAll('_', ' ')}. The ICS tools fail until the server operator sets CISA_CSAF_MIRROR_PATH to a writable path; every other tool works.`,

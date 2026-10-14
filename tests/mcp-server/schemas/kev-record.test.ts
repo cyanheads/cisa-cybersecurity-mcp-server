@@ -6,6 +6,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import {
   KevRecordSchema,
@@ -14,8 +15,84 @@ import {
   toKevRecordSummary,
   toMissingKevOutput,
 } from '@/mcp-server/schemas/kev-record.js';
+import { getAlertsTool } from '@/mcp-server/tools/definitions/get-alerts.tool.js';
+import { searchIcsAdvisoriesTool } from '@/mcp-server/tools/definitions/search-ics-advisories.tool.js';
+import { searchKevTool } from '@/mcp-server/tools/definitions/search-kev.tool.js';
 import type { KevRecord } from '@/services/kev-catalog/types.js';
 import { DRIFTING_CATALOG_COUNT } from '../../helpers/catalog-counts.js';
+
+describe('calendar date input filters', () => {
+  const filters = [
+    ...['dateAddedFrom', 'dateAddedTo', 'dueBefore', 'dueAfter'].map((field) => ({
+      schema: searchKevTool.input,
+      field,
+    })),
+    ...['publishedFrom', 'publishedTo', 'revisedFrom', 'revisedTo'].map((field) => ({
+      schema: searchIcsAdvisoriesTool.input,
+      field,
+    })),
+    { schema: getAlertsTool.input, field: 'since' },
+  ];
+  it('characterizes omitted filters and valid calendar boundaries', () => {
+    for (const { schema, field } of filters) {
+      expect(schema.safeParse({}).success).toBe(true);
+      for (const date of ['2024-02-29', '2000-02-29', '2026-04-30', '2026-12-31'])
+        expect(schema.safeParse({ [field]: date }).success).toBe(true);
+    }
+  });
+  it('rejects impossible calendar dates in every wired filter', () => {
+    for (const { schema, field } of filters) {
+      for (const date of [
+        '2026-99-99',
+        '2026-00-01',
+        '2026-01-00',
+        '2026-02-29',
+        '1900-02-29',
+        '2026-04-31',
+      ]) {
+        const result = schema.safeParse({ [field]: date });
+        expect(result.success, `${field}=${date}`).toBe(false);
+        expect(result.error?.issues[0]?.path).toEqual([field]);
+      }
+    }
+  });
+  it('names rejected fields and usable date guidance on both error surfaces', async () => {
+    for (const [tool, fields] of [
+      [searchKevTool, ['dateAddedFrom', 'dateAddedTo', 'dueBefore', 'dueAfter']],
+      [searchIcsAdvisoriesTool, ['publishedFrom', 'publishedTo', 'revisedFrom', 'revisedTo']],
+      [getAlertsTool, ['since']],
+    ] as const) {
+      for (const field of fields) {
+        const result = await runToolContract(tool, { [field]: '2026-02-29' });
+        expect(result.isError).toBe(true);
+        const structured = JSON.stringify(result.structuredContent);
+        const content = JSON.stringify(result.content);
+        for (const surface of [structured, content]) {
+          expect(surface).toContain(field);
+          expect(surface).toContain('YYYY-MM-DD');
+          expect(surface).toContain('2024-02-29');
+        }
+      }
+    }
+  });
+
+  it('emits date format and pattern for inputs while preserving output date patterns', () => {
+    for (const { schema, field } of filters) {
+      const emitted = z.toJSONSchema(schema) as {
+        properties: Record<string, { format?: string; pattern?: string }>;
+      };
+      expect(emitted.properties[field]?.format).toBe('date');
+      expect(emitted.properties[field]?.pattern).toBeTruthy();
+    }
+    const output = z.toJSONSchema(KevRecordSchema) as {
+      properties: Record<string, { format?: string; pattern?: string }>;
+    };
+    for (const field of ['dateAdded', 'dueDate']) {
+      expect(output.properties[field]?.pattern).toBe('^\\d{4}-\\d{2}-\\d{2}$');
+      expect(output.properties[field]?.format).toBeUndefined();
+    }
+  });
+});
 
 /** The fields `detail: "summary"` drops from an in-KEV record. */
 const SUMMARY_OMITS = [

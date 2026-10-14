@@ -290,7 +290,7 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
         key: 'csafMirror',
         label: 'ICS advisory index',
         description:
-          'A local SQLite index of the full CSAF advisory corpus, refreshed once at startup and then on a schedule unless the operator turned refresh off. ready is true once a full sync has ever completed; the index keeps serving during a refresh and after a failed one. unavailableReason appears only when the index cannot be opened at its configured location, which the server operator fixes through CISA_CSAF_MIRROR_PATH — waiting does not.',
+          'A local SQLite index of the full CSAF advisory corpus, refreshed once at startup and then on a schedule unless the operator turned refresh off. ready stays true after the first completed sync. A partial refresh keeps applied rows readable, reports failedDocumentCount, and retries unresolved documents next time; lastCompletedAt and lastSuccessfulCheckpoint identify the last wholly successful sync, while checkpoint tracks ingested revisions. A busy index is transient: retry shortly. unavailableReason identifies permanent open failures fixed through CISA_CSAF_MIRROR_PATH.',
       },
       {
         key: 'vulnrichment',

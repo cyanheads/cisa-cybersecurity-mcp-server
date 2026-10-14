@@ -2,10 +2,10 @@
 
 **Server:** cisa-cybersecurity-mcp-server
 **Version:** 0.3.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.14`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.6
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -24,7 +24,7 @@ Four keyless CISA datasets, all read-only, served over seven tools and two resou
 | `cisa_search_kev` | `kev-catalog`. Filters AND together against the whole snapshot, never a page. |
 | `cisa_get_ssvc` | `vulnrichment` + `kev-catalog`. Computes the BOD 26-04 timeline from three published decision points plus the caller's `assetExposure`. |
 | `cisa_search_ics_advisories` | `csaf-mirror` + `kev-catalog`. FTS5 plus indexed filters over the local index; KEV membership joins the in-memory snapshot and is awaited only under `inKev` — otherwise best-effort, so a KEV outage never fails an advisory search. |
-| `cisa_get_advisory` | `csaf-mirror`. `outlineOnOverflow` at `ADVISORY_OUTLINE_BUDGET` (24 KB), `selectSections` on the re-call, and `cves` narrowing `vulnerabilities` below the section level. |
+| `cisa_get_advisory` | `csaf-mirror`. `outlineOnOverflow` at `ADVISORY_OUTLINE_BUDGET` (24 KB), `selectSections` on the re-call, `cves` narrowing vulnerabilities, and exact case-sensitive `productIds` narrowing products. Nonempty selectors imply their targets; explicit sections must include them. |
 | `cisa_get_alerts` | `cisa-feeds`. A 30-item rolling window; the cap is upstream's, not a server choice. |
 | `cisa://kev/{cveId}` | `kev-catalog`. Same record shape `cisa_check_cve_status` returns. |
 | `cisa://advisory/{advisoryId}` | `csaf-mirror`. The same overflow treatment as the tool's no-`sections` call. |
@@ -45,17 +45,25 @@ No prompts: every workflow here is a direct lookup or a filtered search the tool
 - Boot never depends on the advisory corpus. KEV, SSVC, and alert tools serve from the first request; the index seeds in the background and reports `mirror_not_ready` until it lands.
 - An HTML body on a JSON or XML route is `ServiceUnavailable`, never `SerializationError` — cisa.gov serves a Drupal error page transiently, and a parse-error classification makes a recoverable outage look like a data-shape defect.
 - A not-yet-seeded index throws rather than returning an empty result: an empty page asserts that nothing matches.
+- KEV snapshots are validated whole before replacement: reject unusable membership rows, duplicate normalized CVEs, and inconsistent envelopes/counts. Failed refreshes retain the last valid membership and Last-Modified; cold failure is retryable `catalog_unavailable`. Sparse optional fields remain supported.
+- Feed reads report `fetchedAt` and `stale` on both surfaces. Refresh failure retains the cached window with safe retry guidance; stale emptiness never establishes current absence. All attempts/backoff share a 45-second deadline; caller cancellation never becomes fallback success.
+- All nine date input filters share `CalendarDateInputSchema` (`z.iso.date()`); preserve output date patterns and handler range-order errors.
 - An index store that cannot be opened is `mirror_unavailable` (`ConfigurationError`, non-retryable), never the raw filesystem error: caller-facing text never carries the index path, and resource listing and completion degrade to empty so `resources/list` keeps serving the KEV entries.
+- Transient `SQLITE_BUSY`/`SQLITE_LOCKED` open failures, including extended variants on the cause chain, are `mirror_busy` (`ServiceUnavailable`, retryable). They recover without a restart; listing/completion still degrade to empty and `sources` reports `busy` without the path.
+- A partial refresh retains applied rows and its ingested high-water `checkpoint`, but preserves `lastCompletedAt`, `lastSuccessfulCheckpoint`, and the prior manifest ETag. `sources` reports `partial` and `failedDocumentCount`; document/coverage counts follow row mutations, including another process's partial updates. Refresh rejects a never-completed index under its lease before upstream I/O.
+- Closing cancels pending boot preflight, active sync, and first-seed retries before closing the store. Automatic first-seed recovery rechecks with an unref'd delay capped at five seconds until ready or closed; cron `off` does not disable it, while auto-init false does.
 - Two processes never sync one index at once. Seed and refresh go through `CsafMirrorService.sync()`, which holds the `mirror_meta` lease (`sync-lease.ts`) — never call `mirrorInstance.runSync()` directly outside tests.
 - Raise `INGEST_CONTENT_VERSION` (`src/services/csaf-mirror/ingest.ts`) whenever ingest would store different content for a document upstream has not revised — a row field, the stored document, a junction table. `refresh` never revisits an unchanged document, so without the bump the change never reaches an existing index. A new auxiliary table also needs a migration and a raised store-spec `version`.
 - A computed BOD 26-04 timeline and CISA's assigned KEV due date are two separate facts, reported side by side and never reconciled.
+- Preserve definitions from branches, `full_product_names`, and relationships; never synthesize dangling IDs. Relationship references are flat fields and `identificationHelper` is lossless JSON text. Product selection retains whole-document totals and marks `selected` independently of legacy `truncated`.
+- Advisory Markdown escapes upstream text at rendering only; stored and structured strings stay verbatim. Verify literal placeholders through a Markdown parser and retain usable URL destinations.
 - No DHS seal, CISA logo, or implied endorsement on any surface. Advisory responses always carry `url`, `csafUrl`, and `attribution` — the CSAF repository declares no license and many advisories republish vendor text.
 
 **Mirror scripts** — `scripts/csaf-mirror-{init,refresh,verify}.ts`, sharing `scripts/_mirror-context.ts`. They ship in `package.json` `files[]` and in the Docker image, for `docker exec`, CI, and operators who drive seeding or refreshes themselves (`CISA_CSAF_MIRROR_AUTO_INIT=false`, `CISA_CSAF_REFRESH_CRON=off`). They resolve the server's index path and take its sync lease, so a run that finds a server syncing skips.
 
 ```sh
 bun run mirror:init      # full build from the repository archive; idempotent
-bun run mirror:refresh   # incremental, driven by the changes.csv diff
+bun run mirror:refresh   # requires a completed mirror:init; incremental changes.csv diff
 bun run mirror:verify    # readiness, status, checkpoint, count, content version, SQLite integrity; non-zero on failure
 ```
 
@@ -431,6 +439,8 @@ When you complete a skill's checklist, check the boxes and add a completion time
 ## Commands
 
 **Runtime:** Scripts use Bun's native TypeScript execution — `bun run <cmd>` is the standard invocation. `npm run <cmd>` also works (npm delegates to bun).
+
+The `mirror:*` commands select `tsconfig.mirror.json`: current source modules in a checkout, compiled modules in published artifacts. Keep that resolver in npm `files`, the bundle, and Docker; the compiler's source-only `tsconfig.json` stays separate.
 
 | Command | Purpose |
 |:--------|:--------|

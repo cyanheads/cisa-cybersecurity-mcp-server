@@ -27,7 +27,7 @@ export interface BackgroundRefreshOptions {
 
 /**
  * Run the boot pass and register the cron jobs. Boot never waits on it — the
- * entry point discards the promise — and it never rejects: a failed pass is
+ * entry point owns the promise — and it never rejects: a failed pass is
  * logged, and the index keeps serving whatever it holds.
  *
  * The boot pass is the same `maintain()` the scheduled job runs: a never-synced
@@ -38,16 +38,43 @@ export interface BackgroundRefreshOptions {
 export async function startBackgroundRefresh(options: BackgroundRefreshOptions): Promise<void> {
   const { kev, mirror } = options;
   const refreshAdvisories = options.csafRefreshCron !== CRON_OFF;
+  const signal = mirror.shutdownSignal;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let retryDelayMs = 1000;
+  signal.addEventListener('abort', () => clearTimeout(retry), { once: true });
 
-  const boot = mirror
-    .maintain({ autoInit: options.csafMirrorAutoInit, refresh: refreshAdvisories })
-    .catch((error: unknown) => {
+  const maintain = async (refresh: boolean): Promise<void> => {
+    if (signal.aborted) return;
+    try {
+      await mirror.maintain({ autoInit: options.csafMirrorAutoInit, refresh });
+    } catch (error: unknown) {
+      if (signal.aborted) return;
       logger.warning(
         `ICS advisory index boot sync failed; a never-seeded index reports mirror_not_ready, an existing one keeps serving its current rows, and the next scheduled pass retries: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-    });
+    }
+    if (signal.aborted || !options.csafMirrorAutoInit) return;
+    /* A lease may have expired or its holder may have finished. Recheck before
+     * seeding, so a completed shared index is reused without another archive. */
+    const availability = await mirror.availability().catch(() => undefined);
+    if (
+      signal.aborted ||
+      !availability ||
+      availability.status === 'ready' ||
+      availability.status === 'unavailable'
+    )
+      return;
+    if (retry) clearTimeout(retry);
+    retry = setTimeout(() => {
+      void maintain(false);
+    }, retryDelayMs);
+    retry.unref();
+    retryDelayMs = Math.min(retryDelayMs * 2, 5000);
+  };
+
+  const boot = maintain(refreshAdvisories);
 
   await Promise.all([
     boot,
@@ -56,14 +83,16 @@ export async function startBackgroundRefresh(options: BackgroundRefreshOptions):
       options.kevRefreshCron,
       () => kev.refresh(),
       'Conditional refresh of the CISA KEV catalog snapshot',
+      signal,
     ),
     scheduleJob(
       'csaf-mirror-refresh',
       options.csafRefreshCron,
       async () => {
-        await mirror.maintain({ autoInit: options.csafMirrorAutoInit, refresh: true });
+        await maintain(true);
       },
       'Incremental refresh of the ICS advisory index; seeds it first under auto-init when it has never synced',
+      signal,
     ),
   ]);
 }
@@ -78,10 +107,22 @@ async function scheduleJob(
   expression: string,
   task: () => Promise<void>,
   description: string,
+  signal: AbortSignal,
 ): Promise<void> {
-  if (expression === CRON_OFF) return;
+  if (expression === CRON_OFF || signal.aborted) return;
   try {
-    await schedulerService.schedule(id, expression, task, description);
+    await schedulerService.schedule(
+      id,
+      expression,
+      async () => {
+        if (!signal.aborted) await task();
+      },
+      description,
+    );
+    if (signal.aborted) {
+      schedulerService.remove(id);
+      return;
+    }
     schedulerService.start(id);
   } catch (error: unknown) {
     logger.warning(

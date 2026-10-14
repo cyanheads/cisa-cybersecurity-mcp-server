@@ -13,6 +13,7 @@
 /wrangler.toml
 /biome.json
 /tsconfig*.json
+!/tsconfig.mirror.json
 /vitest.config.ts
 
 # An advisory index a checkout may hold here — written by an older build's

@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  CsafMirrorService,
   getCsafMirror,
   initCsafMirror,
   resetCsafMirror,
@@ -72,7 +73,8 @@ describe('CsafMirrorService — real ingest path', () => {
     initCsafMirror({ mirrorPath: join(dir, 'csaf.sqlite3'), timeoutMs: 5000 });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await getCsafMirror().close();
     resetCsafMirror();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -93,6 +95,73 @@ describe('CsafMirrorService — real ingest path', () => {
       http.restore();
     }
   }, 30000);
+
+  it('stores and searches standalone and relationship definitions through actual ingest', async () => {
+    const raw = {
+      ...FULL_ADVISORY,
+      product_tree: {
+        full_product_names: [
+          {
+            product_id: 'standalone',
+            name: 'Standalone Controller',
+            product_identification_helper: {
+              cpe: 'cpe:/a:example:<literal>',
+              hashes: [{ filename: 'a', file_hashes: [{ algorithm: 'sha256', value: 'abc' }] }],
+            },
+          },
+        ],
+        relationships: [
+          {
+            category: 'installed_on',
+            product_reference: 'standalone',
+            relates_to_product_reference: 'dangling',
+            full_product_name: { product_id: 'relationship', name: 'Controller on Host' },
+          },
+        ],
+      },
+    };
+    const http = createFetchMock([
+      {
+        match: CSAF_ARCHIVE_URL,
+        respond: () =>
+          buildTarGzResponse([
+            { name: `CSAF-develop/csaf_files/OT/white/${FULL_PATH}`, data: JSON.stringify(raw) },
+          ]),
+      },
+    ]);
+    http.install();
+    try {
+      await getCsafMirror().mirrorInstance.runSync({
+        mode: 'init',
+        signal: AbortSignal.timeout(30_000),
+      });
+    } finally {
+      http.restore();
+    }
+    const doc = await getCsafMirror().getAdvisory('ICSA-26-260-07');
+    const rows = doc?.products.vendors.flatMap((v) => v.products.flatMap((p) => p.versions));
+    expect(rows?.map((r) => r.productId)).toEqual(['standalone', 'relationship']);
+    expect(JSON.parse(rows![0]!.identificationHelper!)).toEqual(
+      raw.product_tree.full_product_names[0]!.product_identification_helper,
+    );
+    for (const product of ['Standalone Controller', 'Controller on Host']) {
+      const filters = {
+        product,
+        sortBy: 'revised' as const,
+        order: 'desc' as const,
+        limit: 1,
+        offset: 0,
+      };
+      expect(
+        (await getCsafMirror().search(filters, createMockContext())).items.map(
+          (item) => item.advisoryId,
+        ),
+      ).toEqual(['ICSA-26-260-07']);
+      expect(
+        (await getCsafMirror().search({ ...filters, offset: 1 }, createMockContext())).items,
+      ).toEqual([]);
+    }
+  });
 
   describe('after a completed init', () => {
     beforeEach(async () => {
@@ -366,6 +435,228 @@ describe('CsafMirrorService — real ingest path', () => {
     });
 
     describe('refresh', () => {
+      it('an all-failed refresh preserves its checkpoint and successful markers and counts every unusable document', async () => {
+        const mirror = getCsafMirror();
+        const before = await mirror.state();
+        const handle = await mirror.mirrorInstance.raw();
+        handle.exec("DELETE FROM mirror_meta WHERE key = 'last_successful_checkpoint'");
+        const manifest = [
+          `"${FULL_PATH}","2026-10-01T00:00:00Z"`,
+          `"${SPARSE_PATH}","2014-02-04T00:00:00.000000Z"`,
+          `"${REPUBLISHED_PATH}","2025-04-10T00:00:00.000000Z"`,
+        ].join('\n');
+        const http = createFetchMock([
+          {
+            match: CSAF_CHANGES_URL,
+            respond: new Response(manifest, { headers: { etag: '"failed"' } }),
+          },
+          {
+            match: (request) => new URL(request.url).origin === new URL(CSAF_OT_BASE).origin,
+            respond: Response.json({}),
+          },
+        ]);
+        http.install();
+        try {
+          await expect(mirror.sync('refresh', AbortSignal.timeout(5000))).rejects.toThrow(
+            /document/,
+          );
+          expect(await mirror.state()).toMatchObject({
+            syncStatus: 'partial',
+            ready: true,
+            documentCount: 3,
+            checkpoint: before.checkpoint,
+            lastCompletedAt: before.lastCompletedAt,
+            lastSuccessfulCheckpoint: before.checkpoint,
+            failedDocumentCount: http.calls.length - 1,
+          });
+          expect(
+            handle.prepare("SELECT value FROM mirror_meta WHERE key = 'changes_csv_etag'").get(),
+          ).toBeUndefined();
+        } finally {
+          http.restore();
+        }
+      });
+
+      it('keeps earlier applied pages when a later document cannot be normalized', async () => {
+        const mirror = getCsafMirror();
+        const before = await mirror.state();
+        const paths = Array.from(
+          { length: 61 },
+          (_, i) => `2026/icsa-26-260-${String(i).padStart(2, '0')}.json`,
+        );
+        const revised = '2026-10-01T00:00:00.000000Z';
+        const http = createFetchMock([
+          {
+            match: CSAF_CHANGES_URL,
+            respond: new Response(paths.map((path) => `"${path}","${revised}"`).join('\n'), {
+              headers: { etag: '"pages"' },
+            }),
+          },
+          {
+            match: (request) => new URL(request.url).origin === new URL(CSAF_OT_BASE).origin,
+            respond: (request) => {
+              const path = new URL(request.url).pathname.split('/').at(-1) ?? '';
+              const id = path.replace('.json', '').toUpperCase();
+              return Response.json(
+                path.endsWith('-60.json')
+                  ? {}
+                  : {
+                      ...FULL_ADVISORY,
+                      document: {
+                        ...FULL_ADVISORY.document,
+                        tracking: {
+                          ...FULL_ADVISORY.document.tracking,
+                          id,
+                          current_release_date: revised,
+                        },
+                      },
+                    },
+              );
+            },
+          },
+        ]);
+        http.install();
+        try {
+          await expect(mirror.sync('refresh', AbortSignal.timeout(5000))).rejects.toThrow(
+            /1 document/,
+          );
+          expect(await mirror.state()).toMatchObject({
+            syncStatus: 'partial',
+            failedDocumentCount: 1,
+            documentCount: 60,
+            checkpoint: revised,
+            lastSuccessfulCheckpoint: before.checkpoint,
+            lastCompletedAt: before.lastCompletedAt,
+          });
+          expect(await mirror.getAdvisory('ICSA-26-260-00')).toBeDefined();
+          expect(await mirror.getAdvisory('ICSA-26-260-59')).toBeDefined();
+          expect(await mirror.getAdvisory('ICSA-26-260-60')).toBeUndefined();
+        } finally {
+          http.restore();
+        }
+      });
+
+      it('keeps seeded rows ready after a failed manifest without advancing successful completion', async () => {
+        const mirror = getCsafMirror();
+        const before = await mirror.state();
+        const http = createFetchMock([
+          { match: CSAF_CHANGES_URL, respond: new Response('not a manifest') },
+        ]);
+        http.install();
+        try {
+          await expect(mirror.sync('refresh', AbortSignal.timeout(5000))).rejects.toThrow(
+            /zero rows/,
+          );
+        } finally {
+          http.restore();
+        }
+        expect(await mirror.state()).toMatchObject({
+          ready: true,
+          documentCount: 3,
+          checkpoint: before.checkpoint,
+          lastCompletedAt: before.lastCompletedAt,
+          syncStatus: 'error',
+        });
+      });
+
+      it.each(['unusable', 'invalid-json', 'upstream'] as const)(
+        'retains partial rows and retries an unchanged manifest after a %s document failure',
+        async (failure) => {
+          const mirror = getCsafMirror();
+          const before = await mirror.state();
+          const coverage = await mirror.coverageCounts();
+          const observer = new CsafMirrorService({
+            mirrorPath: join(dir, 'csaf.sqlite3'),
+            timeoutMs: 5000,
+          });
+          expect(await observer.coverageCounts()).toEqual(coverage);
+          const revised = '2026-09-25T00:00:00.000000Z';
+          const updated = {
+            ...FULL_ADVISORY,
+            document: {
+              ...FULL_ADVISORY.document,
+              tracking: { ...FULL_ADVISORY.document.tracking, current_release_date: revised },
+            },
+          };
+          const manifest = [
+            `"${FULL_PATH}","${revised}"`,
+            `"${SPARSE_PATH}","2026-09-24T00:00:00.000000Z"`,
+          ].join('\n');
+          let recovered = false;
+          const http = createFetchMock([
+            {
+              match: CSAF_CHANGES_URL,
+              respond: (request) =>
+                request.headers.get('if-none-match') === '"partial"'
+                  ? new Response(null, { status: 304 })
+                  : new Response(manifest, { headers: { etag: '"partial"' } }),
+            },
+            { match: `${CSAF_OT_BASE}/${FULL_PATH}`, respond: () => Response.json(updated) },
+            {
+              match: `${CSAF_OT_BASE}/${SPARSE_PATH}`,
+              respond: () =>
+                recovered
+                  ? Response.json({
+                      ...SPARSE_ADVISORY,
+                      document: {
+                        ...SPARSE_ADVISORY.document,
+                        tracking: {
+                          ...SPARSE_ADVISORY.document.tracking,
+                          current_release_date: '2026-09-24T00:00:00.000000Z',
+                        },
+                      },
+                    })
+                  : failure === 'upstream'
+                    ? new Response('unavailable', { status: 503 })
+                    : failure === 'invalid-json'
+                      ? new Response('{')
+                      : Response.json({}),
+            },
+          ]);
+          http.install();
+          try {
+            await expect(mirror.sync('refresh', AbortSignal.timeout(30_000))).rejects.toThrow(
+              /1.*document/,
+            );
+            expect(await mirror.state()).toMatchObject({
+              ready: true,
+              syncStatus: 'partial',
+              failedDocumentCount: 1,
+              documentCount: 2,
+              checkpoint: revised,
+              lastCompletedAt: before.lastCompletedAt,
+              lastSuccessfulCheckpoint: before.checkpoint,
+            });
+            expect(await mirror.coverageCounts()).toEqual({ ...coverage, total: 2, noCvss: 0 });
+            expect(await observer.coverageCounts()).toEqual({ ...coverage, total: 2, noCvss: 0 });
+            expect((await mirror.getAdvisory('ICSA-26-260-07'))?.advisory.revised).toBe(revised);
+            expect((await mirror.getAdvisory('ICSA-14-035-01'))?.advisory.revised).toBe(
+              SPARSE_ADVISORY.document.tracking.current_release_date,
+            );
+            const recoveredStart = http.calls.length;
+            recovered = true;
+            await mirror.sync('refresh', AbortSignal.timeout(30_000));
+            expect(http.calls.slice(recoveredStart).map((call) => call.request.url)).toEqual([
+              CSAF_CHANGES_URL,
+              `${CSAF_OT_BASE}/${SPARSE_PATH}`,
+            ]);
+            expect(await mirror.state()).toMatchObject({
+              ready: true,
+              syncStatus: 'complete',
+              failedDocumentCount: 0,
+              documentCount: 2,
+              lastSuccessfulCheckpoint: revised,
+            });
+            await mirror.sync('refresh', AbortSignal.timeout(30_000));
+            expect(http.calls.at(-1)?.request.headers.get('if-none-match')).toBe('"partial"');
+          } finally {
+            http.restore();
+            await observer.close();
+          }
+        },
+        30000,
+      );
+
       it('coverageCounts reports the corpus a completed sync left behind, without a restart', async () => {
         expect(await getCsafMirror().coverageCounts()).toEqual({
           total: 3,

@@ -1,8 +1,8 @@
 /**
  * @fileoverview Minimal ustar + gzip builder for CSAF archive fixtures in tests.
  * Builds just enough of the tar format for `iterateTarGz` to parse: a 512-byte
- * ustar header per entry (no GNU long names, no pax headers — every fixture
- * path stays under 100 bytes) followed by the file content padded to a 512-byte
+ * ustar header per entry, with optional metadata type flags and prefixes,
+ * followed by the file content padded to a 512-byte
  * boundary, terminated by two zero blocks.
  * @module tests/fixtures/tar
  */
@@ -24,7 +24,7 @@ function writeOctal(block: Uint8Array, offset: number, length: number, value: nu
   block[offset + length - 1] = 0;
 }
 
-function buildHeader(name: string, size: number): Uint8Array {
+function buildHeader(name: string, size: number, typeFlag = '0', prefix = ''): Uint8Array {
   if (encoder.encode(name).length > 100) {
     throw new Error(`Fixture tar entry name exceeds 100 bytes: ${name}`);
   }
@@ -37,7 +37,8 @@ function buildHeader(name: string, size: number): Uint8Array {
   writeOctal(header, 136, 12, 0);
   /* Checksum field starts as eight spaces while the sum is computed. */
   header.fill(0x20, 148, 156);
-  header[156] = '0'.charCodeAt(0); /* typeflag: regular file */
+  header[156] = typeFlag.charCodeAt(0);
+  writeString(header, 345, 155, prefix);
   writeString(header, 257, 5, 'ustar');
   header[262] = 0;
   writeString(header, 263, 2, '00');
@@ -61,6 +62,8 @@ export interface TarFixtureEntry {
    */
   declaredSize?: number;
   name: string;
+  prefix?: string;
+  typeFlag?: string;
 }
 
 /** Build a gzip-compressed ustar archive from a list of entries, as a `Response`. */
@@ -68,7 +71,9 @@ export function buildTarGzResponse(entries: TarFixtureEntry[], init?: ResponseIn
   const parts: Uint8Array[] = [];
   for (const entry of entries) {
     const content = encoder.encode(entry.data);
-    parts.push(buildHeader(entry.name, entry.declaredSize ?? content.length));
+    parts.push(
+      buildHeader(entry.name, entry.declaredSize ?? content.length, entry.typeFlag, entry.prefix),
+    );
     parts.push(content);
     const remainder = content.length % BLOCK;
     if (remainder !== 0) parts.push(new Uint8Array(BLOCK - remainder));

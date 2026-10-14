@@ -21,6 +21,8 @@ import { initKevCatalog } from './services/kev-catalog/kev-catalog-service.js';
 import { startBackgroundRefresh } from './services/refresh-schedule.js';
 import { initVulnrichment } from './services/vulnrichment/vulnrichment-service.js';
 
+let backgroundRefresh: Promise<void> | undefined;
+
 await createApp({
   name: 'cisa-cybersecurity-mcp-server',
   title: 'cisa-cybersecurity-mcp-server',
@@ -58,7 +60,7 @@ await createApp({
     kev.primeInBackground();
 
     /* The boot pass over the advisory index and both refresh schedules, on every transport. */
-    void startBackgroundRefresh({
+    backgroundRefresh = startBackgroundRefresh({
       csafMirrorAutoInit: config.csafMirrorAutoInit,
       csafRefreshCron: config.csafRefreshCron,
       kevRefreshCron: config.kevRefreshCron,
@@ -68,5 +70,8 @@ await createApp({
   },
 
   /* The framework already tears the scheduler down; an in-flight index sync and the SQLite handle are ours. */
-  teardown: closeCsafMirror,
+  async teardown() {
+    await closeCsafMirror();
+    await backgroundRefresh;
+  },
 });

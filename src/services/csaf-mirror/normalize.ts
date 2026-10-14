@@ -172,6 +172,7 @@ export function flattenProductTree(productTree: unknown): AdvisoryProducts {
     Map<string, { family?: string; versions: AdvisoryVersionRow[] }>
   >();
   let productCount = 0;
+  const seen = new Map<string, AdvisoryVersionRow>();
 
   const walk = (branches: unknown, state: FlattenState): void => {
     if (!Array.isArray(branches)) return;
@@ -188,7 +189,7 @@ export function flattenProductTree(productTree: unknown): AdvisoryProducts {
 
       const product = isRecord(branch.product) ? branch.product : undefined;
       const productId = product ? str(product.product_id) : undefined;
-      if (productId) {
+      if (productId && !seen.has(productId)) {
         productCount += 1;
         const vendorName = next.vendor ?? 'Unspecified';
         const productLabel = next.productName ?? str(product?.name) ?? name ?? 'Unspecified';
@@ -203,7 +204,18 @@ export function flattenProductTree(productTree: unknown): AdvisoryProducts {
           versions: [],
         };
         products.set(productLabel, entry);
-        entry.versions.push({ kind: category || 'product', value, productId });
+        const fullName = str(product?.name);
+        const row: AdvisoryVersionRow = {
+          kind: category || 'product',
+          value,
+          productId,
+          ...(fullName !== undefined ? { name: fullName } : {}),
+          ...(isRecord(product?.product_identification_helper)
+            ? { identificationHelper: JSON.stringify(product.product_identification_helper) }
+            : {}),
+        };
+        entry.versions.push(row);
+        seen.set(productId, row);
       }
 
       walk(branch.branches, next);
@@ -216,6 +228,61 @@ export function flattenProductTree(productTree: unknown): AdvisoryProducts {
     productName: undefined,
     suffixes: [],
   });
+
+  const addDefinition = (
+    definition: unknown,
+    relationship?: Pick<
+      AdvisoryVersionRow,
+      'relationshipCategory' | 'productReference' | 'relatesToProductReference'
+    >,
+  ): void => {
+    if (!isRecord(definition)) return;
+    const productId = str(definition.product_id);
+    const name = str(definition.name);
+    if (!productId || !name) return;
+    const existing = seen.get(productId);
+    if (existing) {
+      if (relationship) Object.assign(existing, relationship);
+      return;
+    }
+    const products =
+      vendors.get('Unspecified') ?? new Map<string, { versions: AdvisoryVersionRow[] }>();
+    vendors.set('Unspecified', products);
+    const entry = products.get(name) ?? { versions: [] };
+    products.set(name, entry);
+    const row: AdvisoryVersionRow = {
+      kind: relationship ? 'relationship' : 'full_product_name',
+      value: name,
+      name,
+      productId,
+      ...relationship,
+      ...(isRecord(definition.product_identification_helper)
+        ? { identificationHelper: JSON.stringify(definition.product_identification_helper) }
+        : {}),
+    };
+    entry.versions.push(row);
+    seen.set(productId, row);
+    productCount += 1;
+  };
+  if (isRecord(productTree)) {
+    if (Array.isArray(productTree.full_product_names)) {
+      for (const definition of productTree.full_product_names) addDefinition(definition);
+    }
+    if (Array.isArray(productTree.relationships)) {
+      for (const relationship of productTree.relationships) {
+        if (!isRecord(relationship)) continue;
+        const category = str(relationship.category);
+        const productReference = str(relationship.product_reference);
+        const relatesToProductReference = str(relationship.relates_to_product_reference);
+        addDefinition(
+          relationship.full_product_name,
+          category && productReference && relatesToProductReference
+            ? { relationshipCategory: category, productReference, relatesToProductReference }
+            : undefined,
+        );
+      }
+    }
+  }
 
   const flattened: AdvisoryVendor[] = [...vendors.entries()].map(([name, products]) => ({
     name,
@@ -235,7 +302,7 @@ export function flattenProductTree(productTree: unknown): AdvisoryProducts {
 }
 
 /** Internal alias so the walker's row shape reads clearly above. */
-type AdvisoryVersionRow = { kind: string; productId: string; value: string };
+type AdvisoryVersionRow = import('./types.js').AdvisoryVersion;
 
 // ── CVSS ────────────────────────────────────────────────────────────────────
 
@@ -537,7 +604,12 @@ export function toMirrorRow(doc: NormalizedAdvisory, sourcePath: string): Mirror
   const maxCvss = computeMaxCvss(doc.vulnerabilities);
   const vendorNames = doc.products.vendors.map((vendor) => vendor.name);
   const productNames = doc.products.vendors.flatMap((vendor) =>
-    vendor.products.map((product) => product.name),
+    vendor.products.flatMap((product) => [
+      ...new Set([
+        product.name,
+        ...product.versions.flatMap((version) => (version.name ? [version.name] : [])),
+      ]),
+    ]),
   );
   const cves = [...new Set(doc.vulnerabilities.map((vulnerability) => vulnerability.cve))];
 
