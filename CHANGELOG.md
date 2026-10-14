@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-14
+
+cisa_get_advisory keeps relationship products and selects them with productIds; impossible calendar dates are rejected on all nine date filters; KEV, feed, and advisory-index refreshes no longer hide failures; mirror:refresh works from the published package.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-10-08
 
 mcp-ts-core 0.13.14: error results carry their request ID; a numeric string for a number, a lone string for a list, and null for an optional field are repaired before validation; and an advisory index that cannot be opened no longer names its directory.

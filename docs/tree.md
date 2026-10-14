@@ -1,6 +1,6 @@
 # cisa-cybersecurity-mcp-server - Directory Structure
 
-Generated on: 2026-10-09 06:44:53
+Generated on: 2026-10-14 19:36:31
 
 ```text
 cisa-cybersecurity-mcp-server/
@@ -269,6 +269,7 @@ cisa-cybersecurity-mcp-server/
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json
+├── tsconfig.mirror.json
 └── vitest.config.ts
 ```
 
