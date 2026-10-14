@@ -54,6 +54,9 @@ export async function startBackgroundRefresh(options: BackgroundRefreshOptions):
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      /* The recheck below is for a seed skipped under contention. Retrying a seed
+       * that failed would re-request the whole archive every few seconds. */
+      return;
     }
     if (signal.aborted || !options.csafMirrorAutoInit) return;
     /* A lease may have expired or its holder may have finished. Recheck before

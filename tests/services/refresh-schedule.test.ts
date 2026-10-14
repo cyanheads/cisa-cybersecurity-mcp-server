@@ -206,6 +206,27 @@ describe('startBackgroundRefresh', () => {
       }
     });
 
+    it('a failed first seed is not retried on the recheck timer', async () => {
+      vi.useFakeTimers();
+      const http = createFetchMock([
+        { match: CSAF_ARCHIVE_URL, respond: () => new Response('missing', { status: 404 }) },
+      ]);
+      http.install();
+      try {
+        await startBackgroundRefresh(
+          options({ csafMirrorAutoInit: true, csafRefreshCron: 'off', kevRefreshCron: 'off' }),
+        );
+        const attempts = http.calls.length;
+        expect(attempts).toBeGreaterThan(0);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(http.calls).toHaveLength(attempts);
+        expect(await getCsafMirror().ready()).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        http.restore();
+      }
+    });
+
     it('close cancels a queued first-seed retry and does not release another owner lease', async () => {
       vi.useFakeTimers();
       const mirror = getCsafMirror();
