@@ -29,7 +29,7 @@
 
 ## Overview
 
-CISA's open vulnerability data: the Known Exploited Vulnerabilities catalog and its federal remediation deadlines, the SSVC decision points CISA publishes per CVE in Vulnrichment, the CSAF corpus of industrial control system advisories back to 2010, and CISA's publication feeds. Check a scan's worth of CVE IDs against KEV in one call, find what is overdue for a vendor, work out the BOD 26-04 timeline for an asset you own, and search or read ICS advisories. Every source is keyless. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+CISA's vulnerability data in one place: the Known Exploited Vulnerabilities catalog with its remediation deadlines, per-CVE SSVC decision points, ICS advisories back to 2010, and CISA's latest alerts. Check a scan's worth of CVEs against KEV in one call, find what's overdue for a vendor, and work out BOD 26-04 timelines. No API key required.
 
 ### Tools
 
@@ -71,9 +71,8 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 ### `cisa_search_kev` <sub>tool</sub>
 
-- Filters AND together over the whole snapshot: `vendorProject` and `product` (CISA's own labels, not CPE names), `nameContains`, `cwe`, `cveIdPrefix`, `dateAddedFrom` / `dateAddedTo`, `dueBefore` / `dueAfter`, `overdue`, `ransomware`, `forensicTriage`, `directive` (`BOD 26-04` / `BOD 22-01` / `none`); up to 100 per page (default 25) with an opaque `cursor`. `cwe` and `cveIdPrefix` normalize case and surrounding whitespace
-- Sorts by `dateAdded` (default) or `dueDate` and reports `totalCount` and `appliedFilters`; a zero-hit result names the filter that matches nothing on its own and what dropping it restores, or the filters whose removal restores results and how many
-- `nameContains` matches the letters a-z and the digits 0-9 after folding case and accents and spelling letters such as `ß`, `æ`, and `ø` as `ss`, `ae`, and `o`; any other letter or digit, such as a word in another script, is dropped, and the notice names it and the tokens actually searched
+- Filters AND together: `vendorProject` and `product` (CISA's own labels, not CPE names), `nameContains`, `cwe`, `cveIdPrefix`, `dateAddedFrom` / `dateAddedTo`, `dueBefore` / `dueAfter`, `overdue`, `ransomware`, `forensicTriage`, `directive` (`BOD 26-04` / `BOD 22-01` / `none`); up to 100 per page (default 25) with an opaque `cursor`; sorts by `dateAdded` (default) or `dueDate`
+- Reports `totalCount` and `appliedFilters`; a zero-hit result names the filter responsible and what dropping it restores. `nameContains` searches a-z and 0-9 after folding case and accents, and the notice names any other characters it dropped
 - Typed errors: `catalog_unavailable` (retryable), `invalid_date_range`, `empty_search_text`
 
 ---
@@ -88,20 +87,17 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 ### `cisa_search_ics_advisories` <sub>tool</sub>
 
-- Full-text `q` over titles, vendor names, and product names, plus `vendor`, `product`, `cve`, `cwe`, `inKev`, `cvssMin` / `cvssMax`, `severity`, `sector`, `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` / `other`), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`; sorts by `revised` (default), `published`, `maxCvss`, or `relevance` (needs `q`); up to 50 per page (default 20) with an opaque `cursor`. `cve` and `cwe` normalize case and surrounding whitespace
-- Results carry `advisoryId`, up to 20 `cves` with `cveCount`, `kevCves`, `maxCvss` with `severityDerived`, `sectors`, `url`, `csafUrl`, and `attribution`; without `inKev`, an unloaded KEV snapshot leaves `kevCves` out and says so rather than failing
-- Reports `totalCount` and `appliedFilters`; a zero-hit result names the filter that matches nothing on its own and what dropping it restores, or the filters whose removal restores results and how many
-- `vendor` and `product` are case-insensitive substrings matched literally, non-ASCII capitals included, so a label copied from a result matches its own advisories
+- Full-text `q` over titles, vendor names, and product names, plus `vendor`, `product` (case-insensitive substrings), `cve`, `cwe`, `inKev`, `cvssMin` / `cvssMax`, `severity`, `sector`, `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` / `other`), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`; sorts by `revised` (default), `published`, `maxCvss`, or `relevance` (needs `q`); up to 50 per page (default 20) with an opaque `cursor`
+- Results carry `advisoryId`, up to 20 `cves` with `cveCount`, `kevCves`, `maxCvss` with `severityDerived`, `sectors`, `url`, `csafUrl`, and `attribution`, plus `totalCount` and `appliedFilters`; a zero-hit result names the filter responsible. If the KEV snapshot isn't loaded, `kevCves` is left out and says so
 - Typed errors: `mirror_not_ready`, `mirror_busy`, and `catalog_unavailable` (retryable), `mirror_unavailable`, `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
 
 ---
 
 ### `cisa_get_advisory` <sub>tool</sub>
 
-- `advisoryId` (optional revision suffix; case, surrounding whitespace, and a trailing `.json` are normalized), optional `sections` (`advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`), `cves` to select vulnerability entries, and `productIds` to select exact, case-sensitive product definitions
-- Nonempty selectors imply their target sections when `sections` is omitted or empty; explicit sections must include those targets. Empty selectors behave as omitted. Product selection preserves whole-document `productCount`/`vendorCount` and reports returned definitions in `shownProducts`; relationship components are referenced without automatic expansion
-- Returns `kind: "full"`, or `kind: "outline"` when a document read without `sections` exceeds the 24,000-byte budget: per-section byte sizes plus the CVE IDs in `vulnerabilities`, for a stateless re-call
-- An ID not in the index returns `found: false` with `guidance`, `indexCheckpoint`, and `indexLastSyncedAt`; the guidance says when the ID's own date is later than the last sync, so the advisory may be newer than the index
+- `advisoryId` (optional revision suffix), optional `sections` (`advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`), `cves` to pick vulnerability entries, and `productIds` to pick exact, case-sensitive product definitions; `cves` and `productIds` imply their sections
+- Returns `kind: "full"`, or `kind: "outline"` (per-section byte sizes plus the CVE IDs) when a read without `sections` exceeds 24,000 bytes; re-call with `sections`
+- An ID not in the index returns `found: false` with `guidance`, `indexCheckpoint`, and `indexLastSyncedAt`; the guidance notes when the advisory may be newer than the index
 - Typed errors: `mirror_not_ready` and `mirror_busy` (retryable), `mirror_unavailable`, `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`, `unknown_product_id`, `product_ids_need_products_section`
 
 ---
@@ -109,7 +105,8 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 ### `cisa_get_alerts` <sub>tool</sub>
 
 - `feed`: `advisories` (default), `alerts`, or `ics`; `limit` up to 30, the upstream window size; `since` (`YYYY-MM-DD`) filters within that window and cannot reach past it
-- Items carry `title`, `link`, `pubDate`, `summary` (HTML stripped, capped at 1,200 characters, flagged by `summaryTruncated`), and on ICS items an `advisoryId` for `cisa_get_advisory`; `window` reports `itemCount`, `oldest`, `newest`, and `upstreamWindowSize`. Every response carries `fetchedAt` and `stale`; refresh failure retains the last window with retry guidance, within a 45-second total budget. A stale empty result cannot confirm current publication absence. Cold failure returns `feed_unavailable` (retryable)
+- Items carry `title`, `link`, `pubDate`, `summary` (HTML stripped, capped at 1,200 characters, flagged by `summaryTruncated`), and on ICS items an `advisoryId` for `cisa_get_advisory`; `window` reports `itemCount`, `oldest`, `newest`, and `upstreamWindowSize`
+- Every response carries `fetchedAt` and `stale`; if a refresh fails, the last window is returned as stale with retry guidance, and a stale empty result doesn't prove nothing was published. With no cached window, `feed_unavailable` (retryable)
 
 ---
 
@@ -132,16 +129,16 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 CISA-specific:
 
 - Four public sources, no account or key: the KEV JSON feed, Vulnrichment, the CSAF ICS advisory repository, and CISA's RSS feeds
-- None of them offers search, so every filter runs locally: KEV as an in-memory snapshot kept current by a conditional-GET poll, ICS advisories as a SQLite index with FTS5. All date filters require real calendar dates in `YYYY-MM-DD`
-- KEV snapshots are accepted whole: unusable membership records, duplicate normalized CVEs, or inconsistent envelope/counts reject the refresh and retain the last valid snapshot and conditional-fetch state. Without a valid snapshot, reads return retryable `catalog_unavailable`
-- Boot never waits on the advisory index; the KEV, SSVC, and alert tools serve from the first request while it seeds in the background
-- BOD 26-04 Table 1 ships as data, so a computed timeline is a table lookup over published decision points. It is not a compliance determination, and it is reported beside CISA's assigned KEV due date, never reconciled with it
+- None of them offers search, so filters run locally: KEV from an in-memory snapshot polled for changes, ICS advisories from a SQLite index with FTS5. Date filters take real calendar dates in `YYYY-MM-DD`
+- A bad KEV refresh is rejected and the last valid snapshot stays in use; with none, reads return retryable `catalog_unavailable`
+- The KEV, SSVC, and alert tools serve from the first request while the advisory index seeds in the background
+- BOD 26-04 Table 1 ships as data, so a computed timeline is a table lookup over published decision points. It is not a compliance determination, and it is reported beside CISA's KEV due date, never reconciled with it
 
 Agent-friendly output:
 
 - Provenance on every response: the KEV `catalog` version and `asOf` date, the index checkpoint behind a search, and `url`, `csafUrl`, and `attribution` on every advisory
 - Discriminated outputs: a three-state `directive`, typed `references[].kind`, `found` / `inKev` booleans, `severityDerived` on a band upstream never published, and typed error reasons with recovery hints
-- Empty results and upstream gaps explain themselves: a zero-hit search names the filter responsible and the next call, and filters that hit a known gap (sector notes only from 2017, CVSS v2-only advisories, no KEV revision timestamps) say so in the response. The full list is under [Known Limitations](./docs/design.md#known-limitations) in the design doc
+- Empty results and upstream gaps explain themselves: a zero-hit search names the filter responsible, and filters that hit a known gap (sector notes only from 2017, CVSS v2-only advisories, no KEV revision timestamps) say so. See [Known Limitations](./docs/design.md#known-limitations)
 
 ## Getting started
 
@@ -255,11 +252,11 @@ Every variable is optional; the server runs correctly with none of them set.
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `CISA_KEV_REFRESH_CRON` | Cron for the KEV conditional-refresh poll, on every transport. `off` disables it; an invalid expression fails startup. | `*/30 * * * *` |
-| `CISA_CSAF_MIRROR_PATH` | Filesystem path to the ICS advisory SQLite index. | `<user cache dir>/cisa-cybersecurity-mcp-server/csaf.sqlite3` |
-| `CISA_CSAF_MIRROR_AUTO_INIT` | Seed the index in the background when it has never synced, and re-ingest one an older version built. | `true` |
-| `CISA_CSAF_REFRESH_CRON` | Cron for the incremental advisory refresh, on every transport; it also runs once at startup. `off` disables both; an invalid expression fails startup. | `17 */6 * * *` |
-| `CISA_VULNRICHMENT_CACHE_TTL_SECONDS` | TTL for a cached SSVC record; negative results use one sixth of it. | `21600` |
+| `CISA_KEV_REFRESH_CRON` | Cron for the KEV refresh poll; `off` disables it. | `*/30 * * * *` |
+| `CISA_CSAF_MIRROR_PATH` | Path to the ICS advisory SQLite index. | `<user cache dir>/cisa-cybersecurity-mcp-server/csaf.sqlite3` |
+| `CISA_CSAF_MIRROR_AUTO_INIT` | Seed the index in the background on first run. | `true` |
+| `CISA_CSAF_REFRESH_CRON` | Cron for the advisory refresh (also runs once at startup); `off` disables both. | `17 */6 * * *` |
+| `CISA_VULNRICHMENT_CACHE_TTL_SECONDS` | TTL for a cached SSVC record. | `21600` |
 | `CISA_FEED_CACHE_TTL_SECONDS` | TTL for a parsed RSS feed window. | `900` |
 | `CISA_HTTP_TIMEOUT_MS` | Per-request timeout for every upstream fetch, in ms. | `30000` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
@@ -299,9 +296,9 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### ICS advisory index
 
-The two ICS tools and the advisory resource read a local SQLite index of the CSAF corpus at `CISA_CSAF_MIRROR_PATH`. Unset, it lives in your user cache directory — `~/Library/Caches` on macOS, `$XDG_CACHE_HOME` or `~/.cache` on Linux, `%LOCALAPPDATA%` on Windows — under `cisa-cybersecurity-mcp-server/csaf.sqlite3`, whatever directory the client starts the server from. On first run the server builds it in the background from one repository archive; until it is ready those surfaces return a retryable `mirror_not_ready`, and `cisa_list_reference` with topic `sources` shows progress. An index built by an older version re-ingests on the next start and keeps serving its current rows meanwhile. The `.mcpb` bundle needs nothing beyond that background seed. If the path cannot be opened (not writable, read-only, a missing directory, a file that is not a SQLite database), the ICS surfaces fail with a non-retryable `mirror_unavailable`, `sources` says why, and every other tool keeps working.
+The two ICS tools and the advisory resource read a local SQLite index of the CSAF corpus at `CISA_CSAF_MIRROR_PATH`, defaulting to your user cache directory. On first run the server builds it in the background; until it is ready those surfaces return a retryable `mirror_not_ready`, and `cisa_list_reference` with topic `sources` shows progress. If the path cannot be opened, the ICS surfaces fail with a non-retryable `mirror_unavailable` and every other tool keeps working.
 
-On every transport, the server refreshes the index once at startup and then on `CISA_CSAF_REFRESH_CRON`, and polls KEV on `CISA_KEV_REFRESH_CRON`. Server processes that share one index — every stdio session uses the default path — take a lease before seeding or refreshing it, so only one syncs at a time and the rest keep serving reads. For containers, CI, or seeding out of band (`CISA_CSAF_MIRROR_AUTO_INIT=false`, and `CISA_CSAF_REFRESH_CRON=off` to leave refreshes to you), run the scripts directly; they take the same lease:
+Processes sharing one index take turns syncing it. For containers, CI, or seeding out of band (`CISA_CSAF_MIRROR_AUTO_INIT=false`, and `CISA_CSAF_REFRESH_CRON=off` to leave refreshes to you), run the scripts directly:
 
 ```sh
 bun run mirror:init      # full build, idempotent, safe to re-run after an interrupt
@@ -309,9 +306,7 @@ bun run mirror:refresh   # requires a completed mirror:init; fetches changed doc
 bun run mirror:verify    # readiness, sync status, checkpoint, count, content version, SQLite integrity; non-zero on failure
 ```
 
-A transient SQLite lock returns retryable `mirror_busy`; retry shortly. When an automatic first seed finds another process syncing, it rechecks in the background with a delay capped at five seconds, even with the refresh cron `off`. It reuses an index the other process finishes, or seeds after the lease expires. Shutdown cancels boot work and retries, aborts active sync, and releases only its own lease.
-
-A partial refresh keeps successfully applied rows readable and retries unresolved documents on the next refresh. Topic `sources` reports `syncStatus: partial` and `failedDocumentCount`; `lastCompletedAt` and `lastSuccessfulCheckpoint` stay at the last wholly successful sync, while `checkpoint` remains the newest revision ingested. Document and coverage counts reflect applied rows immediately. `mirror:refresh` and `mirror:verify` exit non-zero for a partial refresh; the manifest ETag is committed only after every changed document succeeds.
+A transient SQLite lock returns retryable `mirror_busy`; retry shortly. After a partial refresh, applied rows stay readable and failed documents are retried next time; `sources` reports `syncStatus: partial` and `failedDocumentCount`, and `mirror:refresh` and `mirror:verify` exit non-zero.
 
 ### Docker
 
