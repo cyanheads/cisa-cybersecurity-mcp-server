@@ -22,6 +22,7 @@ import { CSAF_ARCHIVE_URL } from '@/services/csaf-mirror/ingest.js';
 import {
   buildOversizedAdvisory,
   FULL_ADVISORY,
+  GROUPED_ADVISORY,
   sparseAdvisoryAs,
 } from '../../../fixtures/csaf-documents.js';
 import { buildTarGzResponse } from '../../../fixtures/tar.js';
@@ -72,6 +73,30 @@ describe('cisa://advisory/{advisoryId} resource', () => {
     );
     expect(error).toBeInstanceOf(McpError);
     expect((error as McpError).data).toMatchObject({ reason: 'mirror_not_ready', retryable: true });
+  });
+
+  it('keeps the same scoped vulnerability fields through the resource output schema', async () => {
+    await seedMirror([
+      {
+        name: 'CSAF-develop/csaf_files/OT/white/2026/icsa-26-260-07.json',
+        data: JSON.stringify(GROUPED_ADVISORY),
+      },
+    ]);
+    const output = advisoryOutput.parse(
+      await icsAdvisoryResource.handler(
+        advisoryParams.parse({ advisoryId: 'ICSA-26-260-07' }),
+        createMockContext(),
+      ),
+    );
+    expect(output.vulnerabilities?.[0]?.remediations[0]?.productIds).toEqual(['D', 'A', 'B', 'C']);
+    expect(output.vulnerabilities?.[0]?.flags?.[0]?.groupIds).toEqual([
+      'second',
+      'missing',
+      'first',
+    ]);
+    expect(output.vulnerabilities?.[0]?.threats?.[0]?.details).toBe(
+      'No <component> or *execution*.',
+    );
   });
 
   it('list() returns an empty array before the mirror is ready', async () => {
@@ -211,6 +236,8 @@ describe('cisa://advisory/{advisoryId} resource', () => {
       const params = advisoryParams.parse({ advisoryId: 'ICSA-26-003-01' });
       const result = await icsAdvisoryResource.handler(params, ctx);
       expect(result.kind).toBe('outline');
+      expect(result.advisory?.advisoryId).toBe('ICSA-26-003-01');
+      expect(result.advisory?.attribution).toContain('Authored by CISA');
       expect(result.sections).toBeDefined();
       expect(result.sections?.length).toBeGreaterThan(0);
       expect(result.outlineNotice).toBeDefined();

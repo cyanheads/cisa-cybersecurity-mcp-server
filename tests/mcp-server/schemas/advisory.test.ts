@@ -11,6 +11,7 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
 import {
   AdvisoryOutlineSectionSchema,
+  AdvisoryVulnerabilitySchema,
   advisoryCves,
   cvesNarrowingHint,
   extractAdvisorySections,
@@ -26,7 +27,7 @@ import {
   renderOutlineCves,
 } from '@/mcp-server/schemas/advisory.js';
 import { normalizeAdvisory } from '@/services/csaf-mirror/normalize.js';
-import { FULL_ADVISORY, SPARSE_ADVISORY } from '../../fixtures/csaf-documents.js';
+import { FULL_ADVISORY, GROUPED_ADVISORY, SPARSE_ADVISORY } from '../../fixtures/csaf-documents.js';
 
 describe('isEmptySection', () => {
   it('treats null and undefined as empty', () => {
@@ -256,6 +257,30 @@ describe('renderAdvisoryProducts', () => {
 });
 
 describe('renderAdvisoryVulnerabilities', () => {
+  it('validates old rows without the new arrays and renders them identically to empty arrays', () => {
+    const doc = normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json')!;
+    const { flags: _flags, threats: _threats, ...legacy } = doc.vulnerabilities[0]!;
+    const parsed = AdvisoryVulnerabilitySchema.parse(legacy);
+    expect(parsed).not.toHaveProperty('flags');
+    expect(parsed).not.toHaveProperty('threats');
+    expect(renderAdvisoryVulnerabilities([parsed])).toEqual(
+      renderAdvisoryVulnerabilities(doc.vulnerabilities),
+    );
+  });
+
+  it('renders resolved applicability and unresolved references while escaping threat details', () => {
+    const doc = normalizeAdvisory(GROUPED_ADVISORY, '2026/icsa-26-260-07.json')!;
+    const parsed = doc.vulnerabilities.map((entry) => AdvisoryVulnerabilitySchema.parse(entry));
+    const text = renderAdvisoryVulnerabilities(parsed).join('\n');
+    expect(text).toContain('Fix &lt;component&gt; → D, A, B, C (groups: second, missing, first)');
+    expect(text).toContain(
+      '**Flag (component\\_not\\_present):** A, B, C (groups: second, missing, first)',
+    );
+    expect(text).toContain(
+      '**Threat (impact):** No &lt;component&gt; or \\*execution\\*. → D, A, B, C',
+    );
+    expect(parsed[0]?.threats?.[0]?.details).toBe('No <component> or *execution*.');
+  });
   it('renders command placeholders and metacharacters as visible literal text', () => {
     const doc = normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json');
     if (!doc) throw new Error('expected document');

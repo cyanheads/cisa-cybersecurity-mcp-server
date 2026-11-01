@@ -219,6 +219,10 @@ export const AdvisoryVulnerabilitySchema = z
                 'CSAF remediation category: mitigation, vendor_fix, workaround, none_available, or no_fix_planned.',
               ),
             details: z.string().describe('The remediation instructions, verbatim.'),
+            groupIds: z
+              .array(z.string().describe('One verbatim CSAF group reference.'))
+              .optional()
+              .describe('Upstream group references, including unresolved groups.'),
             url: z.string().optional().describe('Vendor link for the remediation, when present.'),
             productIds: z
               .array(z.string().describe('One CSAFPID token.'))
@@ -231,6 +235,41 @@ export const AdvisoryVulnerabilitySchema = z
           .describe('One remediation entry.'),
       )
       .describe('Remediations for this vulnerability.'),
+    flags: z
+      .array(
+        z
+          .object({
+            label: z.string().describe('CSAF flag label, verbatim.'),
+            productIds: z
+              .array(z.string().describe('One exact product ID.'))
+              .describe('Direct product IDs and resolved group members.'),
+            groupIds: z
+              .array(z.string().describe('One verbatim group reference.'))
+              .optional()
+              .describe('Upstream group references, including unresolved groups.'),
+          })
+          .describe('One scoped vulnerability flag.'),
+      )
+      .optional()
+      .describe('Vulnerability flags; absent on rows awaiting re-ingest.'),
+    threats: z
+      .array(
+        z
+          .object({
+            category: z.string().describe('CSAF threat category, verbatim.'),
+            details: z.string().describe('Threat details, verbatim.'),
+            productIds: z
+              .array(z.string().describe('One exact product ID.'))
+              .describe('Direct product IDs and resolved group members.'),
+            groupIds: z
+              .array(z.string().describe('One verbatim group reference.'))
+              .optional()
+              .describe('Upstream group references, including unresolved groups.'),
+          })
+          .describe('One scoped vulnerability threat.'),
+      )
+      .optional()
+      .describe('Vulnerability threats; absent on rows awaiting re-ingest.'),
     productStatus: z
       .object({
         known_affected: z
@@ -572,7 +611,17 @@ export function renderAdvisoryVulnerabilities(vulnerabilities: Vulnerability[]):
           remediation.url ? ` — ${remediation.url}` : ''
         }${remediation.restartRequired ? ` (restart: ${remediation.restartRequired})` : ''} → ${
           remediation.productIds.join(', ') || 'no product ids'
-        }`,
+        }${remediation.groupIds ? ` (groups: ${remediation.groupIds.join(', ')})` : ''}`,
+      );
+    }
+    for (const flag of vulnerability.flags ?? []) {
+      lines.push(
+        `**Flag (${flag.label}):** ${flag.productIds.join(', ') || 'no product ids'}${flag.groupIds ? ` (groups: ${flag.groupIds.join(', ')})` : ''}`,
+      );
+    }
+    for (const threat of vulnerability.threats ?? []) {
+      lines.push(
+        `**Threat (${threat.category}):** ${threat.details} → ${threat.productIds.join(', ') || 'no product ids'}${threat.groupIds ? ` (groups: ${threat.groupIds.join(', ')})` : ''}`,
       );
     }
     const status = vulnerability.productStatus;

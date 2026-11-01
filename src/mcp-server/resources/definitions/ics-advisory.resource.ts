@@ -140,6 +140,7 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
       const hint = cvesNarrowingHint(outline.sections, ADVISORY_OUTLINE_BUDGET);
       return {
         ...outline,
+        advisory: doc.advisory,
         outlineNotice: `Advisory too large to inline against a ${ADVISORY_OUTLINE_BUDGET}-byte budget; this is its section outline. Call cisa_get_advisory with advisoryId "${advisoryId}" and sections naming the sections you need${example}. A selection returns whatever it names, so sum the listed sizes before requesting several.${hint ? ` ${hint}` : ''}`,
       };
     }

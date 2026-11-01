@@ -27,6 +27,7 @@ import { CSAF_ARCHIVE_URL } from '@/services/csaf-mirror/ingest.js';
 import {
   buildOversizedAdvisory,
   FULL_ADVISORY,
+  GROUPED_ADVISORY,
   SPARSE_ADVISORY,
   sparseAdvisoryAs,
 } from '../../../fixtures/csaf-documents.js';
@@ -69,6 +70,38 @@ describe('cisa_get_advisory', () => {
     await expect(getAdvisoryTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'mirror_not_ready' },
     });
+  });
+
+  it('returns scoped flags, threats, and grouped remediations on both contract surfaces', async () => {
+    await seedMirror([
+      {
+        name: 'CSAF-develop/csaf_files/OT/white/2026/icsa-26-260-07.json',
+        data: JSON.stringify(GROUPED_ADVISORY),
+      },
+    ]);
+    const result = await runToolContract(getAdvisoryTool, {
+      advisoryId: 'ICSA-26-260-07',
+      cves: ['CVE-2026-12345'],
+    });
+    expect(result.isError).toBeFalsy();
+    const output = getAdvisoryTool.output.parse(result.structuredContent);
+    expect(output.vulnerabilities?.[0]?.flags?.[0]).toEqual({
+      label: 'component_not_present',
+      productIds: ['A', 'B', 'C'],
+      groupIds: ['second', 'missing', 'first'],
+    });
+    expect(output.vulnerabilities?.[0]?.threats?.[0]?.details).toBe(
+      'No <component> or *execution*.',
+    );
+    expect(contentText(result)).toContain('groups: second, missing, first');
+    expect(contentText(result)).toContain('No &lt;component&gt; or \\*execution\\*.');
+    const missing = await runToolContract(getAdvisoryTool, {
+      advisoryId: 'ICSA-26-260-07',
+      productIds: ['A'],
+    });
+    expect(missing.isError).toBe(true);
+    expect(JSON.stringify(missing.structuredContent)).toContain('unknown_product_id');
+    expect(contentText(missing)).toContain('flags, or threats');
   });
 
   it('selects relationship definitions without expanding components, preserving metadata on both surfaces', async () => {
@@ -415,6 +448,10 @@ describe('cisa_get_advisory', () => {
         sections: Array<Record<string, unknown>>;
       };
       expect(structured.kind).toBe('outline');
+      const output = getAdvisoryTool.output.parse(result.structuredContent);
+      expect(output.advisory?.advisoryId).toBe('ICSA-26-001-01');
+      expect(contentText(result)).toContain('**Attribution:**');
+      expect(contentText(result)).toContain('**Web:**');
       const doc = await getCsafMirror().getAdvisory('ICSA-26-001-01');
       const vulnerabilities = structured.sections.find(
         (section) => section.name === 'vulnerabilities',

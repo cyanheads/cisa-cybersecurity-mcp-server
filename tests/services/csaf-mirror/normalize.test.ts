@@ -28,12 +28,71 @@ import { MAX_SEARCH_TEXT_LENGTH } from '@/services/search-text.js';
 import {
   buildOversizedAdvisory,
   FULL_ADVISORY,
+  GROUPED_ADVISORY,
   REPUBLISHED_ADVISORY,
   SPARSE_ADVISORY,
 } from '../../fixtures/csaf-documents.js';
 import { bestMsBySize } from '../../helpers/linear-time.js';
 
 describe('normalizeAdvisoryId', () => {
+  it('keeps unresolved group references without inventing product IDs', () => {
+    const raw = { ...GROUPED_ADVISORY, product_tree: {} };
+    const entry = normalizeAdvisory(raw, '2026/icsa-26-260-07.json')?.vulnerabilities[0];
+    expect(entry?.flags).toEqual([
+      { label: 'component_not_present', productIds: [], groupIds: ['second', 'missing', 'first'] },
+    ]);
+    expect(entry?.remediations[0]?.productIds).toEqual(['D', 'A']);
+  });
+
+  it('always writes empty flags and threats when neither exists upstream', () => {
+    expect(
+      normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json')?.vulnerabilities[0],
+    ).toMatchObject({ flags: [], threats: [] });
+  });
+  it('resolves grouped remediation applicability in definition order after direct IDs', () => {
+    const entry = normalizeAdvisory(GROUPED_ADVISORY, '2026/icsa-26-260-07.json')
+      ?.vulnerabilities[0];
+    expect(entry?.remediations[0]).toMatchObject({
+      productIds: ['D', 'A', 'B', 'C'],
+      groupIds: ['second', 'missing', 'first'],
+    });
+  });
+
+  it('retains flags and threats with shared applicability and verbatim text', () => {
+    const entry = normalizeAdvisory(GROUPED_ADVISORY, '2026/icsa-26-260-07.json')
+      ?.vulnerabilities[0];
+    expect(entry).toMatchObject({
+      flags: [
+        {
+          label: 'component_not_present',
+          productIds: ['A', 'B', 'C'],
+          groupIds: ['second', 'missing', 'first'],
+        },
+      ],
+      threats: [
+        {
+          category: 'impact',
+          details: 'No <component> or *execution*.',
+          productIds: ['D', 'A', 'B', 'C'],
+          groupIds: ['second', 'first'],
+        },
+      ],
+    });
+  });
+  it('preserves direct-only remediation order and duplicates without group references', () => {
+    const raw = {
+      ...FULL_ADVISORY,
+      vulnerabilities: [
+        {
+          cve: 'CVE-2026-12345',
+          remediations: [{ category: 'vendor_fix', details: 'Fix', product_ids: ['B', 'A', 'B'] }],
+        },
+      ],
+    };
+    expect(
+      normalizeAdvisory(raw, '2026/icsa-26-260-07.json')?.vulnerabilities[0]?.remediations,
+    ).toEqual([{ category: 'vendor_fix', details: 'Fix', productIds: ['B', 'A', 'B'] }]);
+  });
   it('characterizes empty product trees without manufacturing definitions', () => {
     expect(
       flattenProductTree({ relationships: [{ product_reference: 'missing' }] }).productCount,

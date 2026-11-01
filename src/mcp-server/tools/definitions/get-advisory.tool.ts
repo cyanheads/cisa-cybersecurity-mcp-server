@@ -49,7 +49,7 @@ const MISS_GUIDANCE =
 export const getAdvisoryTool = tool('cisa_get_advisory', {
   title: 'cisa_get_advisory',
   description:
-    'Read one CISA industrial control system advisory: product definitions and relationship component references; per-CVE CVSS score, vector, and CWE; vendor remediations; sectors; and revision history. Large advisories return a section outline with byte sizes and vulnerability CVE IDs. Re-call with sections, cves for named vulnerabilities, or productIds for exact product definitions referenced by vulnerability status, scores, or remediations. Product IDs are case-sensitive; relationship selection does not expand components. Every response carries source URLs and attribution. Find advisory IDs with cisa_search_ics_advisories.',
+    'Read one CISA industrial control system advisory: product definitions and relationship component references; per-CVE CVSS score, vector, and CWE; vendor remediations, flags, and threats; sectors; and revision history. Large advisories return a section outline with byte sizes and vulnerability CVE IDs. Re-call with sections, cves for named vulnerabilities, or productIds for exact product definitions referenced by vulnerability status, scores, remediations, flags, or threats. Product IDs are case-sensitive; relationship selection does not expand components. Every response carries source URLs and attribution. Find advisory IDs with cisa_search_ics_advisories.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -82,7 +82,7 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       )
       .optional()
       .describe(
-        'Narrow products to these IDs from vulnerability status, score, or remediation references. Alone selects products; combined with cves selects both sections. Explicit sections must include products.',
+        'Narrow products to these IDs from vulnerability status, score, remediation, flag, or threat references. Alone selects products; combined with cves selects both sections. Explicit sections must include products.',
       ),
   }),
 
@@ -124,7 +124,7 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'productIds names an ID with no definition in this advisory.',
       recovery:
-        'Use exact case-sensitive IDs from vulnerability product status, scores, or remediations, or request sections ["products"] without productIds to see all defined products. Upstream references may lack definitions.',
+        'Use exact case-sensitive IDs from vulnerability product status, scores, remediations, flags, or threats, or request sections ["products"] without productIds to see all defined products. Upstream references may lack definitions.',
     },
     {
       reason: 'mirror_busy',
@@ -303,7 +303,12 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
        * agent-facing enrichment, and this one is the outline arm's own payload. */
       const { notice, ...outline } = result;
       const hint = cvesNarrowingHint(outline.sections, ADVISORY_OUTLINE_BUDGET);
-      return { found: true, ...outline, outlineNotice: hint ? `${notice} ${hint}` : notice };
+      return {
+        found: true,
+        ...outline,
+        advisory: doc.advisory,
+        outlineNotice: hint ? `${notice} ${hint}` : notice,
+      };
     }
     return { found: true, ...result };
   },

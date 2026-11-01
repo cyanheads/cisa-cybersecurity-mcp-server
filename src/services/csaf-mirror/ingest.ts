@@ -84,7 +84,7 @@ const SUCCESSFUL_CHECKPOINT_KEY = 'last_successful_checkpoint';
  *     aliases, and the `advisory_cwes` junction. An index with no recorded
  *     version predates versioning and counts as older.
  */
-export const INGEST_CONTENT_VERSION = 2;
+export const INGEST_CONTENT_VERSION = 3;
 
 /** `mirror_meta` key holding the content version of the last completed `init`. */
 const CONTENT_VERSION_KEY = 'ingest_content_version';

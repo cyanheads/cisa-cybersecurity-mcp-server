@@ -544,6 +544,28 @@ export function normalizeAdvisory(raw: unknown, sourcePath: string): NormalizedA
   };
 
   const vulnerabilities: AdvisoryVulnerability[] = [];
+  const productTree = isRecord(raw.product_tree) ? raw.product_tree : {};
+  const groups = (Array.isArray(productTree.product_groups) ? productTree.product_groups : [])
+    .filter(isRecord)
+    .map((group) => ({ id: str(group.group_id), productIds: strings(group.product_ids) }));
+  /** Preserve direct-only arrays; grouped applicability is a document-ordered union. */
+  const applicability = (entry: Record<string, unknown>) => {
+    const productIds = strings(entry.product_ids);
+    const groupIds = strings(entry.group_ids);
+    if (groupIds.length === 0) return { productIds };
+    const wanted = new Set(groupIds);
+    return {
+      productIds: [
+        ...new Set([
+          ...productIds,
+          ...groups
+            .filter((group) => group.id !== undefined && wanted.has(group.id))
+            .flatMap((group) => group.productIds),
+        ]),
+      ],
+      groupIds,
+    };
+  };
   const rawVulnerabilities = Array.isArray(raw.vulnerabilities) ? raw.vulnerabilities : [];
   for (const entry of rawVulnerabilities) {
     if (!isRecord(entry)) continue;
@@ -563,7 +585,7 @@ export function normalizeAdvisory(raw: unknown, sourcePath: string): NormalizedA
         category: str(remediation.category) ?? 'other',
         details: str(remediation.details) ?? '',
         ...(url ? { url } : {}),
-        productIds: strings(remediation.product_ids),
+        ...applicability(remediation),
         ...(restart ? { restartRequired: restart } : {}),
       });
     }
@@ -578,6 +600,16 @@ export function normalizeAdvisory(raw: unknown, sourcePath: string): NormalizedA
       ...(vulnerabilityTitle ? { title: vulnerabilityTitle } : {}),
       scores: readScores(entry),
       remediations,
+      flags: (Array.isArray(entry.flags) ? entry.flags : [])
+        .filter(isRecord)
+        .map((flag) => ({ label: str(flag.label) ?? '', ...applicability(flag) })),
+      threats: (Array.isArray(entry.threats) ? entry.threats : [])
+        .filter(isRecord)
+        .map((threat) => ({
+          category: str(threat.category) ?? '',
+          details: str(threat.details) ?? '',
+          ...applicability(threat),
+        })),
       productStatus: {
         known_affected: strings(status.known_affected),
         fixed: strings(status.fixed),

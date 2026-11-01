@@ -131,6 +131,40 @@ export const FULL_ADVISORY = {
   ],
 };
 
+/** Applicability shared across remediations, flags, and threats, with overlapping and unresolved groups. */
+export const GROUPED_ADVISORY = {
+  ...FULL_ADVISORY,
+  product_tree: {
+    ...FULL_ADVISORY.product_tree,
+    product_groups: [
+      { group_id: 'first', product_ids: ['A', 'B', 'A'] },
+      { group_id: 'second', product_ids: ['B', 'C'] },
+    ],
+  },
+  vulnerabilities: [
+    {
+      cve: 'CVE-2026-12345',
+      remediations: [
+        {
+          category: 'vendor_fix',
+          details: 'Fix <component>',
+          product_ids: ['D', 'A', 'D'],
+          group_ids: ['second', 'missing', 'first'],
+        },
+      ],
+      flags: [{ label: 'component_not_present', group_ids: ['second', 'missing', 'first'] }],
+      threats: [
+        {
+          category: 'impact',
+          details: 'No <component> or *execution*.',
+          product_ids: ['D'],
+          group_ids: ['second', 'first'],
+        },
+      ],
+    },
+  ],
+};
+
 /**
  * A pre-2017 converted advisory: CVSS v2-only, no sector note, one
  * vulnerability with no `scores[]` at all — the sparse shape the design doc

@@ -100,6 +100,7 @@ export interface AdvisoryScore {
 export interface AdvisoryRemediation {
   category: string;
   details: string;
+  groupIds?: string[];
   productIds: string[];
   restartRequired?: string;
   url?: string;
@@ -125,10 +126,12 @@ export interface AdvisoryVulnerability {
   cve: string;
   cweId?: string;
   cweName?: string;
+  flags?: { label: string; productIds: string[]; groupIds?: string[] }[];
   notes: AdvisoryNote[];
   productStatus: AdvisoryProductStatus;
   remediations: AdvisoryRemediation[];
   scores: AdvisoryScore[];
+  threats?: { category: string; details: string; productIds: string[]; groupIds?: string[] }[];
   title?: string;
 }
 
