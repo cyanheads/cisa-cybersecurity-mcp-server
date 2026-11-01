@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server",
     "source": "github"
   },
-  "version": "0.3.2",
+  "version": "0.4.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/cisa-cybersecurity-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "environmentVariables": [
         {
           "name": "CISA_CLAMP_OVERSIZED_INPUTS",
@@ -93,7 +93,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/cisa-cybersecurity-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "environmentVariables": [
         {
           "name": "CISA_CLAMP_OVERSIZED_INPUTS",

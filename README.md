@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/cisa-cybersecurity-mcp-server</h1>
   <p><b>CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF) via MCP. Keyless. STDIO or Streamable HTTP.</b>
-  <div>7 Tools • 2 Resources</div>
+  <div>7 Tools • 2 Data Resources • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cisa-cybersecurity-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cisa-cybersecurity-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cisa-cybersecurity-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/cisa-cybersecurity-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/cisa-cybersecurity-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/cisa-cybersecurity-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -50,7 +50,7 @@ CISA's vulnerability data in one place: the Known Exploited Vulnerabilities cata
 | `cisa://kev/{cveId}` | One KEV catalog entry by CVE ID |
 | `cisa://advisory/{advisoryId}` | One ICS advisory, flattened from CSAF 2.0 |
 
-Both resources are fully covered by the tools above, so a tool-only client loses nothing.
+Both data resources are fully covered by the tools above. The [CISA cybersecurity guide](./skills/cisa-cybersecurity-guide/SKILL.md) covers evidence gates, CVE-to-product investigation, and incomplete coverage. It ships with plugin, npm, Docker, and MCPB installs and is served at `skill://cisa-cybersecurity-guide/SKILL.md` through MCP skill discovery.
 
 ## Capability reference
 
@@ -63,7 +63,7 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 ### `cisa_check_cve_status` <sub>tool</sub>
 
-- Up to 200 `cveIds` per call, answered from the cached KEV snapshot with no upstream request; a CVE outside KEV comes back `inKev: false`, not as an error
+- Processes up to 200 `cveIds` per call from the cached KEV snapshot with no upstream request; inputs up to 1,000 IDs return normalized `unprocessedIds` for a follow-up call. A CVE outside KEV comes back `inKev: false`, not as an error
 - Per CVE: `dateAdded`, `dueDate`, `daysUntilDue`, `overdue`, `requiredAction`, `knownRansomwareCampaignUse`, `forensicTriage`, `cwes[]`, every URL in the entry's notes as `references[]` typed by `kind`, and a three-state `directive` (`BOD 26-04`, `BOD 22-01`, or `null`); the response echoes the `catalog` snapshot and the `asOf` date the deadlines were computed against
 - `detail: "summary"` trims each in-KEV record to the triage fields (dates, deadline status, directive, vendor and product labels, ransomware and forensic-triage flags), which keeps a full 200-CVE batch compact; `full` is the default
 
@@ -72,16 +72,16 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 ### `cisa_search_kev` <sub>tool</sub>
 
 - Filters AND together: `vendorProject` and `product` (CISA's own labels, not CPE names), `nameContains`, `cwe`, `cveIdPrefix`, `dateAddedFrom` / `dateAddedTo`, `dueBefore` / `dueAfter`, `overdue`, `ransomware`, `forensicTriage`, `directive` (`BOD 26-04` / `BOD 22-01` / `none`); up to 100 per page (default 25) with an opaque `cursor`; sorts by `dateAdded` (default) or `dueDate`
-- Reports `totalCount` and `appliedFilters`; a zero-hit result names the filter responsible and what dropping it restores. `nameContains` searches a-z and 0-9 after folding case and accents, and the notice names any other characters it dropped
+- Reports `totalCount` and `appliedFilters`; each continued page uses the current call's limit. A zero-hit result names the filter responsible and what dropping it restores. `nameContains` searches a-z and 0-9 after folding case and accents, and the notice names any other characters it dropped
 - Typed errors: `catalog_unavailable` (retryable), `invalid_date_range`, `empty_search_text`
 
 ---
 
 ### `cisa_get_ssvc` <sub>tool</sub>
 
-- Up to 50 `cveIds` per call, each a live Vulnrichment lookup, plus `assetExposure`: `publicly_exposed`, `not_publicly_exposed`, or `unknown` (default, returns both arms)
+- Processes up to 50 `cveIds` per call through the Vulnrichment cache, fetching uncached records; inputs up to 1,000 IDs return normalized `unprocessedIds` for a follow-up call. `assetExposure`: `publicly_exposed`, `not_publicly_exposed`, or `unknown` (default, returns both arms)
 - Per CVE: `found`, `exploitation`, `automatable`, `technicalImpact`, `cvss` and `cwes` where CISA published them, and `bod2604.timelines[]` (`tableRow`, `remediationTimelineDays`, `forensicTriageRequired`); a KEV entry adds `kevAssigned`, plus `assignmentAgrees` when an exposure was stated
-- A CVE with no enrichment is `found: false` with `guidance`; `enrichment_source_unavailable` (retryable) fires only when every fetch fails
+- Each result carries `outcome`: `ssvc`, `not_found`, `no_cisa_container`, `no_ssvc_metric`, or `fetch_failed`. `foundCount`, `notFoundCount`, and `failedCount` separate published SSVC, confirmed misses, and unavailable lookups; `enrichment_source_unavailable` (retryable) fires when every processed lookup fails
 
 ---
 
@@ -96,7 +96,8 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 ### `cisa_get_advisory` <sub>tool</sub>
 
 - `advisoryId` (optional revision suffix), optional `sections` (`advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`), `cves` to pick vulnerability entries, and `productIds` to pick exact, case-sensitive product definitions; `cves` and `productIds` imply their sections
-- Returns `kind: "full"`, or `kind: "outline"` (per-section byte sizes plus the CVE IDs) when a read without `sections` exceeds 24,000 bytes; re-call with `sections`
+- Returns `kind: "full"`, or `kind: "outline"` (per-section byte sizes plus the CVE IDs) when a read without `sections` exceeds 24,000 bytes; re-call with `sections`. Both arms retain advisory identity, source links, and attribution
+- Vulnerability entries retain applicability `flags` and `threats`; remediations, flags, and threats resolve referenced product groups into `productIds` and keep `groupIds`. Undefined groups remain visible without invented product definitions
 - An ID not in the index returns `found: false` with `guidance`, `indexCheckpoint`, and `indexLastSyncedAt`; the guidance notes when the advisory may be newer than the index
 - Typed errors: `mirror_not_ready` and `mirror_busy` (retryable), `mirror_unavailable`, `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`, `unknown_product_id`, `product_ids_need_products_section`
 
@@ -104,7 +105,7 @@ Both resources are fully covered by the tools above, so a tool-only client loses
 
 ### `cisa_get_alerts` <sub>tool</sub>
 
-- `feed`: `advisories` (default), `alerts`, or `ics`; `limit` up to 30, the upstream window size; `since` (`YYYY-MM-DD`) filters within that window and cannot reach past it
+- `feed`: `advisories` (default), `alerts`, or `ics`; default `limit` 30, the upstream window size; `since` (`YYYY-MM-DD`) filters within that window and cannot reach past it. `hasMore` and an opaque `cursor` continue after the last returned item within the same feed; an unavailable anchor returns an empty page with restart guidance
 - Items carry `title`, `link`, `pubDate`, `summary` (HTML stripped, capped at 1,200 characters, flagged by `summaryTruncated`), and on ICS items an `advisoryId` for `cisa_get_advisory`; `window` reports `itemCount`, `oldest`, `newest`, and `upstreamWindowSize`
 - Every response carries `fetchedAt` and `stale`; if a refresh fails, the last window is returned as stale with retry guidance, and a stale empty result doesn't prove nothing was published. With no cached window, `feed_unavailable` (retryable)
 
@@ -250,8 +251,11 @@ bun install
 
 Every variable is optional; the server runs correctly with none of them set.
 
+Oversized read limits are bounded to each tool's workload cap, with notices when matching rows are omitted. CVE batches return the unprocessed IDs explicitly. All five read inputs have a hard ceiling of 1,000; malformed IDs anywhere in a batch still reject the call. Set `CISA_CLAMP_OVERSIZED_INPUTS=false` to reject inputs above the per-call caps with `read_limit_exceeded` before upstream or index work. Each normalization emits a structured log and the `mcp.cisa.input.normalized` counter, keyed by tool and input.
+
 | Variable | Description | Default |
 |:---|:---|:---|
+| `CISA_CLAMP_OVERSIZED_INPUTS` | Bound oversized reads and return batch remainders; `false` rejects over-cap requests. | `true` |
 | `CISA_KEV_REFRESH_CRON` | Cron for the KEV refresh poll; `off` disables it. | `*/30 * * * *` |
 | `CISA_CSAF_MIRROR_PATH` | Path to the ICS advisory SQLite index. | `<user cache dir>/cisa-cybersecurity-mcp-server/csaf.sqlite3` |
 | `CISA_CSAF_MIRROR_AUTO_INIT` | Seed the index in the background on first run. | `true` |
@@ -332,6 +336,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/services/csaf-mirror` | The ICS advisory index: schema, ingest, normalization, queries. |
 | `src/services/cisa-feeds` | The three RSS feeds, parsed and cached on a TTL. |
 | `scripts/` | Build, checks, and the `mirror:*` commands. |
+| `skills/` | Published CISA workflow guide for agents using the server. |
 | `tests/` | Unit, integration, fuzz, and smoke tests mirroring `src/`. |
 
 ## Development guide

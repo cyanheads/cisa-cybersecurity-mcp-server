@@ -1,11 +1,11 @@
 # Developer Protocol
 
 **Server:** cisa-cybersecurity-mcp-server
-**Version:** 0.3.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Version:** 0.4.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
-**Zod:** ^4.6.6
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -13,7 +13,7 @@
 
 ## This Server
 
-Four keyless CISA datasets, all read-only, served over seven tools and two resources. `docs/design.md` is the as-built specification — upstream shapes, per-tool contracts, storage tiers, and the numbered decisions log. Read it before changing a handler; every count and field name in it was verified against the live sources.
+Four keyless CISA datasets, all read-only, served over seven tools, two dataset resource templates, and the published `cisa-cybersecurity-guide` skill resource. `docs/design.md` is the as-built specification — upstream shapes, per-tool contracts, storage tiers, and the numbered decisions log. Read it before changing a handler; its measured corpus counts and sizes are historical observations.
 
 **Surface**
 
@@ -28,6 +28,7 @@ Four keyless CISA datasets, all read-only, served over seven tools and two resou
 | `cisa_get_alerts` | `cisa-feeds`. A 30-item rolling window; the cap is upstream's, not a server choice. |
 | `cisa://kev/{cveId}` | `kev-catalog`. Same record shape `cisa_check_cve_status` returns. |
 | `cisa://advisory/{advisoryId}` | `csaf-mirror`. The same overflow treatment as the tool's no-`sections` call. |
+| `cisa-cybersecurity-guide` skill resource | Root `skills/cisa-cybersecurity-guide/SKILL.md`, exposed through `createApp({ skills: 'skills' })`. Vulnerability triage, advisory applicability, and evidence coverage workflows. |
 
 No prompts: every workflow here is a direct lookup or a filtered search the tool schema already describes.
 
@@ -42,6 +43,10 @@ No prompts: every workflow here is a direct lookup or a filtered search the tool
 
 **Invariants worth keeping**
 
+- Five read tools advertise a 1,000 hard ceiling and share workload caps in `src/mcp-server/read-limits.ts`: CVE status 200, SSVC 50, KEV search 100, ICS search 50, alerts 30. `CISA_CLAMP_OVERSIZED_INPUTS=true` bounds requests with explicit batch `unprocessedIds` or page continuation; false throws non-retryable `read_limit_exceeded`. Clamping logs and increments `mcp.cisa.input.normalized`; counts cover processed CVEs only.
+- KEV continuation takes the offset from its cursor and the page size from the current request. Alert continuation binds feed and GUID within the available current or cached window. An unavailable anchor gives empty items and restart guidance, never an inferred eviction or historical completeness claim.
+- SSVC results expose `outcome`; `fetch_failed` counts toward `failedCount`, never `notFoundCount`. Partial failures cannot support a notice claiming no SSVC exists; all processed lookups failing remains retryable `enrichment_source_unavailable`.
+- Both advisory outline arms retain the complete `advisory` header, including URLs and attribution. Remediations, flags, and threats retain `groupIds`; grouped `productIds` union direct IDs with group members in document order, while direct-only arrays keep their order and duplicates. Unresolved references remain unresolved. Ingest-content version 3 refreshes unchanged stored documents; optional flags/threats support rows awaiting re-ingest.
 - Boot never depends on the advisory corpus. KEV, SSVC, and alert tools serve from the first request; the index seeds in the background and reports `mirror_not_ready` until it lands.
 - An HTML body on a JSON or XML route is `ServiceUnavailable`, never `SerializationError` — cisa.gov serves a Drupal error page transiently, and a parse-error classification makes a recoverable outage look like a data-shape defect.
 - A not-yet-seeded index throws rather than returning an empty result: an empty page asserts that nothing matches.
@@ -109,6 +114,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { applyReadLimit } from '@/mcp-server/read-limits.js';
 import { CveIdInputSchema, KevRecordSchema, renderKevRecord, toKevRecordOutput, toKevRecordSummary, toMissingKevOutput } from '@/mcp-server/schemas/kev-record.js';
 import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 
@@ -118,13 +124,14 @@ export const checkCveStatusTool = tool('cisa_check_cve_status', {
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   input: z.object({
-    cveIds: z.array(CveIdInputSchema.describe('One CVE identifier, e.g. CVE-2025-39964.')).min(1).max(200)
-      .describe('CVE identifiers to check, up to 200 per call. The whole batch costs zero upstream requests.'),
+    cveIds: z.array(CveIdInputSchema.describe('One CVE identifier, e.g. CVE-2025-39964.')).min(1).max(1000)
+      .describe('Accept up to 1,000 CVE IDs; process 200 and return the remainder unless clamping is disabled.'),
     detail: z.enum(['full', 'summary']).default('full')
       .describe('full returns every field of each in-KEV entry. summary returns only the triage fields …'),
   }),
   output: z.object({
-    results: z.array(KevRecordSchema).describe('One result per requested CVE, in the order supplied.'),
+    results: z.array(KevRecordSchema).describe('One result per processed CVE, in the order supplied.'),
+    unprocessedIds: z.array(CveIdInputSchema).optional().describe('Normalized IDs to send in a follow-up call.'),
     foundCount: z.number().int().describe('How many of the requested CVEs are in the catalog.'),
     notFoundCount: z.number().int().describe('How many of the requested CVEs are not in the catalog.'),
   }),
@@ -144,26 +151,28 @@ export const checkCveStatusTool = tool('cisa_check_cve_status', {
   ],
 
   async handler(input, ctx) {
+    const count = applyReadLimit('cisa_check_cve_status', input.cveIds.length, ctx);
+    const unprocessedIds = input.cveIds.slice(count);
     const catalog = getKevCatalog();
     const snapshot = await catalog.snapshot(ctx);
     const asOf = catalog.asOf();
     const project = input.detail === 'summary' ? toKevRecordSummary : toKevRecordOutput;
     /* CveIdInputSchema already trimmed and uppercased each ID. */
-    const results = input.cveIds.map((cveId) => {
+    const results = input.cveIds.slice(0, count).map((cveId) => {
       const record = snapshot.byId.get(cveId);
       return record ? project(record, asOf) : toMissingKevOutput(cveId);
     });
     const foundCount = results.filter((result) => result.inKev).length;
     ctx.enrich({ asOf });
     if (input.detail === 'summary') ctx.enrich({ summaryNote: 'summary — in-KEV results omit … Call again with detail "full" to restore them.' });
-    return { results, foundCount, notFoundCount: results.length - foundCount };
+    return { results, foundCount, notFoundCount: results.length - foundCount, ...(unprocessedIds.length ? { unprocessedIds } : {}) };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
   // Different clients read different surfaces (Claude Code → structuredContent,
   // Claude Desktop → content[]); both must carry the same data.
   // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{ type: 'text', text: result.results.flatMap(renderKevRecord).join('\n') }],
+  format: (result) => [{ type: 'text', text: [...result.results.flatMap(renderKevRecord), ...(result.unprocessedIds ? [`Unprocessed IDs: ${result.unprocessedIds.join(', ')}`] : [])].join('\n') }],
 });
 ```
 
@@ -211,6 +220,8 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
+  clampOversizedInputs: z.stringbool().default(true)
+    .describe('Bound oversized read inputs with explicit continuation; false rejects them.'),
   kevRefreshCron: refreshCron('*/30 * * * *')   // 'off' disables; any other non-cron value fails startup
     .describe('Cron for the KEV conditional-refresh poll, on every transport; "off" disables it.'),
   csafMirrorPath: z.string().optional()           // unset → defaultCsafMirrorPath(): the per-user cache dir
@@ -225,6 +236,7 @@ let _config: ServerConfig | undefined;
 export function getServerConfig(): ServerConfig {
   if (_config) return _config;
   const parsed = parseEnvConfig(ServerConfigSchema, {
+    clampOversizedInputs: 'CISA_CLAMP_OVERSIZED_INPUTS',
     kevRefreshCron: 'CISA_KEV_REFRESH_CRON',
     csafMirrorPath: 'CISA_CSAF_MIRROR_PATH',
     csafMirrorAutoInit: 'CISA_CSAF_MIRROR_AUTO_INIT',
@@ -241,7 +253,7 @@ export function getServerConfig(): ServerConfig {
 
 The index default is never relative to the working directory: some clients start stdio servers at `/`. `defaultCsafMirrorPath()` takes the host as an argument so tests resolve it without touching the real user cache. A refresh cron's empty value keeps meaning the default — the `.mcpb` host forwards `""` for every option left blank — so `off` is the disable value.
 
-All seven `CISA_*` variables are optional — every source is keyless and every tunable has a working default, so the server runs correctly with none of them set. Adding one means editing four files together: the schema above, `.env.example`, `server.json` `environmentVariables[]` (both package entries), and `manifest.json` (`mcp_config.env` + `user_config`). `lint:packaging` fails on a mismatch.
+All eight `CISA_*` variables are optional — every source is keyless and every tunable has a working default, including `CISA_CLAMP_OVERSIZED_INPUTS=true`. The server runs correctly with none set. Adding one means updating the schema above, `.env.example`, `server.json` `environmentVariables[]` (both package entries), `manifest.json` (`mcp_config.env` + `user_config`), and both legacy plugin environment surfaces (`.claude-plugin/plugin.json` and `.codex-plugin/mcp.json`). Keep the names and defaults aligned.
 
 `parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`CISA_CSAF_MIRROR_PATH`) not the path (`csafMirrorPath`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
@@ -388,9 +400,18 @@ No `prompts/` directory — this server ships none.
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Two skill trees live at the project root, written for different readers:
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
+| Tree | For | Written by |
+|:-----|:----|:-----------|
+| `framework-skills/` | The agent developing this server — framework skills (`metadata.audience: external`) plus any development-time skills of the server's own | `init` and the `maintenance` sync (framework skills); you (your own) |
+| `skills/` | The agents that install the server and call its tools — tool chains, identifier sources, gates | You, deliberately, with the `add-skill` skill. Absent by default; usually none is needed |
+
+Development skills are modular instructions. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. Their directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand them to every agent that installs it.
+
+A published skill in root `skills/` reaches plugin installs and the `.mcpb` bundle as-is, ships in the npm package and the Docker image, and reaches MCP clients when the server opts in with `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree.
+
+**Agent skill directory:** Copy `framework-skills/` into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
 Available skills:
 
@@ -402,6 +423,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author a skill the server publishes in root `skills/` for the agents that use it — when one earns its place, structure, validation, delivery |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -451,7 +473,7 @@ The `mirror:*` commands select `tsconfig.mirror.json`: current source modules in
 | `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
 | `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
+| `bun run lint:packaging` | Packaging surface checks — env-var parity, root-anchored bundle exclusions, plugin manifests, and published skills (run by devcheck) |
 | `bun run list-skills` | Print the skill registry |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
@@ -475,7 +497,7 @@ The `mirror:*` commands select `tsconfig.mirror.json`: current source modules in
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips three classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`), platform-specific native bindings that would lock the bundle to the platform it was packed on (`NATIVE_BINDING_ENTRY`), and build-only sources (`BUILD_ONLY_ENTRY`).
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`), platform-specific native bindings that would lock the bundle to the platform it was packed on (`NATIVE_BINDING_ENTRY`), node-gyp build output beside a `binding.gyp` (compiled addons stay), and build-only sources (`BUILD_ONLY_ENTRY`), including framework development files.
 
 `better-sqlite3` is a regular dependency here and the bundle **carries it**: the npm tarball ships all eight platform prebuilds and `lib/binding.js` picks one at runtime, so the bundle stays cross-platform with no install script and no node-gyp step. `BUILD_ONLY_ENTRY` strips only its `deps/` and `src/` trees — 9.8 MB of SQLite C source used solely for a source build — and never `prebuilds/`, which must survive. That is why it is a separate literal from `NATIVE_BINDING_ENTRY`, whose whole job is removing platform-locked natives. The regexes are duplicated in `scripts/lint-packaging.ts`; the files' own comments require editing them together. Under Bun the driver is never loaded at all — `openSqliteHandle` uses the built-in `bun:sqlite`.
 
@@ -549,6 +571,7 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] Advisory output still carries `url`, `csafUrl`, and `attribution`; no DHS seal, CISA logo, or implied endorsement anywhere
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] `plugin.json` + `mcp.json` (Agent Plugins 1.0.0 — read by Codex, Cursor, GitHub Copilot, VS Code, Kiro) populated — `plugin.json` `name` = the unscoped repo name (lowercase `a-z`, `0-9`, `-`, `.` only); `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords` from `package.json`; no other top-level field, `extensions` included. `mcp.json` holds one `"type": "stdio"` entry keyed by the unscoped name, `npx -y <full package name>`, and the same fixed `env` as `.codex-plugin/mcp.json`. Neither file carries a user-supplied variable (no `""`, no `${…}` besides `${PLUGIN_ROOT}`/`${PLUGIN_DATA}`): keys reach Codex through `.codex-plugin/mcp.json` `env_vars`, which works only while `.codex-plugin/plugin.json` keeps `"mcpServers": "./.codex-plugin/mcp.json"`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`

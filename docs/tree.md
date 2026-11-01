@@ -1,6 +1,6 @@
 # cisa-cybersecurity-mcp-server - Directory Structure
 
-Generated on: 2026-10-14 19:36:31
+Generated on: 2026-11-01 03:44:00
 
 ```text
 cisa-cybersecurity-mcp-server/
@@ -27,6 +27,7 @@ cisa-cybersecurity-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -38,6 +39,8 @@ cisa-cybersecurity-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -139,6 +142,9 @@ cisa-cybersecurity-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── cisa-cybersecurity-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -151,16 +157,17 @@ cisa-cybersecurity-mcp-server/
 │   │   ├── schemas/
 │   │   │   ├── advisory.ts
 │   │   │   └── kev-record.ts
-│   │   └── tools/
-│   │       └── definitions/
-│   │           ├── check-cve-status.tool.ts
-│   │           ├── get-advisory.tool.ts
-│   │           ├── get-alerts.tool.ts
-│   │           ├── get-ssvc.tool.ts
-│   │           ├── index.ts
-│   │           ├── list-reference.tool.ts
-│   │           ├── search-ics-advisories.tool.ts
-│   │           └── search-kev.tool.ts
+│   │   ├── tools/
+│   │   │   └── definitions/
+│   │   │       ├── check-cve-status.tool.ts
+│   │   │       ├── get-advisory.tool.ts
+│   │   │       ├── get-alerts.tool.ts
+│   │   │       ├── get-ssvc.tool.ts
+│   │   │       ├── index.ts
+│   │   │       ├── list-reference.tool.ts
+│   │   │       ├── search-ics-advisories.tool.ts
+│   │   │       └── search-kev.tool.ts
+│   │   └── read-limits.ts
 │   ├── reference/
 │   │   ├── bod-2604.ts
 │   │   ├── cvss.ts
@@ -227,6 +234,7 @@ cisa-cybersecurity-mcp-server/
 │   │   │       ├── list-reference.tool.test.ts
 │   │   │       ├── search-ics-advisories.tool.test.ts
 │   │   │       └── search-kev.tool.test.ts
+│   │   ├── read-limits.test.ts
 │   │   └── unopenable-index.test.ts
 │   ├── reference/
 │   │   ├── bod-2604.test.ts
@@ -247,8 +255,9 @@ cisa-cybersecurity-mcp-server/
 │   │   │   └── vulnrichment-service.test.ts
 │   │   ├── refresh-schedule.test.ts
 │   │   └── upstream-http.test.ts
-│   └── smoke/
-│       └── surface.test.ts
+│   ├── smoke/
+│   │   └── surface.test.ts
+│   └── packaging-runtime.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
@@ -264,7 +273,9 @@ cisa-cybersecurity-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

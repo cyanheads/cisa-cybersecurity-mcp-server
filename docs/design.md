@@ -2,7 +2,7 @@
 
 Package `@cyanheads/cisa-cybersecurity-mcp-server` · registry `io.github.cyanheads/cisa-cybersecurity-mcp-server` · display and machine identity `cisa-cybersecurity-mcp-server` · tool prefix `cisa_`.
 
-Upstream shapes in this document were verified against the live sources on 2026-09-19. Every count, field name, header behavior, and size is an observation, not a restatement of upstream documentation.
+Upstream shapes in this document were verified against the live sources on 2026-09-19. Corpus counts and measured sizes are historical observations from those probes or the explicitly named later checkpoint, not current inventory. Tool contracts describe the current implementation.
 
 ---
 
@@ -17,8 +17,8 @@ Upstream shapes in this document were verified against the live sources on 2026-
 | `cisa_search_kev` | Search the KEV catalog by vendor, product, CWE, date added, due date, overdue status, ransomware use, forensic-triage tier, or directive. | filters, `sortBy`, `limit`, `cursor` | `readOnlyHint` |
 | `cisa_get_ssvc` | Fetch the SSVC decision points CISA publishes per CVE — Exploitation, Automatable, Technical Impact — and compute the BOD 26-04 remediation timeline they imply for a stated asset exposure. | `cveIds[]`, `assetExposure` | `readOnlyHint` |
 | `cisa_search_ics_advisories` | Search the CISA industrial control system advisory corpus by vendor, product, CVE, CWE, KEV membership, CVSS range, severity, sector, series, or free text over advisory titles and product names. | `q`, filters, `sortBy`, `limit`, `cursor` | `readOnlyHint` |
-| `cisa_get_advisory` | Read one ICS advisory in full: affected products with version ranges, per-CVE CVSS and CWE, remediations, sectors, and revision history — or only the vulnerability entries for named CVEs. | `advisoryId`, `sections[]`, `cves[]` | `readOnlyHint` |
-| `cisa_get_alerts` | List what CISA has published recently from its advisory and alert feeds. | `feed`, `limit`, `since` | `readOnlyHint` |
+| `cisa_get_advisory` | Read one ICS advisory: product definitions, per-CVE CVSS and CWE, scoped remediations, flags, threats, sectors, and revision history — or selected sections and identifiers. | `advisoryId`, `sections[]`, `cves[]`, `productIds[]` | `readOnlyHint` |
+| `cisa_get_alerts` | List what CISA has published recently from its advisory and alert feeds, continuing within the available window. | `feed`, `limit`, `cursor`, `since` | `readOnlyHint` |
 
 ### Resources
 
@@ -27,7 +27,7 @@ Upstream shapes in this document were verified against the live sources on 2026-
 | `cisa://kev/{cveId}` | `kev-entry` / "KEV catalog entry" | One KEV record, same shape as a `cisa_check_cve_status` result. `list()` returns the 30 most recently added entries. | `list()` capped at 30, no cursor |
 | `cisa://advisory/{advisoryId}` | `ics-advisory` / "ICS advisory (CSAF)" | One flattened ICS advisory, same shape as `cisa_get_advisory`'s full arm. `list()` returns the 30 most recently revised advisories. | `list()` capped at 30, no cursor |
 
-Both are fully covered by tools; a tool-only client loses nothing.
+Both dataset resources are fully covered by tools. `createApp({ skills: 'skills' })` additionally exposes `skills/cisa-cybersecurity-guide/SKILL.md` as a framework skill resource for vulnerability triage and advisory applicability workflows.
 
 ### Prompts
 
@@ -208,6 +208,12 @@ BOD 26-04 supersedes and revokes BOD 22-01 (2021-11-03) and BOD 19-02 (2019-04-2
 
 ## Tools — detail
 
+### Shared read limits
+
+Five read tools accept positive integer counts up to the advertised hard ceiling of 1,000. `src/mcp-server/read-limits.ts` applies the workload cap before upstream or index work: 200 CVEs for `cisa_check_cve_status`, 50 for `cisa_get_ssvc`, and page sizes of 100, 50, and 30 for `cisa_search_kev`, `cisa_search_ics_advisories`, and `cisa_get_alerts` respectively. `CISA_CLAMP_OVERSIZED_INPUTS=true` is the default. Oversized CVE batches return the normalized remainder as `unprocessedIds` in input order; counts cover processed IDs only. Searches disclose the effective limit and use continuation for remaining matches. Each clamped request writes an info log and increments `mcp.cisa.input.normalized`, labeled by tool and input name.
+
+With `CISA_CLAMP_OVERSIZED_INPUTS=false`, all five tools instead throw non-retryable `read_limit_exceeded` (`ValidationError`) above their workload cap; resend within the cap. Values above 1,000 fail schema validation in either mode.
+
 All nine input date filters share real-calendar validation with field-specific recovery guidance. Previously accepted impossible YYYY-MM-DD strings (month/day zero, month 13–99, day 32–99, April/June/September/November 31, and February dates beyond the year's leap-day boundary) are rejected before querying. Valid Gregorian dates, including 2000-02-29 and 2024-02-29, omitted filters, and range-order errors retain their behavior. Output date schemas keep their existing pattern.
 
 ### `cisa_list_reference`
@@ -243,7 +249,7 @@ Implement first. No service dependency beyond in-process state, no network call,
 
 | Param | Type | Maps to | Notes |
 |:---|:---|:---|:---|
-| `cveIds` | `z.array(CveIdInputSchema).min(1).max(200)` — `z.string().trim().toUpperCase().regex(/^CVE-[0-9]{4}-[0-9]{4,19}$/)` | local index lookup | Pattern is the one the published KEV schema declares. The schema trims surrounding whitespace and uppercases before the pattern check — both one-to-one and meaning-preserving, and neither emits a JSON Schema keyword. Nothing else is repaired. |
+| `cveIds` | `z.array(CveIdInputSchema).min(1).max(1000)` — `z.string().trim().toUpperCase().regex(/^CVE-[0-9]{4}-[0-9]{4,19}$/)` | local index lookup | Up to 200 processed per call; larger accepted batches return `unprocessedIds` unless clamping is disabled. The schema trims and uppercases before checking the published KEV pattern. |
 | `detail` | `z.enum(['full','summary']).default('full')` | output projection | `full` is the complete record and the default, byte-identical to the output before the parameter existed. `summary` keeps eleven fields per in-KEV record (Decision 24). Not-in-KEV results, the counts, and the `catalog`/`asOf` enrichment are the same under both. |
 
 **Output**
@@ -264,6 +270,7 @@ results[]:
   notesCommentary?     prose segments of notes, verbatim     # full only
   kevUrl                                                     # full only
 foundCount, notFoundCount
+unprocessedIds?          # normalized IDs beyond the first 200; resend these
 ```
 
 `directive` is three-state on purpose: most entries (1,277 of 1,716 at catalog `2026.09.18`) cite no directive at all in their `requiredAction` or `notes`, and `null` is the honest value for those. Never infer 22-01 from an entry's age.
@@ -277,7 +284,7 @@ foundCount, notFoundCount
 | `catalog` | `echo` | Always — `{ catalogVersion, dateReleased, count, fetchedAt }` |
 | `asOf` | `echo` | Always — the UTC date `daysUntilDue` and `overdue` were computed against |
 | `summaryNote` | label `Detail` | Only under `detail: "summary"` — "summary — in-KEV results omit requiredAction, vulnerabilityName, shortDescription, cwes, references, notesCommentary, and kevUrl. Call again with detail "full" to restore them." |
-| `notice` | `notice` | When `foundCount === 0` — "None of the N CVE IDs supplied are in the KEV catalog. KEV lists only vulnerabilities CISA has confirmed are exploited in the wild; absence is not a statement about severity. Call cisa_get_ssvc for the SSVC decision points CISA publishes for CVEs regardless of KEV status." |
+| `notice` | `notice` | Composes oversized-batch follow-up guidance and, when `foundCount === 0`, explains that absence from KEV is not a severity statement and routes SSVC questions to `cisa_get_ssvc`. Counts refer only to processed IDs. |
 
 **Errors**
 
@@ -308,8 +315,8 @@ foundCount, notFoundCount
 | `directive` | `z.enum(['BOD 26-04','BOD 22-01','none']).optional()` | `none` selects entries citing neither. |
 | `sortBy` | `z.enum(['dueDate','dateAdded']).default('dateAdded')` | |
 | `order` | `z.enum(['asc','desc']).default('desc')` | |
-| `limit` | `z.number().int().min(1).max(100).default(25)` | |
-| `cursor` | `z.string().optional()` | Opaque, from `extractCursor`/`paginateArray`. |
+| `limit` | `z.number().int().min(1).max(1000).default(25)` | Effective page size at most 100 under shared read limits. |
+| `cursor` | `z.string().optional()` | Opaque offset cursor decoded with `decodeCursor`; the current request's effective `limit` controls page size, even when the cursor was issued for another size. |
 
 All filters AND together. Every one is applied against the complete snapshot, never a page.
 
@@ -359,7 +366,7 @@ Zero-hit notice fragments (Decision 26). On a zero-hit result only, `KevCatalogS
 
 | Param | Type | Notes |
 |:---|:---|:---|
-| `cveIds` | `z.array(CveIdInputSchema).min(1).max(50)` | Case and whitespace normalize as in `cisa_check_cve_status`. Cap 50, not 200: each CVE is a separate upstream file fetch. Fetched with a concurrency limit of 6 and `Promise.allSettled`. |
+| `cveIds` | `z.array(CveIdInputSchema).min(1).max(1000)` | Up to 50 processed; larger accepted batches return normalized `unprocessedIds` unless clamping is disabled. Each uncached CVE needs a separate upstream fetch, with concurrency 6 and `Promise.allSettled`. |
 | `assetExposure` | `z.enum(['publicly_exposed','not_publicly_exposed','unknown']).default('unknown')` | The one decision point only the caller can answer. `unknown` returns both arms so the agent can see the spread without guessing. |
 
 `In the KEV` is read from this server's local KEV snapshot, never from the caller. `Automatable` and `Technical Impact` come from Vulnrichment. Those three plus `assetExposure` are the complete input set for the Table 1 lookup.
@@ -368,7 +375,8 @@ Zero-hit notice fragments (Decision 26). On a zero-hit result only, `KevCatalogS
 
 ```
 results[]:
-  cveId, found
+  cveId, found, outcome   # ssvc | not_found | no_cisa_container |
+                        # no_ssvc_metric | fetch_failed
   # present when found
   exploitation          'none' | 'poc' | 'active' | <other, passed through>
   automatable           'yes' | 'no'
@@ -388,7 +396,8 @@ results[]:
   sourceUrl
   # present when not found
   guidance
-foundCount, notFoundCount
+foundCount, notFoundCount, failedCount
+unprocessedIds?         # normalized IDs beyond the first 50; resend these
 ```
 
 `remediationTimelineDays` is `null` for rows 15 and 16, whose timeline is "Fix on system upgrade" — a condition, not a day count. `timelineLabel` carries the directive's own wording verbatim.
@@ -396,6 +405,8 @@ foundCount, notFoundCount
 `caveat`, fixed text: *"This timeline is CISA's published decision table applied to CISA's published decision points and the asset exposure supplied in the request. It is not a compliance determination, and it is not CISA's assigned KEV due date."*
 
 `assignmentAgrees` is reported, never reconciled. When it is `false`, the two facts stand side by side: 9 of 24 sampled 26-04 KEV entries disagreed with the table under a publicly-exposed assumption.
+
+`found` is true only for `outcome: 'ssvc'`. `notFoundCount` counts confirmed absence (`not_found`, `no_cisa_container`, `no_ssvc_metric`); `failedCount` counts `fetch_failed`, where SSVC availability is unknown. These three counts sum to `results.length`, excluding `unprocessedIds`. CVSS and CWE data may still be present under `no_ssvc_metric`.
 
 Miss `guidance`, per outcome:
 
@@ -409,16 +420,16 @@ Miss `guidance`, per outcome:
 
 | Key | Kind | When |
 |:---|:---|:---|
-| `echo` | `echo` | Always — `{ assetExposure, requested }` |
-| `notice` | `notice` | When `foundCount === 0`, or when any returned `ssvcTimestamp` predates that CVE's KEV `dateAdded` — "SSVC decision points for N of the CVEs were published before CISA added them to KEV and may not reflect current exploitation status." |
+| `echo` | `echo` | Always — `{ assetExposure, requested }`; `requested` is the processed batch size. |
+| `notice` | `notice` | Composes unprocessed-ID follow-up guidance, failed-lookup retry guidance, and lagging-timestamp warnings. The no-published-SSVC notice appears only when `foundCount === 0 && failedCount === 0`. |
 
 **Errors**
 
 | reason | code | when | recovery |
 |:---|:---|:---|:---|
-| `enrichment_source_unavailable` | `ServiceUnavailable` (`retryable: true`) | Every per-CVE fetch failed with a transport or 5xx error | `The CISA enrichment source is unreachable; retry in a few minutes, or call cisa_check_cve_status which serves from a cached catalog and needs no network.` |
+| `enrichment_source_unavailable` | `ServiceUnavailable` (`retryable: true`) | Every processed per-CVE fetch failed, including rejected HTTP responses | `The CISA enrichment source is unreachable; retry in a few minutes, or call cisa_check_cve_status which serves from a cached catalog and needs no network.` |
 
-A partial failure is not an error: CVEs that fetched successfully return normally and the failed ones report `found: false` with guidance naming the transport failure.
+A partial failure is a result: successful lookups return normally and failed ones report `found: false`, `outcome: 'fetch_failed'`, and retry guidance. A batch containing any failed lookup never receives the notice claiming that none carry published SSVC decision points.
 
 ---
 
@@ -445,7 +456,7 @@ A partial failure is not an error: CVEs that fetched successfully return normall
 | `revisedFrom` / `revisedTo` | same | Against `current_release_date`. |
 | `sortBy` | `z.enum(['relevance','published','revised','maxCvss']).default('revised')` | `relevance` requires `q` and uses FTS5 bm25. |
 | `order` | `z.enum(['asc','desc']).default('desc')` | |
-| `limit` | `z.number().int().min(1).max(50).default(20)` | |
+| `limit` | `z.number().int().min(1).max(1000).default(20)` | Effective page size at most 50 under shared read limits. |
 | `cursor` | `z.string().optional()` | Opaque offset cursor over the mirror query. |
 
 **Output**
@@ -523,7 +534,7 @@ Measured at the 2026-09-24 checkpoint (3,937 advisories), the count query adds t
 
 **Description**
 
-> Read one CISA industrial control system advisory: product definitions and relationship component references; per-CVE CVSS score, vector, and CWE; vendor remediations; sectors; and revision history. Large advisories return a section outline with byte sizes and vulnerability CVE IDs. Re-call with sections, cves for named vulnerabilities, or productIds for exact product definitions referenced by vulnerability status, scores, or remediations. Product IDs are case-sensitive; relationship selection does not expand components. Every response carries source URLs and attribution. Find advisory IDs with cisa_search_ics_advisories.
+> Read one CISA industrial control system advisory: product definitions and relationship component references; per-CVE CVSS score, vector, and CWE; vendor remediations, flags, and threats; sectors; and revision history. Large advisories return a section outline with byte sizes and vulnerability CVE IDs. Re-call with sections, cves for named vulnerabilities, or productIds for exact product definitions referenced by vulnerability status, scores, remediations, flags, or threats. Product IDs are case-sensitive; relationship selection does not expand components. Every response carries source URLs and attribution. Find advisory IDs with cisa_search_ics_advisories.
 
 | Param | Type | Notes |
 |:---|:---|:---|
@@ -553,8 +564,10 @@ products?     { vendorCount, productCount,
 vulnerabilities? [ { cve, cweId?, cweName?, title?,
                      scores[]: { version, baseScore, baseSeverity,
                                  severityDerived, vectorString, productIds[] },
-                     remediations[]: { category, details, url?, productIds[],
+                     remediations[]: { category, details, url?, productIds[], groupIds?[],
                                        restartRequired? },
+                     flags?[]: { label, productIds[], groupIds?[] },
+                     threats?[]: { category, details, productIds[], groupIds?[] },
                      productStatus: { known_affected[], fixed[],
                                       known_not_affected[], recommended[] },
                      notes[]: { category, title?, text } } ]
@@ -576,9 +589,11 @@ indexCheckpoint?, indexLastSyncedAt?   # present when found is false (Decision 3
 
 Upstream strings are escaped in Markdown only, retaining visible literal placeholders and metacharacters. Stored and structured strings remain intact; URL fields render as syntax-safe autolinks. `identificationHelper` is lossless JSON text of the original upstream object, retaining its keys and types within the supported output depth.
 
-Product selection prunes empty groups, keeps whole-document `productCount`/`vendorCount`, and sets `shownProducts` to the returned definition count. `selected: true` discloses selection separately from legacy truncation; every definition remains stored and searchable. Definitions in top-level `full_product_names` and `relationships[].full_product_name` join branch definitions once per ID, under an unspecified vendor when upstream supplies no vendor path. Relationship rows preserve exact full names, category, and both component references without inventing dangling definitions. Ingest-content version 2 reprocesses existing unchanged advisories through the established background re-ingest.
+Product selection prunes empty groups, keeps whole-document `productCount`/`vendorCount`, and sets `shownProducts` to the returned definition count. `selected: true` discloses selection separately from legacy truncation; every definition remains stored and searchable. Definitions in top-level `full_product_names` and `relationships[].full_product_name` join branch definitions once per ID, under an unspecified vendor when upstream supplies no vendor path. Relationship rows preserve exact full names, category, and both component references without inventing dangling definitions.
 
-**Outline behavior.** `outlineOnOverflow(doc, { budget: 24_000 })` on the disclosure path; `selectSections(doc, input.sections, { alwaysKeep: ['advisory'] })` on the selection path. 783 of 3,926 advisories exceed 24 KB and 102 exceed 100 KB, with the largest at 1.38 MB (544 vulnerability entries, 585 products) — truncating those silently is not an option and returning them whole burns the caller's context. The re-call is stateless: the mirror lookup is deterministic, so the handler re-reads the row and projects it. The tool and the resource share one extractor, `extractAdvisorySections` in `src/mcp-server/schemas/advisory.ts`, so both outline arms size and list sections identically.
+Remediations, flags, and threats retain `groupIds` verbatim, including unresolved references. With group references, `productIds` is the deduplicated union of direct IDs followed by members of matching `product_tree.product_groups` in document order. Direct-only arrays retain their original order and duplicates. No missing group or product definition is invented, and empty applicability does not mean universal applicability. Flags and threats are optional on stored rows awaiting re-ingest; current ingest writes arrays, including empty arrays. Ingest-content version 3 reprocesses unchanged advisories through the established background re-ingest so these fields and grouped applicability reach existing indexes.
+
+**Outline behavior.** `outlineOnOverflow(doc, { budget: 24_000 })` on the disclosure path; `selectSections(doc, input.sections, { alwaysKeep: ['advisory'] })` on the selection path. Both tool and resource outline arms also retain the complete `advisory` header, including identity, source URLs, and attribution. Historically, 783 of 3,926 advisories exceeded 24 KB and 102 exceeded 100 KB, with the largest at 1.38 MB (544 vulnerability entries, 585 products). The re-call is stateless: the handler re-reads the row and projects it. The tool and resource share `extractAdvisorySections` in `src/mcp-server/schemas/advisory.ts`, so both outline arms size and list sections identically.
 
 **`cves` narrowing.** `vulnerabilities` is one section, and 182 advisories carry one over the 24 KB budget, 29 over 100 KB — the largest (`ICSA-26-209-04`, 352 CVEs) is 905,159 bytes. The outline's vulnerabilities entry therefore lists the section's CVE IDs, and when that section alone overflows the budget, the outline notice points at `cves`. The listing is what the outline costs: measured on the built server, `ICSA-23-348-10` (544 CVEs) grows from 612 to 9,869 bytes of `structuredContent` and 617 to 9,369 bytes of `content[]`; `ICSA-26-209-04` from 606 to 6,738 and 611 to 6,430 — still well inside the budget the outline exists to respect. A re-call naming one of `ICSA-26-209-04`'s CVEs returns 3,628 bytes instead of 905,159.
 
@@ -607,18 +622,20 @@ A miss is a result, not an error: `{ found: false, guidance, indexCheckpoint, in
 
 **Description**
 
-> List what CISA has published recently — its combined advisory feed, its alerts feed, or its ICS advisory feed. Each feed is a rolling window of exactly 30 items with no history, no pagination, and no date-range query, so the window's coverage varies from about a week to about two months depending on the feed. For ICS advisory history beyond the window, use cisa_search_ics_advisories, which covers the full corpus back to 2010.
+> List what CISA has published recently — its combined advisory feed, its alerts feed, or its ICS advisory feed. Cursors continue within the current 30-item rolling window; upstream provides no pagination, history, or date-range query. The window's coverage varies from about a week to about two months depending on the feed. For ICS advisory history beyond the window, use cisa_search_ics_advisories, which covers the full corpus back to 2010.
 
 | Param | Type | Notes |
 |:---|:---|:---|
 | `feed` | `z.enum(['advisories','alerts','ics']).default('advisories')` | `advisories` → `all.xml`, `alerts` → `alerts.xml`, `ics` → `ics-advisories.xml`. |
-| `limit` | `z.number().int().min(1).max(30).default(30)` | The upstream window is 30; the cap is the real ceiling, not a server choice. |
+| `limit` | `z.number().int().min(1).max(1000).default(30)` | Effective page size at most 30 under shared read limits; upstream exposes no more than 30. |
+| `cursor` | `z.string().optional()` | Opaque feed-and-GUID continuation from the previous page. The current request's limit applies. |
 | `since` | `CalendarDateInputSchema.optional()` (`z.iso.date()`) | Real calendar date in YYYY-MM-DD; filters *within* the fetched window. It cannot reach back beyond it. |
 
 **Output**
 
 ```
 feed, feedUrl, feedTitle, fetchedAt, stale
+hasMore, cursor?
 items[]: { title, link, pubDate, summary, summaryTruncated,
            guid, advisoryId? }
 window: { itemCount, oldest, newest, upstreamWindowSize: 30 }
@@ -626,19 +643,22 @@ window: { itemCount, oldest, newest, upstreamWindowSize: 30 }
 
 `title` is trimmed — upstream carries trailing whitespace. `summary` is the item `description` with HTML stripped and entities decoded, capped at 1,200 characters with `summaryTruncated` disclosed: ICS advisory descriptions run to 14 KB each, and thirty of them unstripped is 420 KB of markup. `advisoryId` is parsed from an `/ics-advisories/` or `/ics-medical-advisories/` link and uppercased, so it chains straight into `cisa_get_advisory`. `guid` is passed through as the upstream node path — it is not a URL and is not presented as one.
 
+Continuation resumes after the cursor's GUID in the available current or cached window, then applies `since` and the current page size. `hasMore` describes matching items remaining in that window, with a cursor only when another page exists. A missing anchor returns no items, `hasMore: false`, no cursor, and restart guidance identifying whether the window is cached or current. It never infers eviction or historical completeness from the missing anchor. `window.oldest` and `window.newest` describe the whole fetched window, while `itemCount` counts this page.
+
 **Enrichment**
 
 | Key | Kind | When |
 |:---|:---|:---|
-| `windowCaveat` | `notice` | Always — "This feed is a rolling window of the 30 most recent items. There is no history, no pagination, and no server-side date filter; anything older than the oldest item shown is unreachable from this feed. For ICS advisory history use cisa_search_ics_advisories." |
-| `effectiveQuery` | `echo` | When `since` is set — the applied value and how many of the 30 it excluded. `ctx.enrich.echo()` writes `effectiveQuery`, not `echo` |
-| `truncated`, `shown`, `cap` | `truncated` | When `limit` < window size — `ctx.enrich.truncated()` writes these three fields separately |
-| `notice` | `notice` | On refresh failure, cached-window and retry guidance; when `since` excludes every item, distinguishes the current window from a stale cached window whose emptiness cannot establish current publication absence. |
+| `windowCaveat` | `notice` | Always — continuation is confined to the available current or cached 30-item window; upstream offers no pagination, history, or server-side date filter. Routes ICS history to `cisa_search_ics_advisories`. |
+| `effectiveQuery` | `echo` | When `since` is set — the applied value and excluded count among items after the resume point. `ctx.enrich.echo()` writes `effectiveQuery`, not `echo`. |
+| `truncated`, `shown`, `cap` | `truncated` | When more matching items remain after this page; guidance points to the cursor. |
+| `notice` | `notice` | Composes continuation guidance, unavailable-anchor restart guidance, and refresh-failure guidance. When `since` excludes every available item, distinguishes current from stale cached emptiness; neither a stale window nor an unavailable anchor establishes current publication absence. |
 
 **Errors**
 
 | reason | code | when | recovery |
 |:---|:---|:---|:---|
+| `invalid_cursor` | `InvalidParams` | Malformed cursor or a cursor for another feed | Omit cursor to restart, or use the previous response's cursor with the same feed. |
 | `feed_unavailable` | `ServiceUnavailable` (`retryable: true`) | The feed fetch failed or returned a non-XML body | `The CISA feed is unreachable; retry in a few minutes, or use cisa_search_ics_advisories for ICS advisory history, which serves from a local index.` |
 
 ---
@@ -772,6 +792,7 @@ No conditional-GET mechanism exists, so each feed is fetched at most once per 15
 
 | Env Var | Required | Default | Description |
 |:---|:---|:---|:---|
+| `CISA_CLAMP_OVERSIZED_INPUTS` | No | `true` | `z.stringbool()`. Clamp the five supported read inputs to their workload caps and disclose remainders or continuation; false rejects over-cap requests with `read_limit_exceeded`. |
 | `CISA_KEV_REFRESH_CRON` | No | `*/30 * * * *` | Cron for the KEV conditional-refresh poll, on every transport. `off` (any case) disables it; any other value `node-cron` rejects fails startup with a `ConfigurationError` naming the variable (Decision 31). |
 | `CISA_CSAF_MIRROR_PATH` | No | `<cache>/cisa-cybersecurity-mcp-server/csaf.sqlite3` | Filesystem path to the ICS advisory index. `<cache>` is `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows, and an absolute `$XDG_CACHE_HOME` else `~/.cache` elsewhere — never the working directory (Decision 28). The Docker image sets `/usr/src/app/.mirror/csaf.sqlite3`. |
 | `CISA_CSAF_MIRROR_AUTO_INIT` | No | `true` | `z.stringbool()`. When true, seed a mirror that has never completed a sync, and re-ingest one an older ingest-content version built (Decision 19), both in the background at startup. Set false where seeding runs out of band. |
@@ -782,7 +803,7 @@ No conditional-GET mechanism exists, so each feed is fetched at most once per 15
 
 `z.stringbool()` for the boolean, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag cannot be turned off from the environment.
 
-**Packaging parity.** `lint:packaging` requires the same names in `server.json` `environmentVariables[]` and `manifest.json` `mcp_config.env` + `user_config`. All seven are optional strings, so each `user_config` entry carries `"default": ""` and each is wired as `"CISA_X": "${user_config.cisa_x}"`.
+**Packaging parity.** `lint:packaging` requires the same names in `server.json` `environmentVariables[]` and `manifest.json` `mcp_config.env` + `user_config`. All eight are optional strings, so each `user_config` entry carries `"default": ""` and each is wired as `"CISA_X": "${user_config.cisa_x}"`.
 
 **Dependencies.** `better-sqlite3` is a runtime dependency (see Decision 2). The mirror lifecycle scripts and `tsconfig.mirror.json` ship in npm, the bundle, and Docker. Each `mirror:*` command selects that runtime config: aliases resolve current `src/` modules in a checkout and compiled `dist/` modules in an artifact. The compiler's separate source-only paths stay strict, so the runtime resolver cannot hide a missing source import during typechecking.
 
@@ -856,7 +877,7 @@ Inherent to the sources. None is solvable by this server, and each is stated in 
 4. **Vulnrichment coverage is incomplete and can lag.** Not every CVE — including some in KEV — has a record, and a published `Exploitation` value can predate the KEV addition that contradicts it.
 5. **Advisory sector coverage begins in 2017.** 729 of 3,937 documents carry no sector note at the 2026-09-24 checkpoint; a sector filter cannot reach them. The gap is disclosed, with the live count, on every filtered call.
 6. **No structured CVSS v4 in the advisory corpus.** 392 advisories score only in CVSS v2 at the 2026-09-24 checkpoint, where the upstream publishes no severity label and the band must be derived.
-7. **The RSS feeds have no history and no conditional GET.** Thirty items, no pagination, no date query, no ETag or Last-Modified — a timer-cached unconditional poll is the only available strategy.
+7. **The RSS feeds have no history and no conditional GET.** Continuation reaches only the available current or cached 30-item window, with no upstream pagination or date query. An unavailable GUID anchor requires a restart and does not establish why the anchor is missing. No ETag or Last-Modified exists, so refresh uses a timer-cached unconditional poll.
 8. **Advisory vendor names are unnormalized.** 895 distinct vendor labels across 3,926 documents at the 2026-09-17 checkpoint, with the same company under several spellings, and a few double-encoded upstream (`GeutebrÃ¼ck`, `LeÃ£o`), so `Geutebrück` does not match them. Vendor filtering is substring matching, not an enum.
 9. **The KEV feed ignores `If-None-Match`.** Only `If-Modified-Since` yields a 304; a client that trusts the served ETag re-downloads the whole feed (1.74 MB at catalog `2026.09.18`) on every poll.
 10. **No Cloudflare Workers deployment.** The mirror needs embedded SQLite and a persistent filesystem; neither exists in an isolate. stdio, HTTP, Docker, and `.mcpb` are the supported surfaces.
@@ -881,7 +902,7 @@ KEV replacement is atomic only after validating the envelope, declared count, ev
 The repository is ~343 MB against a corpus this server touches tens of records from per session — three orders of magnitude of cost for no gain. Path shape verified: `{YYYY}/{block}/{CVE-ID}.json` on branch **`develop`** (`main` 404s), where `block` is the CVE numeric part with its last three characters replaced by `xxx`. Normalized results cache under `ctx.state` at `ssvc/<CVE-ID>` for 6 h, best-effort in both directions so correctness never depends on the cache. A 404 caches as a negative for 1 h rather than indefinitely, because CISA enriches continuously. A miss is `{ found: false, guidance }` — a result the agent reasons about, not a throw — with distinct guidance for a 404, a record with no CISA-ADP container, and a CISA-ADP container carrying no SSVC metric.
 
 **5. RSS feeds are polled unconditionally on a 15-minute timer, because no conditional-GET mechanism exists.**
-The feeds serve no `etag` and no `last-modified`, and set `cache-control: private, no-cache, must-revalidate`, so there is nothing to make a request conditional on. Fetching per call would mean up to 531 KB per invocation; a 15-min shared TTL caps it at three fetches and ~1 MB per window across all callers. The 30-item ceiling is the upstream's, not a server choice, so `limit` maxes at 30 and `cisa_get_alerts` always carries a `windowCaveat` stating there is no history, no pagination, and no server-side date filter, routing ICS history to `cisa_search_ics_advisories`. `since` filters within the fetched window and says so.
+The feeds serve no `etag` and no `last-modified`, and set `cache-control: private, no-cache, must-revalidate`, so there is nothing to make a request conditional on. Historical probes measured up to 531 KB per invocation; a 15-min shared TTL limits refreshes across callers. The 30-item upstream ceiling bounds the effective page size. Feed-and-GUID cursors resume within the available current or cached window without claiming upstream pagination or history. A missing anchor produces restart guidance, not an inferred eviction. `windowCaveat` states these limits and routes ICS history to `cisa_search_ics_advisories`; `since` filters only within the available window.
 
 Every feed result reports the successful fetch timestamp (`fetchedAt`) and whether refresh failed (`stale`). Failed refreshes preserve cached items with safe retry guidance on both surfaces; stale filtered emptiness cannot confirm current absence. All fetch attempts, response reads, and retry backoff share a 45-second deadline, leaving time below the default 60-second MCP timeout to deliver fallback or the declared cold `feed_unavailable` error. Caller cancellation propagates rather than becoming fallback success; returned freshness wrappers never mutate a previous response.
 
@@ -939,8 +960,8 @@ The resource's advisory-ID completion prefix escapes `\`, `%`, and `_` and runs 
 **23. `cves` is the sub-section selector for `vulnerabilities`, and the outline lists the IDs to choose from.**
 The framework's `selectSections` stops at top-level keys by design and leaves sub-section selection to the server. `cves` narrows `vulnerabilities` to the named entries and is validated against the advisory's own CVE list, both errors thrown in the handler so their recovery hints reach the caller. Listing the CVE IDs in both outline arms is what makes the selector usable; it costs up to ~9.3 KB per surface on the 544-CVE advisory, still under the budget. The outline element extends the framework's strip-mode schema instead of reusing it — reused verbatim, the parse would silently drop `cves`. `productIds` separately narrows product definitions using IDs already available in vulnerability status, score, and remediation references; no product-ID list is added to outlines.
 
-**24. `cisa_check_cve_status` shrinks a batch with a `detail: "summary"` projection, never a cap.**
-A scan-result check needs every requested CVE back, so capping the list would drop answers, and lowering the 200 maximum would remove the batch the tool exists for. `summary` keeps the eleven triage fields (`cveId`, `inKev`, dates, `daysUntilDue`, `overdue`, `directive`, vendor and product labels, the ransomware and forensic-triage flags) and reuses `KevRecordSchema`, whose dropped fields were already optional. Measured on catalog `2026.09.24` over the 200 most recently added CVEs: `structuredContent` 308,063 → 52,734 bytes, `content[]` 298,391 → 60,958 bytes. `full` stays the default and byte-identical; the "this is a summary" disclosure rides a `summaryNote` enrichment written only under `summary`, so it never touches `full` output on either surface.
+**24. `cisa_check_cve_status` offers a compact projection and an explicit remainder for oversized batches.**
+`summary` keeps the eleven triage fields (`cveId`, `inKev`, dates, `daysUntilDue`, `overdue`, `directive`, vendor and product labels, the ransomware and forensic-triage flags) and reuses `KevRecordSchema`, whose omitted fields are optional. Historically measured on catalog `2026.09.24` over the 200 most recently added CVEs: `structuredContent` 308,063 → 52,734 bytes, `content[]` 298,391 → 60,958 bytes. `full` remains the default; `summaryNote` discloses the projection only under `summary`. The shared read-limit policy accepts up to 1,000 IDs but processes 200 per call, returning every remaining normalized ID as `unprocessedIds` with follow-up guidance. This bounds each response without silently discarding scan results. `CISA_CLAMP_OVERSIZED_INPUTS=false` restores rejection above the workload cap.
 
 **25. Every URL in KEV `notes` becomes a reference; the prose around them stays whole.**
 Upstream puts URLs in `notes` comma-joined, inside prose, in parentheses, and once with a `;` inside the URL — shapes the original `url` / `Label: url` split never read, which left 15 ED-era entries with no reference at all. The parser now extracts every URL, keeps notes order, trims sentence punctuation, and leaves prose segments verbatim with their URLs, because stripping the URLs would strand `()` and `please see:`. Labels attach only to the exact `Label: url` shape. Against catalog `2026.09.24`: references 2,947 → 3,252, entries with no `nvd` reference 15 → 0, entries with `notesCommentary` 166 → 122, and no existing reference lost. The parse stays linear in the length of `notes`, because `notes` is upstream text parsed on every catalog load: the `;` rejoin carries whether the last segment ends in a URL rather than rescanning the growing segment, and the punctuation trim is one backward pass against a paren balance counted once.

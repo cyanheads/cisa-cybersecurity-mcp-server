@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-31
+
+CISA investigation guide and complete advisory applicability evidence
+
 ## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-14
 
 cisa_get_advisory keeps relationship products and selects them with productIds; impossible calendar dates are rejected on all nine date filters; KEV, feed, and advisory-index refreshes no longer hide failures; mirror:refresh works from the published package.
