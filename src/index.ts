@@ -35,6 +35,7 @@ await createApp({
 
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
+  skills: 'skills',
 
   setup() {
     const config = getServerConfig();
