@@ -71,7 +71,7 @@ describe('cross-process sync lease', () => {
   const leaseRow = async (service: CsafMirrorService) =>
     (await service.mirrorInstance.raw())
       .prepare<{ value: string }>("SELECT value FROM mirror_meta WHERE key = 'sync_lease'")
-      .get();
+      .all()[0];
 
   /**
    * Start a seed on `first` whose archive response is held until `release()`,

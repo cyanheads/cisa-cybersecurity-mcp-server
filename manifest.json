@@ -17,6 +17,7 @@
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
+        "CISA_CLAMP_OVERSIZED_INPUTS": "${user_config.cisa_clamp_oversized_inputs}",
         "CISA_KEV_REFRESH_CRON": "${user_config.cisa_kev_refresh_cron}",
         "CISA_CSAF_MIRROR_PATH": "${user_config.cisa_csaf_mirror_path}",
         "CISA_CSAF_MIRROR_AUTO_INIT": "${user_config.cisa_csaf_mirror_auto_init}",
@@ -35,6 +36,13 @@
   "tools_generated": true,
   "prompts_generated": true,
   "user_config": {
+    "cisa_clamp_oversized_inputs": {
+      "type": "string",
+      "title": "Clamp oversized read inputs",
+      "description": "true returns bounded results and explicit unprocessed CVE IDs. false rejects requests above each tool's workload cap. Leave blank for true.",
+      "required": false,
+      "default": ""
+    },
     "cisa_kev_refresh_cron": {
       "type": "string",
       "title": "KEV refresh cron",

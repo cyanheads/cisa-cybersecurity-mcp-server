@@ -28,6 +28,15 @@
     "ics-security",
     "vulnerability-management"
   ],
+  "userConfig": {
+    "cisa_clamp_oversized_inputs": {
+      "type": "string",
+      "title": "Clamp oversized read inputs",
+      "description": "true returns bounded results and explicit unprocessed CVE IDs. false rejects requests above each tool's workload cap. Leave blank for true.",
+      "required": false,
+      "default": ""
+    }
+  },
   "mcpServers": {
     "cisa-cybersecurity-mcp-server": {
       "command": "npx",
@@ -36,7 +45,8 @@
         "@cyanheads/cisa-cybersecurity-mcp-server"
       ],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "CISA_CLAMP_OVERSIZED_INPUTS": "${user_config.cisa_clamp_oversized_inputs}"
       }
     }
   }

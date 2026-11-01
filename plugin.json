@@ -1,0 +1,38 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "cisa-cybersecurity-mcp-server",
+  "version": "0.3.2",
+  "description": "CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF) via MCP. Keyless. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/cisa-cybersecurity-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "cisa",
+    "kev",
+    "known-exploited-vulnerabilities",
+    "bod-26-04",
+    "ssvc",
+    "csaf",
+    "ics-advisories",
+    "ics-security",
+    "vulnerability",
+    "vulnerability-management",
+    "security",
+    "cve",
+    "ai-agents",
+    "ai-tools",
+    "cyanheads"
+  ]
+}

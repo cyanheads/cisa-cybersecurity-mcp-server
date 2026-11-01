@@ -6,7 +6,7 @@
  *
  *   1. `mcpb clean <bundle>` — official dev-dependency prune + manifest
  *      validation (a measured real-world bundle dropped 61 MB → 12.9 MB).
- *   2. Exact-name strip of two entry classes nested under `node_modules/`,
+ *   2. Exact-name strip of four entry classes nested under `node_modules/`,
  *      which root-anchored `.mcpbignore` patterns cannot reach by design
  *      (issues #146/#207):
  *        a. Dependency-shipped agent docs — `framework-skills/`, `skills/`,
@@ -14,9 +14,13 @@
  *        b. Platform-specific native bindings, which would otherwise lock the
  *           bundle to the build host's platform and push it past the 25 MB cap
  *           registries enforce (issue #274).
- *        c. Build-only source trees of a dependency that ships prebuilds for
- *           every platform — present solely for a from-source compile that this
- *           bundle never performs.
+ *        c. node-gyp build output beside a `binding.gyp` — generator files,
+ *           intermediate trees, and link inputs, which record the packing
+ *           host's paths; compiled `*.node` addons stay (issue #783).
+ *        d. Build-only package files — mcp-ts-core's `changelog/`, `config/`,
+ *           `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, `biome.json`,
+ *           and `vitest.config.base.mjs`, and better-sqlite3's `deps/` and
+ *           `src/` C sources (issue #791).
  *   3. Re-list and assert zero matching entries remain.
  *
  * Entry names are passed to `zip -d` with `-nw` (no-wildcard) so they match
@@ -42,7 +46,7 @@ import { fileURLToPath } from 'node:url';
  * these scripts were copied into.
  */
 export const AGENT_DOC_ENTRY =
-  /^node_modules\/.*(?:\/framework-skills\/|\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
+  /^node_modules\/(?:.+\/node_modules\/)?(?:@[^/]+\/)?[^/]+\/(?:(?:framework-skills|skills|\.claude|\.agents)\/|SKILL\.md$)/;
 
 /**
  * Platform-specific native binding packages, which must not ship in a bundle.
@@ -65,21 +69,43 @@ export const AGENT_DOC_ENTRY =
 export const NATIVE_BINDING_ENTRY = /^node_modules\/@duckdb\/node-bindings-[^/]+\//;
 
 /**
- * Build-only source trees that must not ship in a bundle.
- * KEEP IN SYNC with `BUILD_ONLY_ENTRY` in `scripts/lint-packaging.ts`
- * (post-bundle content check) — edit both literals together.
+ * node-gyp output, matched against an entry's path below a `build/` directory
+ * that has a sibling `binding.gyp` (see `filterNodeGypBuildEntries`).
+ * KEEP IN SYNC with `NODE_GYP_OUTPUT` and `filterNodeGypBuildEntries` in
+ * `scripts/lint-packaging.ts` (post-bundle content check) — edit both together.
+ * The assertion that they select the same entries lives in the mcp-ts-core
+ * repository's own test suite; `tests/` is not part of the published package,
+ * so nothing enforces the pair in a server these scripts were copied into.
  *
- * `better-sqlite3` is a regular dependency here and its `prebuilds/` directory
- * must **survive**: the package ships all eight platform prebuilds inside the npm
- * tarball and selects one at runtime, which is what keeps the bundle
- * cross-platform. What does not need to ship is `deps/` and `src/` — 9.8 MB of
- * SQLite C source used solely for a from-source build that never happens inside a
- * bundle. This is a separate literal rather than a widening of
- * `NATIVE_BINDING_ENTRY` precisely because that regex exists to *remove* native
- * bindings, and overloading it would invite the one deletion that breaks the
- * bundle.
+ * Generator files (`config.gypi` records the packing host's node-gyp cache as
+ * `nodedir`; `Makefile` records the checkout path), MSBuild projects,
+ * `gyp-*-tool`, the `obj.target/`, `obj/`, `.deps/`, and `node_gyp_bins/`
+ * intermediate trees, and link inputs and debug symbols. None is loaded at
+ * runtime. Everything else under `build/` ships, so a compiled `*.node` addon
+ * (loaders search `build/`, `build/Debug/`, and `build/Release/`) and any
+ * shared library beside it survive.
  */
-export const BUILD_ONLY_ENTRY = /^node_modules\/better-sqlite3\/(?:deps|src)\//;
+export const NODE_GYP_OUTPUT =
+  /(?:^|\/)(?:(?:obj\.target|obj|\.deps|node_gyp_bins)\/|(?:config\.gypi|Makefile|gyp-mac-tool|gyp-flock-tool|[^/]+\.(?:Makefile|mk|sln|vcxproj|vcxproj\.filters|a|o|lib|obj|exp|pdb|ilk|iobj|ipdb))$)/;
+
+/**
+ * Build-only package files that must not ship in a bundle.
+ * KEEP IN SYNC with `BUILD_ONLY_ENTRY` in `scripts/lint-packaging.ts`
+ * (post-bundle content check) — edit both literals together. The assertion that
+ * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
+ * not part of the published package, so nothing enforces the pair in a server
+ * these scripts were copied into.
+ *
+ * mcp-ts-core publishes `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`,
+ * and `AGENTS.md` for `init`, maintenance, and agents editing a server's
+ * source, and the config bases a server's own tooling extends — `biome.json`,
+ * `vitest.config.base.mjs`, and `config/tsconfig.base.json`, the only file in
+ * `config/`. The running server reads none of them (its `framework-skills/`
+ * is an agent-doc entry). better-sqlite3 publishes its `deps/` and `src/` C
+ * sources for a source build; at runtime it loads a prebuilt or compiled addon.
+ */
+export const BUILD_ONLY_ENTRY =
+  /^node_modules\/(?:.+\/node_modules\/)?(?:@cyanheads\/mcp-ts-core\/(?:(?:changelog|config|scripts|templates)\/|(?:(?:CLAUDE|AGENTS)\.md|biome\.json|vitest\.config\.base\.mjs)$)|better-sqlite3\/(?:deps|src)\/)/;
 
 /** Filter a bundle entry listing down to the agent-doc entries to strip. */
 export function filterAgentDocEntries(entries: string[]): string[] {
@@ -91,7 +117,23 @@ export function filterNativeBindingEntries(entries: string[]): string[] {
   return entries.filter((entry) => NATIVE_BINDING_ENTRY.test(entry));
 }
 
-/** Filter a bundle entry listing down to the build-only source entries to strip. */
+/**
+ * Filter a bundle entry listing down to the node-gyp output to strip: entries
+ * under `<dir>/build/` matching `NODE_GYP_OUTPUT`, for each `<dir>/binding.gyp`
+ * in the listing. A `build/` with no sibling `binding.gyp` is never touched —
+ * `@opentelemetry/semantic-conventions/build/src/` is a runtime entry.
+ * KEEP IN SYNC with `filterNodeGypBuildEntries` in `scripts/lint-packaging.ts`.
+ */
+export function filterNodeGypBuildEntries(entries: string[]): string[] {
+  const buildDirs = entries
+    .filter((entry) => /(?:^|\/)binding\.gyp$/.test(entry))
+    .map((entry) => `${entry.slice(0, -'binding.gyp'.length)}build/`);
+  return entries.filter((entry) =>
+    buildDirs.some((dir) => entry.startsWith(dir) && NODE_GYP_OUTPUT.test(entry.slice(dir.length))),
+  );
+}
+
+/** Filter a bundle entry listing down to the build-only package files to strip. */
 export function filterBuildOnlyEntries(entries: string[]): string[] {
   return entries.filter((entry) => BUILD_ONLY_ENTRY.test(entry));
 }
@@ -138,16 +180,19 @@ function main(): void {
     process.exit(1);
   }
 
-  // 2. Exact-name strip of agent docs, platform natives, and build-only sources.
+  // 2. Exact-name strip of agent docs, platform natives, node-gyp output, and build-only files.
   let agentDocs: string[] = [];
   let natives: string[] = [];
+  let nodeGyp: string[] = [];
   let buildOnly: string[] = [];
   try {
     const entries = listEntries(bundle);
     agentDocs = filterAgentDocEntries(entries);
     natives = filterNativeBindingEntries(entries);
+    nodeGyp = filterNodeGypBuildEntries(entries);
     buildOnly = filterBuildOnlyEntries(entries);
-    const doomed = [...agentDocs, ...natives, ...buildOnly];
+    // An entry in two classes is named once: a `zip -d` batch naming only deleted entries exits 12.
+    const doomed = [...new Set([...agentDocs, ...natives, ...nodeGyp, ...buildOnly])];
     for (let i = 0; i < doomed.length; i += DELETE_BATCH) {
       run('zip', ['-q', '-d', '-nw', bundle, ...doomed.slice(i, i + DELETE_BATCH)]);
     }
@@ -165,6 +210,7 @@ function main(): void {
   const remaining = [
     ...filterAgentDocEntries(remainingEntries),
     ...filterNativeBindingEntries(remainingEntries),
+    ...filterNodeGypBuildEntries(remainingEntries),
     ...filterBuildOnlyEntries(remainingEntries),
   ];
   if (remaining.length > 0) {
@@ -176,7 +222,8 @@ function main(): void {
   const sizeAfter = statSync(bundle).size;
   console.log(
     `Bundle cleaned: ${mb(sizeBefore)} → ${mb(sizeAfter)} ` +
-      `(${agentDocs.length} agent-doc, ${natives.length} native-binding, ${buildOnly.length} build-only entries stripped).`,
+      `(${agentDocs.length} agent-doc, ${natives.length} native-binding, ${nodeGyp.length} node-gyp build, ` +
+      `${buildOnly.length} build-only entries stripped).`,
   );
 }
 

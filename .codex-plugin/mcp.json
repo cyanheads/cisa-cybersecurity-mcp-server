@@ -7,6 +7,7 @@
     ],
     "env": {
       "MCP_TRANSPORT_TYPE": "stdio"
-    }
+    },
+    "env_vars": ["CISA_CLAMP_OVERSIZED_INPUTS"]
   }
 }

@@ -27,6 +27,24 @@ describe('server config', () => {
     resetServerConfig();
   });
 
+  describe('CISA_CLAMP_OVERSIZED_INPUTS', () => {
+    it('defaults to enabled for absent and blank values', () => {
+      for (const value of [undefined, '', '   ']) {
+        resetServerConfig();
+        vi.stubEnv('CISA_CLAMP_OVERSIZED_INPUTS', value);
+        expect(getServerConfig()).toHaveProperty('clampOversizedInputs', true);
+      }
+    });
+
+    it('parses false explicitly and rejects ambiguous boolean text', () => {
+      vi.stubEnv('CISA_CLAMP_OVERSIZED_INPUTS', 'false');
+      expect(getServerConfig()).toHaveProperty('clampOversizedInputs', false);
+      resetServerConfig();
+      vi.stubEnv('CISA_CLAMP_OVERSIZED_INPUTS', 'sometimes');
+      expect(getServerConfig).toThrow('CISA_CLAMP_OVERSIZED_INPUTS');
+    });
+  });
+
   describe('CISA_CSAF_MIRROR_PATH', () => {
     it('uses an explicitly set path exactly as given, relative or absolute', () => {
       for (const path of ['/tmp/somewhere/csaf.sqlite3', 'relative/dir/index.sqlite3']) {

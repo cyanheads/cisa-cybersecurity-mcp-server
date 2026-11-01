@@ -7,7 +7,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { extractCursor, paginateArray } from '@cyanheads/mcp-ts-core/utils';
+import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
+import {
+  applyReadLimit,
+  READ_INPUT_HARD_CEILING,
+  READ_INPUT_LIMITS,
+} from '@/mcp-server/read-limits.js';
 import {
   CalendarDateInputSchema,
   CweIdInputSchema,
@@ -24,7 +29,7 @@ import {
 } from '@/services/kev-catalog/kev-catalog-service.js';
 import type { KevRecord } from '@/services/kev-catalog/types.js';
 
-const MAX_PAGE_SIZE = 100;
+const MAX_PAGE_SIZE = READ_INPUT_LIMITS.cisa_search_kev.cap;
 
 export const searchKevTool = tool('cisa_search_kev', {
   title: 'cisa_search_kev',
@@ -96,9 +101,11 @@ export const searchKevTool = tool('cisa_search_kev', {
       .number()
       .int()
       .min(1)
-      .max(MAX_PAGE_SIZE)
+      .max(READ_INPUT_HARD_CEILING)
       .default(25)
-      .describe('Maximum entries per page.'),
+      .describe(
+        'Maximum entries per page; requests above 100 use 100 when input clamping is enabled.',
+      ),
     cursor: z
       .string()
       .optional()
@@ -164,6 +171,14 @@ export const searchKevTool = tool('cisa_search_kev', {
 
   errors: [
     {
+      reason: 'read_limit_exceeded',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'limit exceeds the per-call cap and input clamping is disabled.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery: 'Send limit at most 100, then follow the returned cursor for more entries.',
+    },
+    {
       reason: 'catalog_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'No KEV catalog snapshot is held and the fetch from cisa.gov failed.',
@@ -190,6 +205,8 @@ export const searchKevTool = tool('cisa_search_kev', {
   ],
 
   async handler(input, ctx) {
+    const limit = applyReadLimit('cisa_search_kev', input.limit, ctx);
+    const offset = input.cursor ? decodeCursor(input.cursor, ctx).offset : 0;
     if (input.dateAddedFrom && input.dateAddedTo && input.dateAddedFrom > input.dateAddedTo) {
       throw ctx.fail(
         'invalid_date_range',
@@ -223,13 +240,14 @@ export const searchKevTool = tool('cisa_search_kev', {
     const snapshot = await catalog.snapshot(ctx);
     const asOf = catalog.asOf();
     const matched = await catalog.search(filters, input.sortBy, input.order, ctx);
-    const page = paginateArray(
-      matched,
-      extractCursor({ ...(input.cursor ? { cursor: input.cursor } : {}) }),
-      input.limit,
-      MAX_PAGE_SIZE,
-      ctx,
-    );
+    const items = matched.slice(offset, offset + limit);
+    const page = {
+      items,
+      nextCursor:
+        offset + limit < matched.length
+          ? encodeCursor({ offset: offset + limit, limit })
+          : undefined,
+    };
 
     ctx.log.info('Searched the KEV catalog', { matched: matched.length, shown: page.items.length });
 
@@ -239,7 +257,7 @@ export const searchKevTool = tool('cisa_search_kev', {
     }
     applied.sortBy = input.sortBy;
     applied.order = input.order;
-    applied.limit = String(input.limit);
+    applied.limit = String(limit);
 
     ctx.enrich({
       catalog: {
@@ -276,15 +294,19 @@ export const searchKevTool = tool('cisa_search_kev', {
       notices.push(zeroHitNotice(filters, counts, snapshot.records, asOf));
     }
 
-    if (page.items.length >= input.limit && page.nextCursor) {
+    if (input.limit > MAX_PAGE_SIZE && page.nextCursor)
+      notices.push(
+        `Requested limit ${input.limit}; applied ${limit}. Follow the cursor for more entries.`,
+      );
+    if (page.items.length >= limit && page.nextCursor) {
       const shown = page.items.length;
       ctx.enrich.truncated({
         shown,
-        cap: input.limit,
+        cap: limit,
         ...(notices.length > 0
           ? {
               guidance: [
-                `Results capped at ${input.limit}; showing ${shown}. Raise the cap or narrow with filters.`,
+                `Results capped at ${limit}; showing ${shown}. Raise the cap or narrow with filters.`,
                 ...notices,
               ].join(' '),
             }

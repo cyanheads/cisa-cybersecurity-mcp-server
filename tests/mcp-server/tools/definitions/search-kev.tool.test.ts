@@ -13,6 +13,7 @@ import {
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetServerConfig } from '@/config/server-config.js';
 import { searchKevTool } from '@/mcp-server/tools/definitions/search-kev.tool.js';
 import {
   getKevCatalog,
@@ -20,7 +21,7 @@ import {
   KEV_FEED_URL,
   resetKevCatalog,
 } from '@/services/kev-catalog/kev-catalog-service.js';
-import { buildKevFeedBody } from '../../../fixtures/kev-feed.js';
+import { buildKevFeedBody, KEV_RECORDS } from '../../../fixtures/kev-feed.js';
 import { DRIFTING_CATALOG_COUNT } from '../../../helpers/catalog-counts.js';
 import { contentText, firstText } from '../../../helpers/format-text.js';
 
@@ -42,6 +43,119 @@ async function loadCatalog(extraRecords: unknown[] = []) {
 }
 
 describe('cisa_search_kev', () => {
+  it('uses effective limits for oversized and resized cursor pages without gaps', async () => {
+    await loadCatalog(
+      Array.from({ length: 130 }, (_, index) => ({
+        ...KEV_RECORDS[0],
+        cveID: `CVE-2026-${10000 + index}`,
+      })),
+    );
+    const first = await runToolContract(searchKevTool, { limit: 150 });
+    const initial = first.structuredContent as {
+      results: Array<{ cveId: string }>;
+      cursor: string;
+      totalCount: number;
+    };
+    expect(initial.results).toHaveLength(100);
+    expect(initial.totalCount).toBe(135);
+    expect(first.structuredContent).toMatchObject({
+      cap: 100,
+      shown: 100,
+      appliedFilters: { limit: '100' },
+    });
+    for (const surface of [
+      JSON.stringify(first.structuredContent),
+      JSON.stringify(first.content),
+    ]) {
+      expect(surface).toContain('Requested limit 150; applied 100');
+      expect(surface).toContain(initial.cursor);
+    }
+    const larger = await runToolContract(searchKevTool, {
+      limit: 5,
+      cursor: Buffer.from(JSON.stringify({ offset: 100, limit: 1 })).toString('base64'),
+    });
+    expect((larger.structuredContent as { results: unknown[] }).results).toHaveLength(5);
+    expect(larger.structuredContent).toMatchObject({ cap: 5, shown: 5 });
+    const defaultPage = await runToolContract(searchKevTool, { cursor: initial.cursor });
+    expect((defaultPage.structuredContent as { results: unknown[] }).results).toHaveLength(25);
+    const ids = [...initial.results.map((row) => row.cveId)];
+    let cursor: string | undefined = initial.cursor;
+    while (cursor) {
+      const result = await runToolContract(searchKevTool, { limit: 7, cursor });
+      const page = result.structuredContent as {
+        results: Array<{ cveId: string }>;
+        cursor?: string;
+        totalCount: number;
+      };
+      expect(page.totalCount).toBe(135);
+      ids.push(...page.results.map((row) => row.cveId));
+      cursor = page.cursor;
+    }
+    expect(ids).toHaveLength(135);
+    expect(new Set(ids).size).toBe(135);
+    const past = await runToolContract(searchKevTool, {
+      cursor: Buffer.from(JSON.stringify({ offset: 999, limit: 2 })).toString('base64'),
+    });
+    expect(past.structuredContent).toMatchObject({ results: [], hasMore: false });
+    expect(past.structuredContent).not.toHaveProperty('truncated');
+    const invalid = await runToolContract(searchKevTool, { cursor: 'invalid' });
+    expect(invalid.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_cursor' } },
+    });
+    expect(JSON.stringify(invalid.content)).toContain('cursor');
+  });
+
+  it('rejects an oversized limit in strict mode before consulting the catalog', async () => {
+    vi.stubEnv('CISA_CLAMP_OVERSIZED_INPUTS', 'false');
+    resetServerConfig();
+    const snapshot = vi.spyOn(getKevCatalog(), 'snapshot');
+    try {
+      const result = await runToolContract(searchKevTool, { limit: 101 });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'read_limit_exceeded', retryable: false } },
+      });
+      for (const surface of [
+        JSON.stringify(result.structuredContent),
+        JSON.stringify(result.content),
+      ])
+        expect(surface).toContain('100');
+      expect(snapshot).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+      resetServerConfig();
+    }
+  });
+  it('accepts padded legacy cursors with fractional numeric offsets', async () => {
+    await loadCatalog();
+    const cursor = Buffer.from(JSON.stringify({ offset: 1.5, limit: 1 })).toString('base64');
+    const result = await searchKevTool.handler(
+      searchKevTool.input.parse({ cursor, limit: 1 }),
+      createMockContext({ errors: searchKevTool.errors }),
+    );
+    expect(result.results).toHaveLength(1);
+  });
+
+  it('uses the current limit rather than the cursor page size', async () => {
+    await loadCatalog();
+    const cursor = Buffer.from(JSON.stringify({ offset: 1, limit: 2 })).toString('base64');
+    const result = await runToolContract(searchKevTool, { cursor, limit: 1 });
+    expect(result.structuredContent).toMatchObject({
+      results: [expect.any(Object)],
+      shown: 1,
+      cap: 1,
+    });
+    expect((result.structuredContent as { results: unknown[] }).results).toHaveLength(1);
+    expect(JSON.stringify(result.content)).toContain('1 KEV entries on this page');
+  });
+
+  it('accepts oversized limits up to the hard ceiling', async () => {
+    await loadCatalog();
+    const result = await runToolContract(searchKevTool, { limit: 101 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ appliedFilters: { limit: '100' } });
+    expect(searchKevTool.input.safeParse({ limit: 1001 }).success).toBe(false);
+  });
   beforeEach(() => {
     resetKevCatalog();
     initKevCatalog({

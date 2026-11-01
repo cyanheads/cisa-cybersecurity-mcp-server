@@ -66,6 +66,12 @@ const refreshCron = (fallback: string) =>
     });
 
 const ServerConfigSchema = z.object({
+  clampOversizedInputs: z
+    .stringbool()
+    .default(true)
+    .describe(
+      'Return bounded results and explicit batch remainders for oversized reads; false rejects them.',
+    ),
   kevRefreshCron: refreshCron('*/30 * * * *').describe(
     'Cron for the KEV conditional-refresh poll, on every transport; "off" disables it.',
   ),
@@ -114,6 +120,7 @@ let _config: ServerConfig | undefined;
 export function getServerConfig(): ServerConfig {
   if (_config) return _config;
   const parsed = parseEnvConfig(ServerConfigSchema, {
+    clampOversizedInputs: 'CISA_CLAMP_OVERSIZED_INPUTS',
     kevRefreshCron: 'CISA_KEV_REFRESH_CRON',
     csafMirrorPath: 'CISA_CSAF_MIRROR_PATH',
     csafMirrorAutoInit: 'CISA_CSAF_MIRROR_AUTO_INIT',

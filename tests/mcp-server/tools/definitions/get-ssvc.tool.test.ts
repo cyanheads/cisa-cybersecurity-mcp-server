@@ -6,8 +6,14 @@
  * @module tests/mcp-server/tools/definitions/get-ssvc.tool.test
  */
 
-import { createFetchMock, createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetServerConfig } from '@/config/server-config.js';
 import { getSsvcTool } from '@/mcp-server/tools/definitions/get-ssvc.tool.js';
 import {
   getKevCatalog,
@@ -26,7 +32,7 @@ import {
   NO_CISA_CONTAINER_RECORD,
   NO_SSVC_METRIC_RECORD,
 } from '../../../fixtures/vulnrichment-records.js';
-import { firstText } from '../../../helpers/format-text.js';
+import { contentText, firstText } from '../../../helpers/format-text.js';
 
 async function loadCatalog() {
   const http = createFetchMock([
@@ -46,6 +52,47 @@ async function loadCatalog() {
 }
 
 describe('cisa_get_ssvc', () => {
+  it('separates failed fetches from confirmed misses and retries failures', async () => {
+    await loadCatalog();
+    const ids = ['CVE-2026-81000', 'CVE-2026-81001', 'CVE-2026-81002'];
+    const http = createFetchMock(
+      ids.map((id, index) => ({
+        match: cveToVulnrichmentUrl(id) as string,
+        respond: () =>
+          index === 0
+            ? new Response('', { status: 403 })
+            : index === 1
+              ? Response.json(buildSsvcRecord())
+              : new Response('', { status: 404 }),
+      })),
+    );
+    http.install();
+    try {
+      const ctx = createMockContext({ errors: getSsvcTool.errors });
+      const result = await getSsvcTool.handler(getSsvcTool.input.parse({ cveIds: ids }), ctx);
+      expect(result).toMatchObject({
+        foundCount: 1,
+        notFoundCount: 1,
+        failedCount: 1,
+        results: [{ outcome: 'fetch_failed' }, { outcome: 'ssvc' }, { outcome: 'not_found' }],
+      });
+      expect(firstText(getSsvcTool.format?.(result))).toContain('1 failed lookup');
+      const second = await getSsvcTool.handler(
+        getSsvcTool.input.parse({ cveIds: [ids[0], ids[2]] }),
+        ctx,
+      );
+      expect(second).toMatchObject({ foundCount: 0, notFoundCount: 1, failedCount: 1 });
+      expect(getEnrichment(ctx).notice).toContain('1 lookup');
+      expect(getEnrichment(ctx).notice).not.toContain('None of the requested CVEs');
+      expect(http.calls).toHaveLength(4);
+      const contract = await runToolContract(getSsvcTool, { cveIds: ids });
+      expect(contract.structuredContent).toMatchObject({ failedCount: 1, notFoundCount: 1 });
+      expect(contentText(contract)).toContain('fetch_failed');
+      expect(contentText(contract)).toContain('1 failed lookup');
+    } finally {
+      http.restore();
+    }
+  });
   beforeEach(() => {
     resetKevCatalog();
     resetVulnrichment();
@@ -60,6 +107,28 @@ describe('cisa_get_ssvc', () => {
   afterEach(() => {
     resetKevCatalog();
     resetVulnrichment();
+    vi.unstubAllEnvs();
+    resetServerConfig();
+  });
+
+  it('rejects oversized batches before any upstream work when normalization is disabled', async () => {
+    vi.stubEnv('CISA_CLAMP_OVERSIZED_INPUTS', 'false');
+    resetServerConfig();
+    const http = createFetchMock([]);
+    http.install();
+    try {
+      const result = await runToolContract(getSsvcTool, {
+        cveIds: Array(51).fill('CVE-2026-60000'),
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'read_limit_exceeded', retryable: false } },
+      });
+      expect(contentText(result)).toContain('50');
+      expect(contentText(result)).toContain('Send at most');
+      expect(http.calls).toHaveLength(0);
+    } finally {
+      http.restore();
+    }
   });
 
   it('assetExposure unknown returns both arms without guessing', async () => {
@@ -173,6 +242,8 @@ describe('cisa_get_ssvc', () => {
       expect(result.results[0]?.found).toBe(false);
       expect(result.results[0]?.guidance).toContain('cisa_check_cve_status');
       expect(result.foundCount).toBe(0);
+      expect(result.notFoundCount).toBe(1);
+      expect(firstText(getSsvcTool.format?.(result))).toContain('1 without');
     } finally {
       http.restore();
     }
@@ -194,6 +265,9 @@ describe('cisa_get_ssvc', () => {
       const result = await getSsvcTool.handler(input, ctx);
       expect(result.results[0]?.found).toBe(false);
       expect(result.results[0]?.guidance).toContain('no CISA-authored enrichment container');
+      expect(result.results[0]?.outcome).toBe('no_cisa_container');
+      expect(result.failedCount).toBe(0);
+      expect(firstText(getSsvcTool.format?.(result))).toContain('no_cisa_container');
     } finally {
       http.restore();
     }
@@ -215,6 +289,9 @@ describe('cisa_get_ssvc', () => {
       const result = await getSsvcTool.handler(input, ctx);
       expect(result.results[0]?.found).toBe(false);
       expect(result.results[0]?.cvss).toMatchObject({ baseScore: 5.3 });
+      expect(result.results[0]?.outcome).toBe('no_ssvc_metric');
+      expect(result.results[0]?.cwes).toEqual([]);
+      expect(firstText(getSsvcTool.format?.(result))).toContain('no_ssvc_metric');
       expect(result.results[0]?.guidance).toContain('has not published SSVC decision points');
     } finally {
       http.restore();
@@ -285,11 +362,77 @@ describe('cisa_get_ssvc', () => {
     }
   }, 15000);
 
-  it('accepts up to 50 CVE IDs and rejects 51', () => {
+  it('processes only the first 50 IDs and returns the normalized remainder', async () => {
+    await loadCatalog();
+    const ids = Array.from({ length: 51 }, (_, i) => `CVE-2026-${60000 + i}`);
+    ids[50] = ' cve-2026-60050 ';
+    const http = createFetchMock(
+      ids.slice(0, 50).map((id) => ({
+        match: cveToVulnrichmentUrl(id) as string,
+        respond: () => new Response('', { status: 404 }),
+      })),
+    );
+    http.install();
+    try {
+      const ctx = createMockContext({ errors: getSsvcTool.errors });
+      const result = await getSsvcTool.handler(getSsvcTool.input.parse({ cveIds: ids }), ctx);
+      expect(result).toMatchObject({
+        foundCount: 0,
+        notFoundCount: 50,
+        failedCount: 0,
+        unprocessedIds: ['CVE-2026-60050'],
+      });
+      expect(result.results).toHaveLength(50);
+      expect(http.calls).toHaveLength(50);
+      expect(firstText(getSsvcTool.format?.(result))).toContain('CVE-2026-60050');
+      expect(getEnrichment(ctx).notice).toContain('follow-up');
+      expect(getEnrichment(ctx).notice).toContain('Coverage is incomplete');
+      const contract = await runToolContract(getSsvcTool, { cveIds: ids });
+      expect(contract.structuredContent).toMatchObject({
+        unprocessedIds: ['CVE-2026-60050'],
+        failedCount: 0,
+      });
+      expect(contentText(contract)).toContain('CVE-2026-60050');
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('keeps an oversized all-failed batch an error and never fetches its remainder', async () => {
+    await loadCatalog();
+    const ids = Array.from({ length: 51 }, (_, i) => `CVE-2026-${62000 + i}`);
+    const http = createFetchMock(
+      ids.slice(0, 50).map((id) => ({
+        match: cveToVulnrichmentUrl(id) as string,
+        respond: () => new Response('', { status: 403 }),
+      })),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(getSsvcTool, { cveIds: ids });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'enrichment_source_unavailable',
+            recovery: { hint: expect.stringContaining('cisa_check_cve_status') },
+          },
+        },
+      });
+      expect(contentText(result)).toContain('cisa_check_cve_status');
+      expect(http.calls).toHaveLength(50);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('accepts up to 1000 CVE IDs and rejects invalid remainders', () => {
     const fifty = Array.from({ length: 50 }, (_, i) => `CVE-2026-${(60000 + i).toString()}`);
     expect(() => getSsvcTool.input.parse({ cveIds: fifty })).not.toThrow();
     const fiftyOne = Array.from({ length: 51 }, (_, i) => `CVE-2026-${(60000 + i).toString()}`);
-    expect(() => getSsvcTool.input.parse({ cveIds: fiftyOne })).toThrow();
+    expect(() => getSsvcTool.input.parse({ cveIds: fiftyOne })).not.toThrow();
+    expect(() => getSsvcTool.input.parse({ cveIds: [...fifty, 'bad'] })).toThrow();
+    expect(() => getSsvcTool.input.parse({ cveIds: Array(1001).fill('CVE-2026-60000') })).toThrow();
+    expect(() => getSsvcTool.input.parse({ cveIds: [] })).toThrow();
   });
 
   it('structuredContent and content[] carry the same fields', async () => {

@@ -13,6 +13,7 @@ import {
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetServerConfig } from '@/config/server-config.js';
 import { getAlertsTool } from '@/mcp-server/tools/definitions/get-alerts.tool.js';
 import {
   FEED_URLS,
@@ -20,11 +21,220 @@ import {
   initCisaFeeds,
   resetCisaFeeds,
 } from '@/services/cisa-feeds/cisa-feeds-service.js';
-import { buildAdvisoriesFeed } from '../../../fixtures/rss-feeds.js';
+import { buildAdvisoriesFeed, buildRollingFeed } from '../../../fixtures/rss-feeds.js';
 import { strictClientValidator } from '../../../helpers/emitted-schema.js';
 import { firstText } from '../../../helpers/format-text.js';
 
 describe('cisa_get_alerts', () => {
+  it('walks every page of a warm window once and preserves the default 30-item read', async () => {
+    const http = createFetchMock([
+      { match: FEED_URLS.advisories, respond: () => new Response(buildRollingFeed()) },
+    ]);
+    http.install();
+    try {
+      const full = await runToolContract(getAlertsTool, { limit: 31 });
+      expect(full.structuredContent).toMatchObject({ hasMore: false, window: { itemCount: 30 } });
+      expect(full.structuredContent).not.toHaveProperty('notice');
+      const ids: string[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 15; page++) {
+        const result = await runToolContract(getAlertsTool, {
+          limit: 2,
+          ...(cursor ? { cursor } : {}),
+        });
+        const structured = result.structuredContent as {
+          items: Array<{ guid: string }>;
+          cursor?: string;
+          hasMore: boolean;
+          fetchedAt: string;
+        };
+        ids.push(...structured.items.map((item) => item.guid));
+        expect(structured.hasMore).toBe(page < 14);
+        expect(structured.fetchedAt).toBe(
+          (full.structuredContent as { fetchedAt: string }).fetchedAt,
+        );
+        if (structured.cursor) expect(JSON.stringify(result.content)).toContain(structured.cursor);
+        cursor = structured.cursor;
+      }
+      expect(ids).toEqual(Array.from({ length: 30 }, (_, index) => `/node/${30 - index}`));
+      expect(cursor).toBeUndefined();
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('resumes after a stable anchor when upstream prepends and applies since afterward', async () => {
+    initCisaFeeds({ cacheTtlSeconds: 0, timeoutMs: 5000 });
+    let ids = [30, 29, 28, 27];
+    const http = createFetchMock([
+      { match: FEED_URLS.advisories, respond: () => new Response(buildRollingFeed(ids)) },
+    ]);
+    http.install();
+    try {
+      const first = await runToolContract(getAlertsTool, { limit: 2 });
+      const { cursor } = first.structuredContent as { cursor: string };
+      ids = [31, 30, 29, 28, 27];
+      const next = await runToolContract(getAlertsTool, { cursor, limit: 2, since: '2026-09-28' });
+      expect(next.structuredContent).toMatchObject({
+        items: [{ guid: '/node/28' }],
+        hasMore: false,
+      });
+      expect(JSON.stringify(next.content)).toContain('/node/28');
+      expect(JSON.stringify(next.content)).not.toContain('Alert 29');
+    } finally {
+      http.restore();
+    }
+  });
+
+  it.each([
+    ['removed', [30, 28]],
+    ['fabricated', [30, 29, 28]],
+    ['empty', []],
+  ] as const)('discloses an unavailable %s anchor without inferring why', async (kind, ids) => {
+    const cursor = Buffer.from(
+      JSON.stringify({
+        feed: 'advisories',
+        guid: kind === 'fabricated' ? '/node/999' : '/node/29',
+      }),
+    ).toString('base64url');
+    const http = createFetchMock([
+      { match: FEED_URLS.advisories, respond: () => new Response(buildRollingFeed([...ids])) },
+    ]);
+    http.install();
+    try {
+      const result = await runToolContract(getAlertsTool, { cursor });
+      expect(result.structuredContent).toMatchObject({ items: [], hasMore: false });
+      expect(result.structuredContent).not.toHaveProperty('cursor');
+      for (const surface of [
+        JSON.stringify(result.structuredContent),
+        JSON.stringify(result.content),
+      ]) {
+        expect(surface).toContain('anchor is unavailable');
+        expect(surface).toContain('Restart without a cursor');
+        expect(surface).not.toContain('evicted');
+        expect(surface).not.toContain('rolled past');
+      }
+    } finally {
+      http.restore();
+    }
+  });
+
+  it.each([
+    'not-json',
+    Buffer.from(JSON.stringify({ feed: 'ics', guid: '/node/1' })).toString('base64url'),
+  ])('rejects invalid or mismatched cursors before fetching: %s', async (cursor) => {
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    const result = await runToolContract(getAlertsTool, { feed: 'alerts', cursor });
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_cursor', retryable: false } },
+    });
+    for (const surface of [
+      JSON.stringify(result.structuredContent),
+      JSON.stringify(result.content),
+    ])
+      expect(surface).toContain('same feed');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps stale freshness and anchor guidance together, then can continue in the cached window', async () => {
+    initCisaFeeds({ cacheTtlSeconds: 0, timeoutMs: 5000 });
+    let fail = false;
+    const http = createFetchMock([
+      {
+        match: FEED_URLS.advisories,
+        respond: () =>
+          fail ? new Response('', { status: 400 }) : new Response(buildRollingFeed()),
+      },
+    ]);
+    http.install();
+    try {
+      const first = await runToolContract(getAlertsTool, { limit: 2 });
+      const initial = first.structuredContent as { cursor: string; fetchedAt: string };
+      fail = true;
+      const continued = await runToolContract(getAlertsTool, { limit: 2, cursor: initial.cursor });
+      expect(continued.structuredContent).toMatchObject({
+        stale: true,
+        fetchedAt: initial.fetchedAt,
+        items: [{ guid: '/node/28' }, { guid: '/node/27' }],
+        hasMore: true,
+      });
+      const cursor = Buffer.from(
+        JSON.stringify({ feed: 'advisories', guid: '/node/missing' }),
+      ).toString('base64url');
+      const unavailable = await runToolContract(getAlertsTool, { cursor });
+      for (const surface of [
+        JSON.stringify(unavailable.structuredContent),
+        JSON.stringify(unavailable.content),
+      ]) {
+        expect(surface).toContain('anchor is unavailable in this cached window');
+        expect(surface).toContain('Retry in a few minutes');
+        expect(surface).toContain('may omit newer publications');
+        expect(surface).toContain('2026-09-01');
+      }
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('rejects an oversized limit in strict mode before fetching, with recovery on both surfaces', async () => {
+    vi.stubEnv('CISA_CLAMP_OVERSIZED_INPUTS', 'false');
+    resetServerConfig();
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    try {
+      const result = await runToolContract(getAlertsTool, { limit: 31 });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'read_limit_exceeded', retryable: false } },
+      });
+      for (const surface of [
+        JSON.stringify(result.structuredContent),
+        JSON.stringify(result.content),
+      ])
+        expect(surface).toContain('30');
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      resetServerConfig();
+    }
+  });
+  it('preserves the default whole available window and normalized GUID order', async () => {
+    const http = createFetchMock([
+      { match: FEED_URLS.advisories, respond: () => new Response(buildAdvisoriesFeed()) },
+    ]);
+    http.install();
+    try {
+      const result = await getAlertsTool.handler(
+        getAlertsTool.input.parse({}),
+        createMockContext({ errors: getAlertsTool.errors }),
+      );
+      expect(result.items.map((item) => item.guid)).toEqual(['/node/25513', '/node/25500']);
+      expect(result.window.itemCount).toBe(2);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('continues after the GUID anchor on both surfaces', async () => {
+    const http = createFetchMock([
+      { match: FEED_URLS.advisories, respond: () => new Response(buildAdvisoriesFeed()) },
+    ]);
+    http.install();
+    try {
+      const first = await runToolContract(getAlertsTool, { limit: 1 });
+      const page = first.structuredContent as { hasMore: boolean; cursor: string };
+      expect(page.hasMore).toBe(true);
+      expect(page.cursor).toEqual(expect.any(String));
+      const next = await runToolContract(getAlertsTool, { limit: 1, cursor: page.cursor });
+      expect(next.structuredContent).toMatchObject({
+        hasMore: false,
+        items: [{ guid: '/node/25500' }],
+      });
+      expect(JSON.stringify(next.content)).toContain('/node/25500');
+      expect(JSON.stringify(next.content)).toContain('More available:');
+    } finally {
+      http.restore();
+    }
+  });
   beforeEach(() => {
     resetCisaFeeds();
     initCisaFeeds({ cacheTtlSeconds: 900, timeoutMs: 5000 });
@@ -96,7 +306,7 @@ describe('cisa_get_alerts', () => {
         match: FEED_URLS.advisories,
         respond: () => {
           if (cancel) {
-            controller.abort();
+            controller.abort(new DOMException('This operation was aborted', 'AbortError'));
             throw controller.signal.reason;
           }
           return new Response(buildAdvisoriesFeed());
@@ -336,8 +546,9 @@ describe('cisa_get_alerts', () => {
     }
   });
 
-  it('rejects a limit above 30 (the upstream ceiling)', () => {
-    expect(() => getAlertsTool.input.parse({ limit: 31 })).toThrow();
+  it('accepts limit 31 and rejects above the hard ceiling', () => {
+    expect(getAlertsTool.input.parse({ limit: 31 }).limit).toBe(31);
+    expect(() => getAlertsTool.input.parse({ limit: 1001 })).toThrow();
   });
 
   it('reads the currently-cached window state via getCisaFeeds directly', async () => {

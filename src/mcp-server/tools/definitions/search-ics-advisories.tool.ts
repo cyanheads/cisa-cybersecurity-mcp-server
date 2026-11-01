@@ -15,6 +15,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { decodeCursor, encodeCursor } from '@cyanheads/mcp-ts-core/utils';
 import {
+  applyReadLimit,
+  READ_INPUT_HARD_CEILING,
+  READ_INPUT_LIMITS,
+} from '@/mcp-server/read-limits.js';
+import {
   CalendarDateInputSchema,
   CveIdInputSchema,
   CweIdInputSchema,
@@ -30,7 +35,7 @@ import type {
 } from '@/services/csaf-mirror/types.js';
 import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 
-const MAX_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = READ_INPUT_LIMITS.cisa_search_ics_advisories.cap;
 
 export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
   title: 'cisa_search_ics_advisories',
@@ -130,9 +135,11 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       .number()
       .int()
       .min(1)
-      .max(MAX_PAGE_SIZE)
+      .max(READ_INPUT_HARD_CEILING)
       .default(20)
-      .describe('Maximum advisories per page.'),
+      .describe(
+        'Maximum advisories per page; requests above 50 use 50 when input clamping is enabled.',
+      ),
     cursor: z
       .string()
       .optional()
@@ -264,6 +271,14 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
 
   errors: [
     {
+      reason: 'read_limit_exceeded',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'limit exceeds the per-call cap and input clamping is disabled.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery: 'Send limit at most 50, then follow the returned cursor for more advisories.',
+    },
+    {
       reason: 'mirror_busy',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'A transient SQLite lock prevents the advisory index from opening.',
@@ -326,6 +341,7 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
   ],
 
   async handler(input, ctx) {
+    const limit = applyReadLimit('cisa_search_ics_advisories', input.limit, ctx);
     if (
       input.cvssMin !== undefined &&
       input.cvssMax !== undefined &&
@@ -397,7 +413,7 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       revisedTo: input.revisedTo,
       sortBy: input.sortBy,
       order: input.order,
-      limit: input.limit,
+      limit,
       offset,
     };
 
@@ -454,16 +470,20 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
         'KEV membership was not evaluated: the KEV catalog snapshot has not loaded yet, so these results carry no kevCves. Retry in a few seconds, or pass the listed CVEs to cisa_check_cve_status.',
       );
     }
-    const truncated = page.items.length >= input.limit && hasMore;
+    if (input.limit > MAX_PAGE_SIZE && hasMore)
+      notices.push(
+        `Requested limit ${input.limit}; applied ${limit}. Follow the cursor for more advisories.`,
+      );
+    const truncated = page.items.length >= limit && hasMore;
     if (truncated) {
       const shown = page.items.length;
       ctx.enrich.truncated({
         shown,
-        cap: input.limit,
+        cap: limit,
         ...(notices.length > 0
           ? {
               guidance: [
-                `Results capped at ${input.limit}; showing ${shown}. Raise the cap or narrow with filters.`,
+                `Results capped at ${limit}; showing ${shown}. Raise the cap or narrow with filters.`,
                 ...notices,
               ].join(' '),
             }
@@ -480,9 +500,7 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
 
     return {
       results: page.items,
-      ...(hasMore
-        ? { cursor: encodeCursor({ offset: offset + page.items.length, limit: input.limit }) }
-        : {}),
+      ...(hasMore ? { cursor: encodeCursor({ offset: offset + page.items.length, limit }) } : {}),
       hasMore,
     };
   },

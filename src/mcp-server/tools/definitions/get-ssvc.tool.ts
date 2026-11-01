@@ -17,6 +17,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  applyReadLimit,
+  READ_INPUT_HARD_CEILING,
+  READ_INPUT_LIMITS,
+} from '@/mcp-server/read-limits.js';
 import { CVE_ID_REGEX, CveIdInputSchema, ISO_DATE_REGEX } from '@/mcp-server/schemas/kev-record.js';
 import {
   BOD_2604_BASIS,
@@ -26,6 +31,7 @@ import {
 } from '@/reference/bod-2604.js';
 import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 import { daysBetween } from '@/services/kev-catalog/parse.js';
+import { SSVC_OUTCOMES } from '@/services/vulnrichment/types.js';
 import { getVulnrichment } from '@/services/vulnrichment/vulnrichment-service.js';
 
 /** The exposure arms returned when the caller cannot state one. */
@@ -45,9 +51,9 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
         ),
       )
       .min(1)
-      .max(50)
+      .max(READ_INPUT_HARD_CEILING)
       .describe(
-        "CVE identifiers to look up, up to 50 per call — lower than cisa_check_cve_status's 200-CVE cap because each CVE needs its own live enrichment lookup rather than a cached batch check.",
+        'CVE identifiers to look up, up to 1,000 accepted and 50 processed per call. Oversized batches return normalized unprocessedIds for a follow-up call unless normalization is disabled. Each uncached CVE needs its own live enrichment lookup rather than a cached batch check.',
       ),
     assetExposure: z
       .enum(['publicly_exposed', 'not_publicly_exposed', 'unknown'])
@@ -58,6 +64,10 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
   }),
 
   output: z.object({
+    unprocessedIds: z
+      .array(CveIdInputSchema)
+      .optional()
+      .describe('Normalized CVE IDs not processed; send these in a follow-up call.'),
     results: z
       .array(
         z
@@ -68,7 +78,12 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
               .describe('The CVE identifier that was looked up.'),
             found: z
               .boolean()
-              .describe('Whether CISA has published SSVC decision points for this CVE.'),
+              .describe(
+                'Whether CISA has published SSVC decision points for this CVE; outcome explains a false value.',
+              ),
+            outcome: z
+              .enum(SSVC_OUTCOMES)
+              .describe('The lookup outcome, distinguishing confirmed absence from fetch failure.'),
             exploitation: z
               .string()
               .optional()
@@ -191,9 +206,16 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
           })
           .describe('One SSVC lookup result.'),
       )
-      .describe('One result per requested CVE, in the order supplied.'),
+      .describe('One result per processed CVE, in the order supplied.'),
     foundCount: z.number().int().describe('How many CVEs carry published SSVC decision points.'),
-    notFoundCount: z.number().int().describe('How many CVEs do not.'),
+    notFoundCount: z
+      .number()
+      .int()
+      .describe('How many processed CVEs have confirmed absence of SSVC decision points.'),
+    failedCount: z
+      .number()
+      .int()
+      .describe('How many processed CVE lookups failed; absence is unknown.'),
   }),
 
   enrichment: {
@@ -218,9 +240,17 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
 
   errors: [
     {
+      reason: 'read_limit_exceeded',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The batch exceeds the per-call cap and input normalization is disabled.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery: `Send at most ${READ_INPUT_LIMITS.cisa_get_ssvc.cap} CVE IDs per call.`,
+    },
+    {
       reason: 'enrichment_source_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Every per-CVE fetch failed with a transport or 5xx error.',
+      when: 'Every processed per-CVE fetch failed, including rejected HTTP responses.',
       retryable: true,
       recovery:
         'The CISA enrichment source is unreachable; retry in a few minutes, or call cisa_check_cve_status which serves from a cached catalog and needs no network.',
@@ -228,7 +258,14 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
   ],
 
   async handler(input, ctx) {
-    const { cveIds } = input;
+    const count = applyReadLimit('cisa_get_ssvc', input.cveIds.length, ctx);
+    const cveIds = input.cveIds.slice(0, count);
+    const unprocessedIds = input.cveIds.slice(count);
+    const notices: string[] = [];
+    if (unprocessedIds.length > 0)
+      notices.push(
+        `Requested ${input.cveIds.length} CVE IDs; processed ${count}. Send unprocessedIds in a follow-up call.`,
+      );
     const catalog = getKevCatalog();
     const snapshot = await catalog.snapshot(ctx);
     const records = await getVulnrichment().fetchMany(cveIds, ctx);
@@ -240,16 +277,13 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
       );
     }
 
+    const exposures: ReadonlyArray<(typeof BOTH_ARMS)[number]> =
+      input.assetExposure === 'unknown' ? BOTH_ARMS : [input.assetExposure];
     let lagging = 0;
     const results = records.map((record) => {
       const kev = snapshot.byId.get(record.cveId);
       const inKev = kev !== undefined;
       const found = record.outcome === 'ssvc';
-
-      const exposures =
-        input.assetExposure === 'unknown'
-          ? BOTH_ARMS
-          : ([input.assetExposure] as ReadonlyArray<'publicly_exposed' | 'not_publicly_exposed'>);
 
       const bod2604 =
         found && record.automatable && record.technicalImpact
@@ -296,6 +330,7 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
       return {
         cveId: record.cveId,
         found,
+        outcome: record.outcome,
         ...(record.exploitation ? { exploitation: record.exploitation } : {}),
         ...(record.automatable ? { automatable: record.automatable } : {}),
         ...(record.technicalImpact ? { technicalImpact: record.technicalImpact } : {}),
@@ -314,31 +349,45 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
     });
 
     const foundCount = results.filter((result) => result.found).length;
+    const failedCount = results.filter((result) => result.outcome === 'fetch_failed').length;
     ctx.log.info('Resolved SSVC decision points', { requested: cveIds.length, found: foundCount });
 
     ctx.enrich({ echo: { assetExposure: input.assetExposure, requested: cveIds.length } });
 
-    if (foundCount === 0) {
-      ctx.enrich.notice(
+    if (failedCount > 0)
+      notices.push(
+        `${failedCount} lookup(s) failed; SSVC availability for those CVEs is unknown. Retry those IDs in a follow-up call.`,
+      );
+    if (foundCount === 0 && failedCount === 0) {
+      notices.push(
         'None of the requested CVEs carry published SSVC decision points. Coverage is incomplete — not every CVE, including some in the KEV catalog, has a Vulnrichment record. Call cisa_check_cve_status for KEV status, which carries its own remediation deadline independent of SSVC.',
       );
-    } else if (lagging > 0) {
-      ctx.enrich.notice(
+    }
+    if (lagging > 0) {
+      notices.push(
         `SSVC decision points for ${lagging} of the CVEs were published before CISA added them to KEV and may not reflect current exploitation status.`,
       );
     }
 
-    return { results, foundCount, notFoundCount: results.length - foundCount };
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+    return {
+      results,
+      foundCount,
+      notFoundCount: results.length - foundCount - failedCount,
+      failedCount,
+      ...(unprocessedIds.length > 0 ? { unprocessedIds } : {}),
+    };
   },
 
   format: (result) => {
     const lines: string[] = [
-      `**${result.foundCount} of ${result.foundCount + result.notFoundCount} CVEs carry published SSVC decision points** (${result.notFoundCount} without).`,
+      `**${result.foundCount} of ${result.results.length} CVEs carry published SSVC decision points** (${result.notFoundCount} without, ${result.failedCount} failed lookup(s)).`,
       '',
     ];
 
     for (const entry of result.results) {
       lines.push(`### ${entry.cveId}`);
+      lines.push(`**Outcome:** ${entry.outcome}`);
       lines.push(
         `**SSVC decision points found:** ${entry.found ? 'yes' : 'no'} · **In KEV:** ${entry.inKev ? 'yes' : 'no'}`,
       );
@@ -407,6 +456,8 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
       lines.push('');
     }
 
+    if (result.unprocessedIds)
+      lines.push(`**Unprocessed IDs:** ${result.unprocessedIds.join(', ')}`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

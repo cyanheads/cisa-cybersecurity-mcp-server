@@ -23,6 +23,7 @@ import {
 } from '@cyanheads/mcp-ts-core/testing';
 import { encodeCursor } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetServerConfig } from '@/config/server-config.js';
 import { searchIcsAdvisoriesTool } from '@/mcp-server/tools/definitions/search-ics-advisories.tool.js';
 import {
   getCsafMirror,
@@ -116,6 +117,60 @@ type Structured = {
 
 describe('cisa_search_ics_advisories', () => {
   let dir: string;
+
+  it('applies the 50-item cap through the real index and preserves continuation', async () => {
+    const entries = Array.from({ length: 55 }, (_, index) => {
+      const id = `ICSA-26-001-${String(index + 1).padStart(2, '0')}`;
+      return {
+        name: `CSAF-develop/csaf_files/OT/white/2026/${id.toLowerCase()}.json`,
+        data: JSON.stringify(sparseAdvisoryAs(id, '2026-09-01T00:00:00Z')),
+      };
+    });
+    await seedMirror(entries);
+    await loadKev();
+    const result = await runToolContract(searchIcsAdvisoriesTool, { limit: 51 });
+    const structured = result.structuredContent as { results: unknown[]; cursor: string };
+    expect(structured.results).toHaveLength(50);
+    expect(result.structuredContent).toMatchObject({
+      shown: 50,
+      cap: 50,
+      appliedFilters: { limit: '50' },
+      hasMore: true,
+    });
+    for (const surface of [
+      JSON.stringify(result.structuredContent),
+      JSON.stringify(result.content),
+    ])
+      expect(surface).toContain('Requested limit 51; applied 50');
+    const last = await runToolContract(searchIcsAdvisoriesTool, {
+      limit: 51,
+      cursor: structured.cursor,
+    });
+    expect(last.structuredContent).toMatchObject({ hasMore: false });
+    expect((last.structuredContent as { results: unknown[] }).results).toHaveLength(5);
+    expect(last.structuredContent).not.toHaveProperty('truncated');
+  });
+
+  it('rejects strict oversized input before inspecting the mirror', async () => {
+    vi.stubEnv('CISA_CLAMP_OVERSIZED_INPUTS', 'false');
+    resetServerConfig();
+    const availability = vi.spyOn(getCsafMirror(), 'availability');
+    try {
+      const result = await runToolContract(searchIcsAdvisoriesTool, { limit: 51 });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'read_limit_exceeded', retryable: false } },
+      });
+      for (const surface of [
+        JSON.stringify(result.structuredContent),
+        JSON.stringify(result.content),
+      ])
+        expect(surface).toContain('50');
+      expect(availability).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      resetServerConfig();
+    }
+  });
 
   beforeEach(() => {
     resetCsafMirror();
@@ -376,8 +431,9 @@ describe('cisa_search_ics_advisories', () => {
       expect(text).toContain('**Applied filters:** vendor=acme');
     });
 
-    it('rejects a limit above the 50-item schema cap', () => {
-      expect(() => searchIcsAdvisoriesTool.input.parse({ limit: 51 })).toThrow();
+    it('accepts a limit above the workload cap but rejects above the hard ceiling', () => {
+      expect(searchIcsAdvisoriesTool.input.parse({ limit: 51 }).limit).toBe(51);
+      expect(() => searchIcsAdvisoriesTool.input.parse({ limit: 1001 })).toThrow();
     });
 
     it('rejects a malformed cve filter', () => {

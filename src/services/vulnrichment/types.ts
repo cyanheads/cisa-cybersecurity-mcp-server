@@ -9,12 +9,16 @@
  * Why a per-CVE lookup ended the way it did. Only `ssvc` carries decision points;
  * `no_ssvc_metric` still carries whatever CVSS and CWE CISA contributed.
  */
-export type SsvcOutcome =
-  | 'ssvc'
-  | 'not_found'
-  | 'no_cisa_container'
-  | 'no_ssvc_metric'
-  | 'fetch_failed';
+export const SSVC_OUTCOMES = [
+  'ssvc',
+  'not_found',
+  'no_cisa_container',
+  'no_ssvc_metric',
+  'fetch_failed',
+] as const;
+
+/** One outcome from the shared service and output vocabulary. */
+export type SsvcOutcome = (typeof SSVC_OUTCOMES)[number];
 
 /** A CVSS score CISA contributed through its ADP container. */
 export interface SsvcCvss {

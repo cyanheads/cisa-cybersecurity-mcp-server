@@ -305,11 +305,14 @@ describe('startBackgroundRefresh', () => {
     });
 
     it('a synced, content-current index runs one background refresh', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-10-01T00:00:00Z'));
       await seed();
-      const before = (await getCsafMirror().state()).lastCompletedAt;
+      expect((await getCsafMirror().state()).lastCompletedAt).toBe('2026-10-01T00:00:00.000Z');
+      vi.setSystemTime(new Date('2026-10-01T00:00:01Z'));
       const urls = await requestsDuring(() => startBackgroundRefresh(options()));
       expect(urls).toEqual([CSAF_CHANGES_URL]);
-      expect((await getCsafMirror().state()).lastCompletedAt).not.toBe(before);
+      expect((await getCsafMirror().state()).lastCompletedAt).toBe('2026-10-01T00:00:01.000Z');
     });
 
     it('sends the stored manifest ETag, so an unchanged manifest is one conditional request', async () => {

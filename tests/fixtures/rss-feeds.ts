@@ -50,3 +50,10 @@ export function buildEmptyChannelFeed(): string {
 <title>CISA Alerts</title>
 </channel></rss>`;
 }
+
+/** A rolling feed whose node IDs and dates make continuation order observable. */
+export function buildRollingFeed(
+  ids = Array.from({ length: 30 }, (_, index) => 30 - index),
+): string {
+  return `<?xml version="1.0"?><rss version="2.0"><channel><title>CISA Alerts</title>${ids.map((id) => `<item><title>Alert ${id}</title><link>https://www.cisa.gov/news-events/alerts/item-${id}</link><description>Publication ${id}.</description><pubDate>${new Date(Date.UTC(2026, 8, id)).toUTCString()}</pubDate><guid>/node/${id}</guid></item>`).join('')}</channel></rss>`;
+}

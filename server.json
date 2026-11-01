@@ -22,6 +22,13 @@
       "version": "0.3.2",
       "environmentVariables": [
         {
+          "name": "CISA_CLAMP_OVERSIZED_INPUTS",
+          "description": "Return bounded results and explicit unprocessed CVE IDs for oversized reads. Set false to reject requests above each tool's workload cap.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -88,6 +95,13 @@
       "runtimeHint": "npx",
       "version": "0.3.2",
       "environmentVariables": [
+        {
+          "name": "CISA_CLAMP_OVERSIZED_INPUTS",
+          "description": "Return bounded results and explicit unprocessed CVE IDs for oversized reads. Set false to reject requests above each tool's workload cap.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
         {
           "name": "MCP_TRANSPORT_TYPE",
           "description": "Selects the HTTP transport.",

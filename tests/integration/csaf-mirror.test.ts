@@ -470,8 +470,8 @@ describe('CsafMirrorService — real ingest path', () => {
             failedDocumentCount: http.calls.length - 1,
           });
           expect(
-            handle.prepare("SELECT value FROM mirror_meta WHERE key = 'changes_csv_etag'").get(),
-          ).toBeUndefined();
+            handle.prepare("SELECT value FROM mirror_meta WHERE key = 'changes_csv_etag'").all(),
+          ).toEqual([]);
         } finally {
           http.restore();
         }

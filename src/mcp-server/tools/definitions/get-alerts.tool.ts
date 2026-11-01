@@ -1,23 +1,37 @@
 /**
  * @fileoverview `cisa_get_alerts` — the current rolling window of one CISA
- * publication feed. Each feed is exactly 30 items with no history, no
- * pagination, and no server-side date query, so every response says so.
+ * publication feed, with GUID continuation within the available window.
  * @module mcp-server/tools/definitions/get-alerts.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { applyReadLimit, READ_INPUT_HARD_CEILING } from '@/mcp-server/read-limits.js';
 import { CalendarDateInputSchema } from '@/mcp-server/schemas/kev-record.js';
 import { getCisaFeeds, UPSTREAM_WINDOW_SIZE } from '@/services/cisa-feeds/cisa-feeds-service.js';
 import { ADVISORY_ID_PATTERN } from '@/services/csaf-mirror/normalize.js';
 
 const WINDOW_CAVEAT =
-  'This feed is a rolling window of the 30 most recent items. There is no history, no pagination, and no server-side date filter; anything older than the oldest item shown is unreachable from this feed. For ICS advisory history use cisa_search_ics_advisories.';
+  'This feed is a rolling window of the 30 most recent items. Cursors continue only within the available current or cached window; upstream has no pagination, history, or server-side date filter. Anything older than the oldest window item is unreachable from this feed. For ICS advisory history use cisa_search_ics_advisories.';
+
+const FeedCursorSchema = z.object({
+  feed: z.enum(['advisories', 'alerts', 'ics']),
+  guid: z.string().min(1),
+});
+
+/** Decode caller-controlled JSON at the cursor boundary. */
+function parseFeedCursor(cursor: string) {
+  try {
+    return FeedCursorSchema.parse(JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')));
+  } catch {
+    return;
+  }
+}
 
 export const getAlertsTool = tool('cisa_get_alerts', {
   title: 'cisa_get_alerts',
   description:
-    "List what CISA has published recently — its combined advisory feed, its alerts feed, or its ICS advisory feed. Each feed is a rolling window of exactly 30 items with no history, no pagination, and no date-range query, so the window's coverage varies from about a week to about two months depending on the feed. For ICS advisory history beyond the window, use cisa_search_ics_advisories, which covers the full corpus back to 2010.",
+    "List what CISA has published recently — its combined advisory feed, its alerts feed, or its ICS advisory feed. Cursors continue within the current 30-item rolling window; upstream provides no pagination, history, or date-range query. The window's coverage varies from about a week to about two months depending on the feed. For ICS advisory history beyond the window, use cisa_search_ics_advisories, which covers the full corpus back to 2010.",
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   input: z.object({
@@ -31,10 +45,16 @@ export const getAlertsTool = tool('cisa_get_alerts', {
       .number()
       .int()
       .min(1)
-      .max(UPSTREAM_WINDOW_SIZE)
+      .max(READ_INPUT_HARD_CEILING)
       .default(UPSTREAM_WINDOW_SIZE)
       .describe(
-        'Maximum items to return. The 30 ceiling is the upstream window, not a server choice.',
+        'Maximum items to return; values above 30 use 30 when input clamping is enabled. The upstream window contains at most 30 items.',
+      ),
+    cursor: z
+      .string()
+      .optional()
+      .describe(
+        'Opaque continuation cursor from this feed. Resumes after the last returned GUID within the available window; omit to restart.',
       ),
     since: CalendarDateInputSchema.optional().describe(
       'Keep only items published on or after this date, YYYY-MM-DD. Filters within the fetched window; it cannot reach back beyond it.',
@@ -42,6 +62,15 @@ export const getAlertsTool = tool('cisa_get_alerts', {
   }),
 
   output: z.object({
+    hasMore: z
+      .boolean()
+      .describe('Whether more matching items remain after this page within the available window.'),
+    cursor: z
+      .string()
+      .optional()
+      .describe(
+        'Continuation cursor for this feed; absent on the last page or when the anchor is unavailable.',
+      ),
     stale: z
       .boolean()
       .describe('True when refresh failed and this response uses the last cached window.'),
@@ -104,9 +133,7 @@ export const getAlertsTool = tool('cisa_get_alerts', {
   }),
 
   enrichment: {
-    windowCaveat: z
-      .string()
-      .describe('That the feed has no history, no pagination, and no date query.'),
+    windowCaveat: z.string().describe('Limits of continuation within the upstream rolling window.'),
     effectiveQuery: z
       .string()
       .optional()
@@ -128,6 +155,23 @@ export const getAlertsTool = tool('cisa_get_alerts', {
 
   errors: [
     {
+      reason: 'read_limit_exceeded',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'limit exceeds the per-call cap and input clamping is disabled.',
+      retryable: false,
+      thrownBy: 'service',
+      recovery:
+        'Send limit at most 30; this feed cannot expose history beyond its available window.',
+    },
+    {
+      reason: 'invalid_cursor',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The cursor is malformed or belongs to a different feed.',
+      retryable: false,
+      recovery:
+        'Omit cursor to restart, or pass the cursor from the previous response with the same feed.',
+    },
+    {
       reason: 'feed_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The feed fetch failed or returned a body that carried no RSS channel.',
@@ -139,12 +183,22 @@ export const getAlertsTool = tool('cisa_get_alerts', {
   ],
 
   async handler(input, ctx) {
+    const limit = applyReadLimit('cisa_get_alerts', input.limit, ctx);
+    const decoded = input.cursor === undefined ? undefined : parseFeedCursor(input.cursor);
+    if (input.cursor !== undefined && decoded?.feed !== input.feed)
+      throw ctx.fail('invalid_cursor', 'The continuation cursor is invalid for this feed.');
+    const anchorGuid = decoded?.guid;
     const window = await getCisaFeeds().window(input.feed, ctx);
-
+    const anchorIndex =
+      anchorGuid === undefined ? -1 : window.items.findIndex((item) => item.guid === anchorGuid);
+    const anchorUnavailable = anchorGuid !== undefined && anchorIndex === -1;
+    const remaining = anchorUnavailable ? [] : window.items.slice(anchorIndex + 1);
     const filtered = input.since
-      ? window.items.filter((item) => item.pubDate.slice(0, 10) >= (input.since as string))
-      : window.items;
-    const items = filtered.slice(0, input.limit);
+      ? remaining.filter((item) => item.pubDate.slice(0, 10) >= (input.since as string))
+      : remaining;
+    const items = filtered.slice(0, limit);
+    const hasMore = items.length < filtered.length;
+    const last = items.at(-1);
 
     ctx.log.info('Read a CISA feed window', {
       feed: input.feed,
@@ -156,25 +210,42 @@ export const getAlertsTool = tool('cisa_get_alerts', {
 
     if (input.since) {
       ctx.enrich.echo(
-        `since=${input.since} (excluded ${window.items.length - filtered.length} of ${window.items.length} window items)`,
+        `since=${input.since} (excluded ${remaining.length - filtered.length} of ${remaining.length} window items${anchorGuid === undefined ? '' : ' after the resume point'})`,
       );
     }
-    if (items.length < filtered.length) {
-      ctx.enrich.truncated({ shown: items.length, cap: input.limit });
+    const notices: string[] = [];
+    if (hasMore) {
+      notices.push(
+        `Results capped at ${limit}; showing ${items.length}. Follow the cursor for more items within this window.`,
+      );
+      ctx.enrich.truncated({ shown: items.length, cap: limit, guidance: notices.join(' ') });
     }
+    if (anchorUnavailable)
+      notices.push(
+        `The continuation anchor is unavailable in this ${window.stale ? 'cached' : 'current'} window.${window.oldest ? ` The window's oldest item is ${window.oldest}.` : ' The window is empty.'} Restart without a cursor to read the available window.`,
+      );
     if (window.stale)
-      ctx.enrich.notice(
+      notices.push(
         'The feed refresh failed; this cached window may omit newer publications. Retry in a few minutes, or use cisa_search_ics_advisories for ICS advisory history.',
       );
-    if (input.since && filtered.length === 0) {
-      ctx.enrich.notice(
-        `No item in the ${window.stale ? 'cached' : 'current'} 30-item window is on or after ${input.since}.${window.stale ? ' Refresh failed, so this does not establish current publication absence; retry in a few minutes.' : ''} The window's oldest item is ${
+    if (input.since && filtered.length === 0 && !anchorUnavailable) {
+      notices.push(
+        `No item in the ${window.stale ? 'cached' : 'current'} 30-item window${anchorGuid === undefined ? '' : ' after the continuation anchor'} is on or after ${input.since}.${window.stale ? ' Refresh failed, so this does not establish current publication absence; retry in a few minutes.' : ''} The window's oldest item is ${
           window.oldest ?? 'unknown'
         }; anything earlier is not in this feed.`,
       );
     }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
+      hasMore,
+      ...(hasMore && last
+        ? {
+            cursor: Buffer.from(JSON.stringify({ feed: input.feed, guid: last.guid })).toString(
+              'base64url',
+            ),
+          }
+        : {}),
       stale: window.stale,
       fetchedAt: window.fetchedAt,
       feed: window.feed,
@@ -195,6 +266,8 @@ export const getAlertsTool = tool('cisa_get_alerts', {
       `# ${result.feedTitle || result.feed}`,
       `**Feed:** ${result.feed} · **Source:** ${result.feedUrl}`,
       `**Fetched:** ${result.fetchedAt} · **Stale:** ${result.stale ? 'yes — refresh failed; newer publications may be missing. Retry in a few minutes.' : 'no'}`,
+      `**More available:** ${result.hasMore ? 'yes' : 'no'}`,
+      ...(result.cursor ? [`**Next cursor:** ${result.cursor}`] : []),
       `**Window:** ${result.window.itemCount} item(s) shown, covering ${
         result.window.oldest ?? 'unknown'
       } → ${result.window.newest ?? 'unknown'} out of an upstream window of ${result.window.upstreamWindowSize}.`,
