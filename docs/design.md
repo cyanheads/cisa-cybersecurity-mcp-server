@@ -366,7 +366,7 @@ Zero-hit notice fragments (Decision 26). On a zero-hit result only, `KevCatalogS
 
 | Param | Type | Notes |
 |:---|:---|:---|
-| `cveIds` | `z.array(CveIdInputSchema).min(1).max(1000)` | Up to 50 processed; larger accepted batches return normalized `unprocessedIds` unless clamping is disabled. Each uncached CVE needs a separate upstream fetch, with concurrency 6 and `Promise.allSettled`. |
+| `cveIds` | `z.array(CveIdInputSchema).min(1).max(1000)` | Up to 50 processed; larger accepted batches return normalized `unprocessedIds` unless clamping is disabled. Each uncached CVE needs a separate upstream fetch, with six workers awaited through `Promise.all`. |
 | `assetExposure` | `z.enum(['publicly_exposed','not_publicly_exposed','unknown']).default('unknown')` | The one decision point only the caller can answer. `unknown` returns both arms so the agent can see the spread without guessing. |
 
 `In the KEV` is read from this server's local KEV snapshot, never from the caller. `Automatable` and `Technical Impact` come from Vulnrichment. Those three plus `assetExposure` are the complete input set for the Table 1 lookup.

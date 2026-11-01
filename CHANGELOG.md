@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-31
 
-CISA investigation guide and complete advisory applicability evidence
+CISA investigation guide and scoped advisory applicability evidence
 
 ## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-14
 
