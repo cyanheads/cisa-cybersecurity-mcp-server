@@ -281,6 +281,18 @@ describe('cisa_get_advisory', () => {
       expect(text).toContain(result.guidance as string);
     });
 
+    it('names indexed siblings in both response surfaces on an exact revision miss', async () => {
+      const result = await runToolContract(getAdvisoryTool, {
+        advisoryId: '  icsa-26-260-07b.json  ',
+      });
+      expect(result.isError).toBeFalsy();
+      const output = getAdvisoryTool.output.parse(result.structuredContent);
+      expect(output.found).toBe(false);
+      const expected = 'Indexed IDs with the same base: ICSA-26-260-07.';
+      expect(output.guidance).toContain(expected);
+      expect(contentText(result)).toContain(output.guidance);
+    });
+
     describe('a miss reports how current the index is', () => {
       beforeEach(async () => {
         /* An index whose checkpoint (2026-09-17) trails its last completed sync (2026-09-19). */

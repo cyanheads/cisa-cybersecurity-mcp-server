@@ -93,7 +93,7 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
       .string()
       .optional()
       .describe(
-        'What to do instead, present when found is false: how current the index is, and whether the advisory may be newer than it.',
+        'What to do instead, present when found is false: indexed IDs with the same base, if any, how current the index is, and whether the advisory may be newer than it.',
       ),
     indexCheckpoint: z
       .string()
@@ -219,10 +219,14 @@ export const getAdvisoryTool = tool('cisa_get_advisory', {
     const doc = await mirror.getAdvisory(advisoryId);
     if (!doc) {
       const index = await mirror.state();
+      const siblings = await mirror.getAdvisorySiblingIds(advisoryId);
+      const siblingHint = siblings.length
+        ? ` Indexed IDs with the same base: ${siblings.join(', ')}.`
+        : '';
       ctx.log.info('Advisory not in the index', { advisoryId });
       return {
         found: false,
-        guidance: `${MISS_GUIDANCE} ${indexFreshnessNote(advisoryId, index)}`,
+        guidance: `${MISS_GUIDANCE} ${indexFreshnessNote(advisoryId, index)}${siblingHint}`,
         indexCheckpoint: index.checkpoint,
         indexLastSyncedAt: index.lastCompletedAt,
       };

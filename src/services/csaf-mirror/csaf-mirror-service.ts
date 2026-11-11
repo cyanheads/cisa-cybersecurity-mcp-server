@@ -40,7 +40,7 @@ import {
   readIngestCompletion,
   readIngestContentVersion,
 } from './ingest.js';
-import { toFtsMatch, toSubstringGlob } from './normalize.js';
+import { ADVISORY_ID_PATTERN, advisoryIdBase, toFtsMatch, toSubstringGlob } from './normalize.js';
 import {
   ADVISORIES_FTS,
   ADVISORIES_TABLE,
@@ -745,6 +745,19 @@ export class CsafMirrorService {
       .get(advisoryId);
     if (!row?.document) return undefined;
     return JSON.parse(row.document) as NormalizedAdvisory;
+  }
+
+  /** Find every indexed canonical ID in the family of a validated exact miss. */
+  async getAdvisorySiblingIds(advisoryId: string): Promise<string[]> {
+    const handle = await this.store.raw();
+    const base = advisoryIdBase(advisoryId);
+    // A fixed literal GLOB prefix seeks on the advisoryId primary-key index.
+    const rows = handle
+      .prepare<{ advisoryId: string }>(
+        `SELECT advisoryId FROM ${ADVISORIES_TABLE} WHERE advisoryId GLOB ? ORDER BY advisoryId`,
+      )
+      .all(`${base}*`);
+    return rows.map((row) => row.advisoryId).filter((id) => ADVISORY_ID_PATTERN.test(id));
   }
 
   /**

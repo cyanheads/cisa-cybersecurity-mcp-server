@@ -16,9 +16,11 @@ import {
 import {
   CalendarDateInputSchema,
   CweIdInputSchema,
+  KEV_SUMMARY_NOTE,
   KevRecordSchema,
   renderKevRecord,
   toKevRecordOutput,
+  toKevRecordSummary,
 } from '@/mcp-server/schemas/kev-record.js';
 import {
   getKevCatalog,
@@ -34,10 +36,16 @@ const MAX_PAGE_SIZE = READ_INPUT_LIMITS.cisa_search_kev.cap;
 export const searchKevTool = tool('cisa_search_kev', {
   title: 'cisa_search_kev',
   description:
-    'Search the CISA Known Exploited Vulnerabilities catalog across every entry in the cached snapshot. Filter by vendor or product using CISA\'s own labels, by name substring, by CWE, by the date an entry was added, by due date, by overdue status, by ransomware linkage, by the three-day forensic-triage tier, or by which binding operational directive the entry cites. Results are paged and sortable by due date or date added. Vendor and product values are CISA\'s free-text labels, not CPE names — call cisa_list_reference for the field vocabulary before guessing one. The catalog records additions but carries no per-record modified timestamp, so dateAddedFrom answers "what is new since D" while a revised due date on an existing entry is not detectable from the feed.',
+    'Search the CISA Known Exploited Vulnerabilities catalog across every entry in the cached snapshot. Filter by vendor or product using CISA\'s own labels, by name substring, by CWE, by the date an entry was added, by due date, by overdue status, by ransomware linkage, by the three-day forensic-triage tier, or by which binding operational directive the entry cites. Results are paged and sortable by due date or date added. Use detail "summary" to list and triage entries. Vendor and product are CISA\'s free-text labels — call cisa_list_reference for the field vocabulary. The catalog records additions and carries no per-record modified timestamp, so dateAddedFrom finds newly added entries while due-date revisions cannot be detected from the feed.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   input: z.object({
+    detail: z
+      .enum(['full', 'summary'])
+      .default('full')
+      .describe(
+        'full returns every field. Use summary to list and triage entries by CVE ID, dates, deadline status, directive, vendor, product, and ransomware and forensic-triage flags. Each request chooses its own detail, including when following a cursor.',
+      ),
     vendorProject: z
       .string()
       .min(2)
@@ -144,6 +152,12 @@ export const searchKevTool = tool('cisa_search_kev', {
       .string()
       .optional()
       .describe('Disclosure that additions are queryable but revisions are not detectable.'),
+    summaryNote: z
+      .string()
+      .optional()
+      .describe(
+        'Present only under detail "summary": which fields the results omit and how to restore them.',
+      ),
     notice: z
       .string()
       .optional()
@@ -167,6 +181,7 @@ export const searchKevTool = tool('cisa_search_kev', {
     },
     asOf: { label: 'As of' },
     snapshotCaveat: { label: 'Snapshot caveat' },
+    summaryNote: { label: 'Detail' },
   },
 
   errors: [
@@ -271,6 +286,10 @@ export const searchKevTool = tool('cisa_search_kev', {
     });
     ctx.enrich.total(matched.length);
 
+    if (input.detail === 'summary') {
+      ctx.enrich({ summaryNote: KEV_SUMMARY_NOTE });
+    }
+
     if (input.dateAddedFrom) {
       ctx.enrich({
         snapshotCaveat:
@@ -294,30 +313,26 @@ export const searchKevTool = tool('cisa_search_kev', {
       notices.push(zeroHitNotice(filters, counts, snapshot.records, asOf));
     }
 
-    if (input.limit > MAX_PAGE_SIZE && page.nextCursor)
-      notices.push(
-        `Requested limit ${input.limit}; applied ${limit}. Follow the cursor for more entries.`,
-      );
     if (page.items.length >= limit && page.nextCursor) {
       const shown = page.items.length;
+      const guidance = [
+        `Results capped at ${limit}; showing ${shown}. Follow the cursor for more entries.`,
+      ];
+      if (limit < MAX_PAGE_SIZE)
+        guidance.push(`To return more per page, raise limit up to ${MAX_PAGE_SIZE}.`);
+      if (input.limit > limit) guidance.push(`Requested limit ${input.limit}; applied ${limit}.`);
       ctx.enrich.truncated({
         shown,
         cap: limit,
-        ...(notices.length > 0
-          ? {
-              guidance: [
-                `Results capped at ${limit}; showing ${shown}. Raise the cap or narrow with filters.`,
-                ...notices,
-              ].join(' '),
-            }
-          : {}),
+        guidance: [...guidance, ...notices].join(' '),
       });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));
     }
 
+    const project = input.detail === 'summary' ? toKevRecordSummary : toKevRecordOutput;
     return {
-      results: page.items.map((record) => toKevRecordOutput(record, asOf)),
+      results: page.items.map((record) => project(record, asOf)),
       ...(page.nextCursor ? { cursor: page.nextCursor } : {}),
       hasMore: page.nextCursor !== undefined,
     };

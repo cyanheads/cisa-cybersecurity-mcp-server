@@ -27,10 +27,11 @@ import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
 /** Entries surfaced by `list()` and the maximum completion suggestions. */
 const LIST_LIMIT = 30;
 const COMPLETION_LIMIT = 100;
+const TITLE = 'ICS advisory (CSAF)';
 
 export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
   name: 'ics-advisory',
-  title: 'ICS advisory (CSAF)',
+  title: TITLE,
   description:
     'One CISA industrial control system advisory, flattened from CSAF 2.0 — affected products with version ranges, per-CVE CVSS and CWE, remediations, sectors, and revision history. Large advisories return a section outline instead of the whole document; follow up with cisa_get_advisory to request named sections. Listing returns the 30 most recently revised advisories.',
   mimeType: 'application/json',
@@ -112,9 +113,13 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
     const doc = await mirror.getAdvisory(advisoryId);
     if (!doc) {
       const index = await mirror.state();
+      const siblings = await mirror.getAdvisorySiblingIds(advisoryId);
+      const siblingHint = siblings.length
+        ? ` Indexed IDs with the same base: ${siblings.join(', ')}.`
+        : '';
       throw ctx.fail(
         'advisory_not_found',
-        `No advisory with ID ${advisoryId} is in the index. ${indexFreshnessNote(advisoryId, index)} Call cisa_search_ics_advisories to find the right ID.`,
+        `No advisory with ID ${advisoryId} is in the index. ${indexFreshnessNote(advisoryId, index)} Call cisa_search_ics_advisories to find the right ID.${siblingHint}`,
         {
           advisoryId,
           indexCheckpoint: index.checkpoint,
@@ -157,6 +162,7 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
       resources: recent.map((entry) => ({
         uri: `cisa://advisory/${entry.advisoryId}`,
         name: `${entry.advisoryId} — ${entry.title}`,
+        title: TITLE,
         mimeType: 'application/json',
       })),
     };

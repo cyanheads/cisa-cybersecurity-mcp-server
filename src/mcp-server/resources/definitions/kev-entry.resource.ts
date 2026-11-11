@@ -17,10 +17,11 @@ import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 /** Entries surfaced by `list()` and the maximum completion suggestions. */
 const LIST_LIMIT = 30;
 const COMPLETION_LIMIT = 100;
+const TITLE = 'KEV catalog entry';
 
 export const kevEntryResource = resource('cisa://kev/{cveId}', {
   name: 'kev-entry',
-  title: 'KEV catalog entry',
+  title: TITLE,
   description:
     'One entry from the CISA Known Exploited Vulnerabilities catalog, addressed by CVE ID — the same record shape cisa_check_cve_status returns, including the federal remediation deadline, the directive cited, ransomware and forensic-triage flags, and the references parsed from the entry notes. Listing returns the 30 most recently added entries.',
   mimeType: 'application/json',
@@ -56,6 +57,7 @@ export const kevEntryResource = resource('cisa://kev/{cveId}', {
       resources: recent.map((record) => ({
         uri: `cisa://kev/${record.cveId}`,
         name: `${record.cveId} — ${record.vulnerabilityName}`,
+        title: TITLE,
         mimeType: 'application/json',
       })),
     };

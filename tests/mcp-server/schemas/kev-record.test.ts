@@ -207,9 +207,10 @@ describe('KevRecordSchema descriptions', () => {
     expect(schema.properties.dueDate?.description).not.toContain('summary');
   });
 
-  it('describes the summary shape on the record itself, naming the one tool that takes detail', () => {
-    /* The schema is also cisa_search_kev's and the resource's, and neither takes detail. */
-    expect(schema.description).toContain('Under cisa_check_cve_status detail "summary"');
+  it('describes the summary shape and names both tools that accept detail', () => {
+    expect(schema.description).toContain(
+      'Under detail "summary" in cisa_check_cve_status or cisa_search_kev',
+    );
   });
 
   it('states no KEV catalog count that drifts with each release', () => {

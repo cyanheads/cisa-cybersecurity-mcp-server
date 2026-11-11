@@ -91,13 +91,14 @@ describe('cisa://kev/{cveId} resource', () => {
   it('list() returns the most recently added entries, newest first', async () => {
     await loadCatalog();
     const listing = kevEntryResource.list?.(listExtra) as {
-      resources: Array<{ uri: string; name: string; mimeType: string }>;
+      resources: Array<{ uri: string; name: string; title: string; mimeType: string }>;
     };
     expect(listing.resources.length).toBeGreaterThan(0);
     expect(listing.resources[0]?.uri).toBe(
       'cisa://kev/CVE-2026-00002',
     ); /* dateAdded 2026-09-05, newest of the batch */
     expect(listing.resources[0]?.mimeType).toBe('application/json');
+    expect(listing.resources[0]?.title).toBe('KEV catalog entry');
   });
 
   it('complete() matches CVE IDs by prefix, capped, before any snapshot has loaded returns []', () => {

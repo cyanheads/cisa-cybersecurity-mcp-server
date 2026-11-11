@@ -23,12 +23,7 @@ import {
   READ_INPUT_LIMITS,
 } from '@/mcp-server/read-limits.js';
 import { CVE_ID_REGEX, CveIdInputSchema, ISO_DATE_REGEX } from '@/mcp-server/schemas/kev-record.js';
-import {
-  BOD_2604_BASIS,
-  BOD_2604_CAVEAT,
-  resolveBod2604Timeline,
-  type TechnicalImpact,
-} from '@/reference/bod-2604.js';
+import { BOD_2604_BASIS, BOD_2604_CAVEAT, resolveBod2604Timeline } from '@/reference/bod-2604.js';
 import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 import { daysBetween } from '@/services/kev-catalog/parse.js';
 import { SSVC_OUTCOMES } from '@/services/vulnrichment/types.js';
@@ -90,11 +85,18 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
               .describe(
                 'The SSVC Exploitation value (none, poc, or active). Values outside that set are passed through verbatim.',
               ),
-            automatable: z.string().optional().describe('The SSVC Automatable value (yes or no).'),
+            automatable: z
+              .string()
+              .optional()
+              .describe(
+                'The SSVC Automatable value (yes or no). Unsupported values are passed through verbatim.',
+              ),
             technicalImpact: z
               .string()
               .optional()
-              .describe('The SSVC Technical Impact value (partial or total).'),
+              .describe(
+                'The SSVC Technical Impact value (partial or total). Unsupported values are passed through verbatim.',
+              ),
             ssvcVersion: z
               .string()
               .optional()
@@ -168,7 +170,7 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
                   .describe('What the computation is and is not. Fixed text on every result.'),
               })
               .optional()
-              .describe('The BOD 26-04 timeline implied by the published decision points.'),
+              .describe('The BOD 26-04 timeline implied by supported published decision points.'),
             kevAssigned: z
               .object({
                 dateAdded: z
@@ -194,7 +196,7 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
               .boolean()
               .optional()
               .describe(
-                "Whether CISA's assigned deadline matches the computed timeline. Present only when the CVE is in KEV and an exposure was stated. Reported, never reconciled.",
+                "Whether CISA's assigned day count and forensic-triage requirement both match the computed timeline. Present when both are available and an exposure was stated.",
               ),
             sourceUrl: z
               .string()
@@ -202,7 +204,9 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
             guidance: z
               .string()
               .optional()
-              .describe('What to do instead, present on every result where found is false.'),
+              .describe(
+                'Guidance for a miss, a failed lookup, or unsupported decision points that prevent timeline computation.',
+              ),
           })
           .describe('One SSVC lookup result.'),
       )
@@ -284,16 +288,19 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
       const kev = snapshot.byId.get(record.cveId);
       const inKev = kev !== undefined;
       const found = record.outcome === 'ssvc';
+      const { automatable, technicalImpact } = record;
+      const knownAutomatable = automatable === 'yes' || automatable === 'no';
+      const knownImpact = technicalImpact === 'partial' || technicalImpact === 'total';
 
       const bod2604 =
-        found && record.automatable && record.technicalImpact
+        found && knownAutomatable && knownImpact
           ? {
               timelines: exposures.map((assetExposure) => {
                 const row = resolveBod2604Timeline({
                   publiclyExposed: assetExposure === 'publicly_exposed',
                   inKev,
-                  automatable: record.automatable === 'yes',
-                  technicalImpact: record.technicalImpact as TechnicalImpact,
+                  automatable: automatable === 'yes',
+                  technicalImpact,
                 });
                 return {
                   assetExposure,
@@ -318,10 +325,26 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
           }
         : undefined;
 
+      const timeline = bod2604?.timelines[0];
+      const assignedTriage = kevAssigned?.forensicTriage;
       const assignmentAgrees =
-        kevAssigned && bod2604 && input.assetExposure !== 'unknown'
-          ? bod2604.timelines[0]?.remediationTimelineDays === kevAssigned.daysFromAdd
+        kevAssigned &&
+        timeline &&
+        input.assetExposure !== 'unknown' &&
+        (assignedTriage === 'Yes' || assignedTriage === 'No')
+          ? timeline.remediationTimelineDays === kevAssigned.daysFromAdd &&
+            (timeline.forensicTriageRequired ? 'Yes' : 'No') === assignedTriage
           : undefined;
+
+      let guidance = record.guidance;
+      if (found && !bod2604) {
+        const unsupported = knownAutomatable
+          ? 'Technical Impact value'
+          : knownImpact
+            ? 'Automatable value'
+            : 'Automatable and Technical Impact values';
+        guidance = `No BOD 26-04 timeline was computed because CISA published unsupported SSVC ${unsupported}.`;
+      }
 
       if (kev && record.ssvcTimestamp && record.ssvcTimestamp.slice(0, 10) < kev.dateAdded) {
         lagging += 1;
@@ -344,7 +367,7 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
         ...(kevAssigned ? { kevAssigned } : {}),
         ...(assignmentAgrees !== undefined ? { assignmentAgrees } : {}),
         sourceUrl: record.sourceUrl,
-        ...(record.guidance ? { guidance: record.guidance } : {}),
+        ...(guidance ? { guidance } : {}),
       };
     });
 
@@ -352,7 +375,7 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
     const failedCount = results.filter((result) => result.outcome === 'fetch_failed').length;
     ctx.log.info('Resolved SSVC decision points', { requested: cveIds.length, found: foundCount });
 
-    ctx.enrich({ echo: { assetExposure: input.assetExposure, requested: cveIds.length } });
+    ctx.enrich({ echo: { assetExposure: input.assetExposure, requested: input.cveIds.length } });
 
     if (failedCount > 0)
       notices.push(
@@ -360,7 +383,7 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
       );
     if (foundCount === 0 && failedCount === 0) {
       notices.push(
-        'None of the requested CVEs carry published SSVC decision points. Coverage is incomplete — not every CVE, including some in the KEV catalog, has a Vulnrichment record. Call cisa_check_cve_status for KEV status, which carries its own remediation deadline independent of SSVC.',
+        'None of the processed CVEs carry published SSVC decision points. Coverage is incomplete — not every CVE, including some in the KEV catalog, has a Vulnrichment record. Call cisa_check_cve_status for KEV status, which carries its own remediation deadline independent of SSVC.',
       );
     }
     if (lagging > 0) {

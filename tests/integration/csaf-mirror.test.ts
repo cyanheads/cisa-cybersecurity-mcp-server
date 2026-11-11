@@ -36,6 +36,7 @@ import {
   FULL_ADVISORY,
   REPUBLISHED_ADVISORY,
   SPARSE_ADVISORY,
+  sparseAdvisoryAs,
 } from '../fixtures/csaf-documents.js';
 import { buildTarGzResponse } from '../fixtures/tar.js';
 import { bestMsBySize } from '../helpers/linear-time.js';
@@ -95,6 +96,50 @@ describe('CsafMirrorService — real ingest path', () => {
       http.restore();
     }
   }, 30000);
+
+  it('seeks all canonical siblings in ID order without mixing series or base prefixes', async () => {
+    const numericRevisions = Array.from({ length: 105 }, (_, index) => `ICSA-16-231-01-${index}`);
+    const siblingIds = ['ICSA-16-231-01', ...numericRevisions, 'ICSA-16-231-01A'].sort();
+    const archiveIds = [
+      ...siblingIds.toReversed(),
+      'ICSA-16-231-010',
+      'ICSA-16-231-01AA',
+      'ICSA-16-231-01-2A',
+      'ICSA-16-231-02A',
+      'ICSMA-16-231-01A',
+      'ICSA-13-259-01B',
+      'ICSA-13-259-01A',
+    ];
+    const http = createFetchMock([
+      {
+        match: CSAF_ARCHIVE_URL,
+        respond: () =>
+          buildTarGzResponse(
+            archiveIds.map((id) => ({
+              name: `CSAF-develop/csaf_files/OT/white/20${id.split('-')[1]}/${id.toLowerCase()}.json`,
+              data: JSON.stringify(sparseAdvisoryAs(id, '2016-08-18T00:00:00Z')),
+            })),
+          ),
+      },
+    ]);
+    http.install();
+    try {
+      const mirror = getCsafMirror();
+      await mirror.mirrorInstance.runSync({ mode: 'init', signal: AbortSignal.timeout(30_000) });
+      expect(await mirror.getAdvisory('ICSA-16-231-010')).toBeDefined();
+      expect(await mirror.getAdvisory('ICSA-16-231-01B')).toBeUndefined();
+      expect(await mirror.getAdvisorySiblingIds('ICSA-16-231-01B')).toEqual(siblingIds);
+      expect(await mirror.getAdvisorySiblingIds('ICSA-16-231-01-105')).toEqual(siblingIds);
+      expect(await mirror.getAdvisorySiblingIds('ICSA-13-259-01')).toEqual([
+        'ICSA-13-259-01A',
+        'ICSA-13-259-01B',
+      ]);
+      expect(await mirror.getAdvisorySiblingIds('ICSMA-16-231-01')).toEqual(['ICSMA-16-231-01A']);
+      expect(await mirror.getAdvisorySiblingIds('ICSA-16-231-99')).toEqual([]);
+    } finally {
+      http.restore();
+    }
+  });
 
   it('stores and searches standalone and relationship definitions through actual ingest', async () => {
     const raw = {

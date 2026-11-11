@@ -57,6 +57,51 @@ export function buildSsvcRecord(
   };
 }
 
+/** Consumed CISA-ADP fields from cisagov/vulnrichment at 6fa0a3fe71639fbd086cf2575e83025b4ca17ad6. */
+export const HISTORICAL_SSVC_RECORD = {
+  cveMetadata: { cveId: 'CVE-2024-27834' },
+  containers: {
+    adp: [
+      {
+        providerMetadata: { shortName: 'CISA-ADP' },
+        metrics: [
+          {
+            cvssV3_1: {
+              version: '3.1',
+              baseScore: 8.1,
+              baseSeverity: 'HIGH',
+              vectorString: 'CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H',
+            },
+          },
+          {
+            other: {
+              type: 'ssvc',
+              content: {
+                id: 'CVE-2024-27834',
+                role: 'CISA Coordinator',
+                options: [
+                  { Exploitation: 'None' },
+                  { Automatable: 'Yes' },
+                  { 'Technical Impact': 'Total' },
+                ],
+                version: '2.0.3',
+                timestamp: '2024-05-16T04:00:11.988391Z',
+              },
+            },
+          },
+        ],
+        problemTypes: [
+          {
+            descriptions: [
+              { cweId: 'CWE-277', description: 'CWE-277 Insecure Inherited Permissions' },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+};
+
 /** A CISA-ADP container that carries CVSS/CWE but no SSVC metric. */
 export const NO_SSVC_METRIC_RECORD = {
   dataType: 'CVE_RECORD',

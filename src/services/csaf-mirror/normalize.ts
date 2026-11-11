@@ -49,6 +49,14 @@ export const CSAF_OT_BASE =
  */
 export const ADVISORY_ID_PATTERN = /^ICS(A|MA)-\d{2}-\d{3}-\d{2}(?:[A-Z]|-\d+)?$/;
 
+/** The fixed-width series and date/sequence of an already validated canonical ID. */
+export function advisoryIdBase(advisoryId: string): string {
+  const baseLength = advisoryId.startsWith('ICSMA-')
+    ? 'ICSMA-YY-DDD-NN'.length
+    : 'ICSA-YY-DDD-NN'.length;
+  return advisoryId.slice(0, baseLength);
+}
+
 /**
  * The date an advisory ID encodes, `YYYY-MM-DD` — year `20YY`, day of year
  * `DDD` — or `null` when the day is out of range for that year or the input is

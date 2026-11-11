@@ -131,6 +131,21 @@ describe('cisa_search_ics_advisories', () => {
     const result = await runToolContract(searchIcsAdvisoriesTool, { limit: 51 });
     const structured = result.structuredContent as { results: unknown[]; cursor: string };
     expect(structured.results).toHaveLength(50);
+    for (const [args, notice] of [
+      [
+        {},
+        'Results capped at 20; showing 20. Follow the cursor for more advisories. To return more per page, raise limit up to 50.',
+      ],
+      [{ limit: 50 }, 'Results capped at 50; showing 50. Follow the cursor for more advisories.'],
+      [
+        { limit: 51 },
+        'Results capped at 50; showing 50. Follow the cursor for more advisories. Requested limit 51; applied 50.',
+      ],
+    ] as const) {
+      const result = await runToolContract(searchIcsAdvisoriesTool, args);
+      expect(result.structuredContent).toMatchObject({ notice });
+      expect(contentText(result)).toContain(notice);
+    }
     expect(result.structuredContent).toMatchObject({
       shown: 50,
       cap: 50,
@@ -149,6 +164,8 @@ describe('cisa_search_ics_advisories', () => {
     expect(last.structuredContent).toMatchObject({ hasMore: false });
     expect((last.structuredContent as { results: unknown[] }).results).toHaveLength(5);
     expect(last.structuredContent).not.toHaveProperty('truncated');
+    expect(last.structuredContent).not.toHaveProperty('notice');
+    expect(contentText(last)).not.toContain('Follow the cursor');
   });
 
   it('rejects strict oversized input before inspecting the mirror', async () => {
@@ -319,11 +336,12 @@ describe('cisa_search_ics_advisories', () => {
       },
     );
 
-    it('a capped page without a KEV snapshot keeps its notice byte for byte', async () => {
+    it('a capped page keeps KEV coverage guidance on both surfaces', async () => {
       const result = await runToolContract(searchIcsAdvisoriesTool, { limit: 1 });
       expect((result.structuredContent as Structured).notice).toBe(
-        'Results capped at 1; showing 1. Raise the cap or narrow with filters. KEV membership was not evaluated: the KEV catalog snapshot has not loaded yet, so these results carry no kevCves. Retry in a few seconds, or pass the listed CVEs to cisa_check_cve_status.',
+        'Results capped at 1; showing 1. Follow the cursor for more advisories. To return more per page, raise limit up to 50. KEV membership was not evaluated: the KEV catalog snapshot has not loaded yet, so these results carry no kevCves. Retry in a few seconds, or pass the listed CVEs to cisa_check_cve_status.',
       );
+      expect(contentText(result)).toContain((result.structuredContent as Structured).notice);
     });
 
     it('throws invalid_cvss_range when cvssMin exceeds cvssMax', async () => {

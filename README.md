@@ -73,6 +73,7 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 
 - Filters AND together: `vendorProject` and `product` (CISA's own labels, not CPE names), `nameContains`, `cwe`, `cveIdPrefix`, `dateAddedFrom` / `dateAddedTo`, `dueBefore` / `dueAfter`, `overdue`, `ransomware`, `forensicTriage`, `directive` (`BOD 26-04` / `BOD 22-01` / `none`); up to 100 per page (default 25) with an opaque `cursor`; sorts by `dateAdded` (default) or `dueDate`
 - Reports `totalCount` and `appliedFilters`; each continued page uses the current call's limit. A zero-hit result names the filter responsible and what dropping it restores. `nameContains` searches a-z and 0-9 after folding case and accents, and the notice names any other characters it dropped
+- `detail: "summary"` returns the eleven triage fields used by `cisa_check_cve_status`; `full` remains the default. Each call chooses its own detail, including cursor continuations. Non-final pages point to the cursor and suggest a larger limit only below the 100-row maximum
 - Typed errors: `catalog_unavailable` (retryable), `invalid_date_range`, `empty_search_text`
 
 ---
@@ -80,7 +81,8 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 ### `cisa_get_ssvc` <sub>tool</sub>
 
 - Processes up to 50 `cveIds` per call through the Vulnrichment cache, fetching uncached records; inputs up to 1,000 IDs return normalized `unprocessedIds` for a follow-up call. `assetExposure`: `publicly_exposed`, `not_publicly_exposed`, or `unknown` (default, returns both arms)
-- Per CVE: `found`, `exploitation`, `automatable`, `technicalImpact`, `cvss` and `cwes` where CISA published them, and `bod2604.timelines[]` (`tableRow`, `remediationTimelineDays`, `forensicTriageRequired`); a KEV entry adds `kevAssigned`, plus `assignmentAgrees` when an exposure was stated
+- Per CVE: `found`, `exploitation`, `automatable`, `technicalImpact`, `cvss` and `cwes` where CISA published them, and `bod2604.timelines[]` (`tableRow`, `remediationTimelineDays`, `forensicTriageRequired`); a KEV entry adds `kevAssigned`. When an exposure is stated and both timelines are available, `assignmentAgrees` compares both day count and forensic-triage requirement
+- Recognized SSVC values are normalized without regard to case. Unsupported Automatable or Technical Impact values retain the published evidence with guidance, omitting only the computed timeline and agreement. `echo.requested` counts every submitted ID, while result totals count only processed IDs
 - Each result carries `outcome`: `ssvc`, `not_found`, `no_cisa_container`, `no_ssvc_metric`, or `fetch_failed`. `foundCount`, `notFoundCount`, and `failedCount` separate published SSVC, confirmed misses, and unavailable lookups; `enrichment_source_unavailable` (retryable) fires when every processed lookup fails
 
 ---
@@ -88,7 +90,7 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 ### `cisa_search_ics_advisories` <sub>tool</sub>
 
 - Full-text `q` over titles, vendor names, and product names, plus `vendor`, `product` (case-insensitive substrings), `cve`, `cwe`, `inKev`, `cvssMin` / `cvssMax`, `severity`, `sector`, `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` / `other`), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`; sorts by `revised` (default), `published`, `maxCvss`, or `relevance` (needs `q`); up to 50 per page (default 20) with an opaque `cursor`
-- Results carry `advisoryId`, up to 20 `cves` with `cveCount`, `kevCves`, `maxCvss` with `severityDerived`, `sectors`, `url`, `csafUrl`, and `attribution`, plus `totalCount` and `appliedFilters`; a zero-hit result names the filter responsible. If the KEV snapshot isn't loaded, `kevCves` is left out and says so
+- Results carry `advisoryId`, up to 20 `cves` with `cveCount`, `kevCves`, `maxCvss` with `severityDerived`, `sectors`, `url`, `csafUrl`, and `attribution`, plus `totalCount` and `appliedFilters`; a zero-hit result names the filter responsible. If the KEV snapshot isn't loaded, `kevCves` is left out and says so. Non-final pages point to the cursor and suggest a larger limit only below the 50-row maximum
 - Typed errors: `mirror_not_ready`, `mirror_busy`, and `catalog_unavailable` (retryable), `mirror_unavailable`, `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
 
 ---
@@ -98,7 +100,7 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 - `advisoryId` (optional revision suffix), optional `sections` (`advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`), `cves` to pick vulnerability entries, and `productIds` to pick exact, case-sensitive product definitions; `cves` and `productIds` imply their sections
 - Returns `kind: "full"`, or `kind: "outline"` (per-section byte sizes plus the CVE IDs) when a read without `sections` exceeds 24,000 bytes; re-call with `sections`. Both arms retain advisory identity, source links, and attribution
 - Vulnerability entries retain applicability `flags` and `threats`; remediations, flags, and threats resolve referenced product groups into `productIds` and keep `groupIds`. Undefined groups remain visible without invented product definitions
-- An ID not in the index returns `found: false` with `guidance`, `indexCheckpoint`, and `indexLastSyncedAt`; the guidance notes when the advisory may be newer than the index
+- An ID not in the index returns `found: false` with `guidance`, `indexCheckpoint`, and `indexLastSyncedAt`; the guidance names indexed revisions with the same base ID and notes when the advisory may be newer than the index. It never substitutes a different advisory
 - Typed errors: `mirror_not_ready` and `mirror_busy` (retryable), `mirror_unavailable`, `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`, `unknown_product_id`, `product_ids_need_products_section`
 
 ---
@@ -224,7 +226,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 - No credentials. Every upstream source is keyless and public.
 
 ### Installation

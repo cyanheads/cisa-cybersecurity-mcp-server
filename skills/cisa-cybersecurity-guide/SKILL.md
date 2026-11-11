@@ -4,7 +4,7 @@ description: Use cisa_* tools to triage vulnerability lists and trace ICS adviso
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -24,7 +24,7 @@ Use CISA evidence to prioritize an existing vulnerability inventory or investiga
 2. Before excluding a vendor or product, inspect the applied filters and coverage notices. Sector filters omit documents with no sector note; score filters omit documents with no score. Broaden restrictive discovery filters before claiming that no relevant advisory exists.
 3. Before calling an asset affected or recommending a version-specific fix, read the selected vulnerability's product status, resolve the referenced product definitions, and compare their version expressions with the asset inventory. An advisory-level vendor match or maximum CVSS score does not establish applicability to every product or CVE in it. Read product-scoped flags and impact statements before explaining a not-affected status.
 4. Keep unresolved product and group references unresolved. A missing definition or an empty applicability list does not establish that a remediation applies to every product, or that an asset is unaffected. Follow the advisory's source references when its normalized evidence cannot settle the match.
-5. State asset exposure only from evidence about the caller's estate. If exposure is unknown, retain both SSVC timeline branches. Report the computed BOD timeline separately from CISA's assigned KEV due date; neither a disagreement nor missing enrichment authorizes replacing the assigned date.
+5. State asset exposure only from evidence about the caller's estate. When exposure is unknown and the decision points support computation, retain both BOD 26-04 timeline branches. Report the computed timeline separately from CISA's assigned KEV due date and preserve the assigned date when enrichment is missing or the timelines disagree.
 6. Before calling a result set complete, follow its search continuation, process any returned `unprocessedIds`, and inspect selection or outline notices. Search previews and advisory outlines do not contain full vulnerability entries or product definitions. Preserve source links and attribution with the evidence used in the answer.
 
 ## Core chain

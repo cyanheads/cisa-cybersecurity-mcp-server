@@ -14,7 +14,7 @@ Upstream shapes in this document were verified against the live sources on 2026-
 |:-----|:------------|:-----------|:------------|
 | `cisa_list_reference` | Decode the vocabulary the rest of the surface takes as input: BOD 26-04 remediation timelines, KEV field meanings, SSVC decision-point values, critical-infrastructure sector names, advisory ID formats, CVSS severity bands, and live data provenance. | `topic` | `readOnlyHint`, `openWorldHint: false` |
 | `cisa_check_cve_status` | Check up to 200 CVE IDs against the CISA Known Exploited Vulnerabilities catalog in one call, returning federal remediation deadlines, overdue status, ransomware and forensic-triage flags, and the directive each entry cites. | `cveIds[]`, `detail` | `readOnlyHint` |
-| `cisa_search_kev` | Search the KEV catalog by vendor, product, CWE, date added, due date, overdue status, ransomware use, forensic-triage tier, or directive. | filters, `sortBy`, `limit`, `cursor` | `readOnlyHint` |
+| `cisa_search_kev` | Search the KEV catalog by vendor, product, CWE, date added, due date, overdue status, ransomware use, forensic-triage tier, or directive. | filters, `detail`, `sortBy`, `limit`, `cursor` | `readOnlyHint` |
 | `cisa_get_ssvc` | Fetch the SSVC decision points CISA publishes per CVE — Exploitation, Automatable, Technical Impact — and compute the BOD 26-04 remediation timeline they imply for a stated asset exposure. | `cveIds[]`, `assetExposure` | `readOnlyHint` |
 | `cisa_search_ics_advisories` | Search the CISA industrial control system advisory corpus by vendor, product, CVE, CWE, KEV membership, CVSS range, severity, sector, series, or free text over advisory titles and product names. | `q`, filters, `sortBy`, `limit`, `cursor` | `readOnlyHint` |
 | `cisa_get_advisory` | Read one ICS advisory: product definitions, per-CVE CVSS and CWE, scoped remediations, flags, threats, sectors, and revision history — or selected sections and identifiers. | `advisoryId`, `sections[]`, `cves[]`, `productIds[]` | `readOnlyHint` |
@@ -284,7 +284,7 @@ unprocessedIds?          # normalized IDs beyond the first 200; resend these
 | `catalog` | `echo` | Always — `{ catalogVersion, dateReleased, count, fetchedAt }` |
 | `asOf` | `echo` | Always — the UTC date `daysUntilDue` and `overdue` were computed against |
 | `summaryNote` | label `Detail` | Only under `detail: "summary"` — "summary — in-KEV results omit requiredAction, vulnerabilityName, shortDescription, cwes, references, notesCommentary, and kevUrl. Call again with detail "full" to restore them." |
-| `notice` | `notice` | Composes oversized-batch follow-up guidance and, when `foundCount === 0`, explains that absence from KEV is not a severity statement and routes SSVC questions to `cisa_get_ssvc`. Counts refer only to processed IDs. |
+| `notice` | `notice` | Composes oversized-batch follow-up guidance and, when `foundCount === 0`, reports absence from KEV for the processed IDs. It explains the limits of that evidence and routes SSVC questions to `cisa_get_ssvc`. |
 
 **Errors**
 
@@ -298,7 +298,7 @@ unprocessedIds?          # normalized IDs beyond the first 200; resend these
 
 **Description**
 
-> Search the CISA Known Exploited Vulnerabilities catalog across every entry in the cached snapshot. Filter by vendor or product using CISA's own labels, by name substring, by CWE, by the date an entry was added, by due date, by overdue status, by ransomware linkage, by the three-day forensic-triage tier, or by which binding operational directive the entry cites. Results are paged and sortable by due date or date added. Vendor and product values are CISA's free-text labels, not CPE names — call cisa_list_reference for the field vocabulary before guessing one. The catalog records additions but carries no per-record modified timestamp, so dateAddedFrom answers "what is new since D" while a revised due date on an existing entry is not detectable from the feed.
+> Search the CISA Known Exploited Vulnerabilities catalog across every entry in the cached snapshot. Filter by vendor or product using CISA's own labels, by name substring, by CWE, by the date an entry was added, by due date, by overdue status, by ransomware linkage, by the three-day forensic-triage tier, or by which binding operational directive the entry cites. Results are paged and sortable by due date or date added. Use detail "summary" to list and triage entries. Vendor and product are CISA's free-text labels — call cisa_list_reference for the field vocabulary. The catalog records additions and carries no per-record modified timestamp, so dateAddedFrom finds newly added entries while due-date revisions cannot be detected from the feed.
 
 | Param | Type | Notes |
 |:---|:---|:---|
@@ -317,6 +317,7 @@ unprocessedIds?          # normalized IDs beyond the first 200; resend these
 | `order` | `z.enum(['asc','desc']).default('desc')` | |
 | `limit` | `z.number().int().min(1).max(1000).default(25)` | Effective page size at most 100 under shared read limits. |
 | `cursor` | `z.string().optional()` | Opaque offset cursor decoded with `decodeCursor`; the current request's effective `limit` controls page size, even when the cursor was issued for another size. |
+| `detail` | `z.enum(['full','summary']).default('full')` | `full` preserves every record field; `summary` reuses the eleven-field projection from `cisa_check_cve_status`. The current request selects detail independently of the cursor. |
 
 All filters AND together. Every one is applied against the complete snapshot, never a page.
 
@@ -332,7 +333,8 @@ All filters AND together. Every one is applied against the complete snapshot, ne
 | `asOf` | `echo` | Always — a server-applied default that changes what `overdue` and `daysUntilDue` mean |
 | `appliedFilters` | `echo` | Always — the filters as the server parsed them |
 | `snapshotCaveat` | `notice` | When `dateAddedFrom` is set — "Additions are queryable by dateAdded. The KEV feed carries no per-record modified timestamp, so an entry whose dueDate or requiredAction changed after it was added is indistinguishable from an unchanged one. This result covers additions in the window, not revisions." |
-| `notice` | `notice` | Composed once, because `notice` is last-wins across enrich calls (`truncated()` included): the dropped-word notice when `nameContains` lost a word to the fold ("nameContains dropped the characters of "漏洞" outside the letters a-z and the digits 0-9 — … Searched for: siemens."), then the zero-hit fragments (below). A capped page prefixes the framework's cap sentence and passes the whole string as `truncated()`'s `guidance`. |
+| `summaryNote` | label `Detail` | Only under `detail: "summary"`; names the omitted fields and explains how to request `full`, using the same text as `cisa_check_cve_status`. |
+| `notice` | `notice` | Composed once, because `notice` is last-wins across enrich calls (`truncated()` included). Non-final pages name the cursor, suggest a larger limit only below 100, and disclose requested/applied limits when clamped. Dropped-word and zero-hit notices remain intact. Final pages carry no capped-page instruction. |
 
 Zero-hit notice fragments (Decision 26). On a zero-hit result only, `KevCatalogService.filterCounts` makes one extra pass over the snapshot recording, per applied filter, the entries it matches alone and the entries that fail it and nothing else — what dropping it restores. Fragments key on those counts, the loaded snapshot, and the echoed `asOf`; the counts they print come from the snapshot:
 
@@ -379,22 +381,22 @@ results[]:
                         # no_ssvc_metric | fetch_failed
   # present when found
   exploitation          'none' | 'poc' | 'active' | <other, passed through>
-  automatable           'yes' | 'no'
-  technicalImpact       'partial' | 'total'
+  automatable           'yes' | 'no' | <other, passed through>
+  technicalImpact       'partial' | 'total' | <other, passed through>
   ssvcVersion, ssvcTimestamp, ssvcRole
   cvss?: { version, baseScore, baseSeverity, vectorString }
   cwes[]: { cweId, description }
   inKev
-  bod2604:
+  bod2604?:             # only for supported Automatable and Technical Impact
     timelines[]: { assetExposure, tableRow, timelineLabel,
                    remediationTimelineDays,      # 3 | 14 | 60 | null
                    forensicTriageRequired }
     basis        # 'CISA BOD 26-04 Appendix A, Table 1'
     caveat       # fixed disclaimer string, see below
   kevAssigned?: { dateAdded, dueDate, daysFromAdd, forensicTriage, directive }
-  assignmentAgrees?     # bool, only when inKev and assetExposure !== 'unknown'
+  assignmentAgrees?     # bool, when both timelines exist and exposure is stated
   sourceUrl
-  # present when not found
+  # present on misses, failed lookups, or unsupported computation inputs
   guidance
 foundCount, notFoundCount, failedCount
 unprocessedIds?         # normalized IDs beyond the first 50; resend these
@@ -404,7 +406,9 @@ unprocessedIds?         # normalized IDs beyond the first 50; resend these
 
 `caveat`, fixed text: *"This timeline is CISA's published decision table applied to CISA's published decision points and the asset exposure supplied in the request. It is not a compliance determination, and it is not CISA's assigned KEV due date."*
 
-`assignmentAgrees` is reported, never reconciled. When it is `false`, the two facts stand side by side: 9 of 24 sampled 26-04 KEV entries disagreed with the table under a publicly-exposed assumption.
+`assignmentAgrees` compares both the day count and forensic-triage requirement. Either mismatch gives `false`; unknown exposure or an unavailable timeline omits the comparison. The assigned and computed facts are reported side by side, never reconciled.
+
+Recognized SSVC values are normalized case-insensitively at parsing and when reading retained cache entries. Unsupported Automatable or Technical Impact values retain `found: true`, `outcome: 'ssvc'`, the published decision points, CVSS, CWEs, provenance, and KEV assignment, but omit `bod2604` and `assignmentAgrees` with guidance on both response surfaces. Unsupported Exploitation passes through verbatim and does not prevent computation because it does not select a Table 1 row.
 
 `found` is true only for `outcome: 'ssvc'`. `notFoundCount` counts confirmed absence (`not_found`, `no_cisa_container`, `no_ssvc_metric`); `failedCount` counts `fetch_failed`, where SSVC availability is unknown. These three counts sum to `results.length`, excluding `unprocessedIds`. CVSS and CWE data may still be present under `no_ssvc_metric`.
 
@@ -420,8 +424,8 @@ Miss `guidance`, per outcome:
 
 | Key | Kind | When |
 |:---|:---|:---|
-| `echo` | `echo` | Always — `{ assetExposure, requested }`; `requested` is the processed batch size. |
-| `notice` | `notice` | Composes unprocessed-ID follow-up guidance, failed-lookup retry guidance, and lagging-timestamp warnings. The no-published-SSVC notice appears only when `foundCount === 0 && failedCount === 0`. |
+| `echo` | `echo` | Always — `{ assetExposure, requested }`; `requested` is the submitted batch size, including `unprocessedIds`. Result totals still cover processed IDs only. |
+| `notice` | `notice` | Composes unprocessed-ID follow-up guidance, failed-lookup retry guidance, and lagging-timestamp warnings. When `foundCount === 0 && failedCount === 0`, it reports that none of the processed CVEs carry published SSVC decision points. |
 
 **Errors**
 
@@ -429,7 +433,7 @@ Miss `guidance`, per outcome:
 |:---|:---|:---|:---|
 | `enrichment_source_unavailable` | `ServiceUnavailable` (`retryable: true`) | Every processed per-CVE fetch failed, including rejected HTTP responses | `The CISA enrichment source is unreachable; retry in a few minutes, or call cisa_check_cve_status which serves from a cached catalog and needs no network.` |
 
-A partial failure is a result: successful lookups return normally and failed ones report `found: false`, `outcome: 'fetch_failed'`, and retry guidance. A batch containing any failed lookup never receives the notice claiming that none carry published SSVC decision points.
+A partial failure is a result: successful lookups return normally and failed ones report `found: false`, `outcome: 'fetch_failed'`, and safe retry guidance without raw upstream error text. Failures are not cached. Caller cancellation propagates instead of becoming a failed lookup. A batch containing any failed lookup never receives the notice claiming that none carry published SSVC decision points.
 
 ---
 
@@ -494,7 +498,7 @@ cursor?, hasMore
 | `mirror` | `echo` | Always — `{ documentCount, checkpoint, lastRefreshedAt }` |
 | `sectorCoverage` | `notice` | Whenever `sector` is set — "729 of 3,937 advisories carry no sector note and cannot match a sector filter. Coverage begins in 2017 and is complete from 2023; every advisory published before 2017 is excluded by this filter regardless of which sectors it affects." The figures come from `coverageCounts()`, thousands-grouped, and follow applied row mutations, including partial syncs (Decision 34); these are the 2026-09-24 checkpoint's |
 | `cvssCoverage` | `notice` | Whenever `cvssMin`, `cvssMax`, or `severity` is set — "392 advisories score only in CVSS v2, where the upstream publishes no severity label and the band is derived. 3 advisories carry no CVSS score and cannot match a score filter." — read the same way |
-| `notice` | `notice` | Composed once from every source that applies, in this order, because `notice` is last-wins across enrich calls (`truncated()` included): the zero-hit fragments; the incomplete-`cwe` disclosure when `cwe` is set and `contentState().stale`; "KEV membership was not evaluated…" when no KEV snapshot is held and the page is non-empty. A capped page prefixes the framework's cap sentence and passes the whole string as `truncated()`'s `guidance`. |
+| `notice` | `notice` | Composed once because `notice` is last-wins across enrich calls (`truncated()` included). Non-final pages name the cursor, suggest a larger limit only below 50, and disclose requested/applied limits when clamped. Zero-hit fragments, incomplete-`cwe` disclosures, and unavailable KEV membership notices remain intact. Final pages carry no capped-page instruction. |
 
 Zero-hit notice fragments (Decision 33). On a zero-hit result only, `CsafMirrorService.filterCounts` runs one aggregate query over `ics_advisories` recording, per applied filter, the advisories it matches alone and those that fail it and nothing else — what dropping it restores. Each predicate comes from `filterClauses`, the builder `search()` uses: `q`'s FTS `MATCH`, the junction subqueries, the `GLOB` text filters, and `inKev` against the same KEV set. Every figure a fragment prints comes from those counts:
 
@@ -614,7 +618,9 @@ The `products` arm stores every product definition, so retrieval selection never
 | `cves_need_vulnerabilities_section` | `ValidationError` | `cves` is set but `sections` lacks `"vulnerabilities"` — nothing to narrow. Thrown in the handler before the index read, so the recovery hint reaches the caller | `Add "vulnerabilities" to sections, or omit sections so cves selects the vulnerabilities section on its own.` |
 | `unknown_cve` | `ValidationError` | A `cves` entry names a CVE this advisory does not cover; the message names only the unknown IDs | `Call this tool without cves to see which CVE IDs the advisory holds — the outline lists them — then pass only those; to find the advisory that covers a CVE, call cisa_search_ics_advisories with cve.` |
 
-A miss is a result, not an error: `{ found: false, guidance, indexCheckpoint, indexLastSyncedAt }`. `guidance` opens with "No advisory with that ID is in the index. IDs look like ICSA-26-260-07 or ICSMA-26-253-02, with an optional revision suffix. Call cisa_search_ics_advisories to find the right ID, or cisa_list_reference with topic advisory_id_formats for the format.", then states the index checkpoint and last completed sync, and — when the date the ID encodes is later than that sync's UTC date and not later than today — says the advisory may be newer than the index, with its cisa.gov URL (Decision 32). The `cisa://advisory/{advisoryId}` not-found carries the same sentences and fields.
+A tool miss returns `{ found: false, guidance, indexCheckpoint, indexLastSyncedAt }`. The `cisa://advisory/{advisoryId}` resource returns a typed NotFound error with the checkpoint and last sync in its data. Both messages point to `cisa_search_ics_advisories` and state the index checkpoint and last completed sync. When the date the ID encodes is later than that sync's UTC date and no later than today, both say the advisory may be newer than the index and include its cisa.gov URL (Decision 32). The tool also gives example IDs and points to `cisa_list_reference` with topic `advisory_id_formats`.
+
+When the index holds other IDs with the same canonical base, both miss messages append every such ID in ID order, including an unsuffixed base and letter or numeric revisions. The lookup remains exact and never substitutes a sibling document. An indexed prefix seek followed by canonical-ID validation avoids scanning the corpus or suggesting unrelated prefixes.
 
 ---
 
@@ -907,7 +913,7 @@ The feeds serve no `etag` and no `last-modified`, and set `cache-control: privat
 Every feed result reports the successful fetch timestamp (`fetchedAt`) and whether refresh failed (`stale`). Failed refreshes preserve cached items with safe retry guidance on both surfaces; stale filtered emptiness cannot confirm current absence. All fetch attempts, response reads, and retry backoff share a 45-second deadline, leaving time below the default 60-second MCP timeout to deliver fallback or the declared cold `feed_unavailable` error. Caller cancellation propagates rather than becoming fallback success; returned freshness wrappers never mutate a previous response.
 
 **6. `cisa_get_ssvc` computes the BOD 26-04 timeline from three published decision points plus one caller input, and reports CISA's own assignment separately.**
-Inputs: `Automatable` and `Technical Impact` from Vulnrichment, `In the KEV` from this server's local snapshot, and `Publicly Exposed` from the caller's `assetExposure` — the one decision point CISA cannot publish because it is a property of the caller's estate. Output is the Table 1 row number, `timelineLabel` in the directive's own wording, `remediationTimelineDays` (3, 14, 60, or `null` for "Fix on system upgrade"), and `forensicTriageRequired`. With `assetExposure: 'unknown'` both arms are returned rather than a guess. Every result carries a fixed caveat: this is CISA's published decision logic applied to CISA's published decision points and the exposure the caller stated — not a compliance determination, and not CISA's assigned KEV due date. The two are reported side by side because they demonstrably differ: in a 24-CVE sample, 9 disagreed and 1 had no enrichment record. `assignmentAgrees` surfaces the disagreement as a fact; nothing reconciles it.
+Inputs: `Automatable` and `Technical Impact` from Vulnrichment, `In the KEV` from this server's local snapshot, and `Publicly Exposed` from the caller's `assetExposure` — the one decision point CISA cannot publish because it is a property of the caller's estate. Output is the Table 1 row number, `timelineLabel` in the directive's own wording, `remediationTimelineDays` (3, 14, 60, or `null` for "Fix on system upgrade"), and `forensicTriageRequired`. When the decision points support computation and `assetExposure` is `'unknown'`, the tool returns both arms. Each computed timeline carries a fixed caveat: this is CISA's published decision logic applied to CISA's published decision points and the exposure the caller stated — not a compliance determination, and not CISA's assigned KEV due date. The two are reported side by side because they demonstrably differ: in a 24-CVE sample, 9 disagreed and 1 had no enrichment record. `assignmentAgrees` surfaces the disagreement as a fact; nothing reconciles it.
 
 **7. Snapshot honesty is stated in three places, not one.**
 The KEV feed has no per-record modified timestamp, so a revised `dueDate` is undetectable. This appears in `cisa_search_kev`'s description ("the catalog records additions but carries no per-record modified timestamp"), in a `snapshotCaveat` enrichment notice on every call that sets `dateAddedFrom` — where the caller is explicitly asking a "what changed" question and the answer is narrower than the question — and in `cisa_list_reference` topic `kev_fields`. A retained-snapshot diff would close the gap and is explicitly not a v1 promise.
@@ -978,8 +984,8 @@ The index defaults to `csaf.sqlite3` under `cisa-cybersecurity-mcp-server` in `~
 **29. The advisory index refreshes once at boot and on schedule, on every transport, through one `maintain()` pass.**
 Cron jobs were gated to HTTP on the theory that a stdio server is short-lived, but a desktop client keeps a stdio child up for its whole session, and under stdio nothing ever refreshed the index or the KEV snapshot after the first load: IDs from `cisa_get_alerts` missed in `cisa_get_advisory` indefinitely. Both jobs now register on every transport; the framework destroys them on every shutdown path, stdin EOF included (measured exit 20–60 ms after EOF). Boot and the scheduled job run the same `maintain({ autoInit, refresh })`: a never-synced or content-stale index seeds or re-ingests under auto-init and nothing otherwise — a refresh on an empty store would fetch all 3,937 documents one by one — and a synced, current index refreshes. The boot refresh covers the short launch that never reaches a tick. It runs in the background and costs one conditional request: measured over five interleaved stdio launches each, `initialize` answered at a median 324 ms with it and 313 ms with the cron `off` (ranges overlap), and the 304 refresh completed 48–63 ms after scheduling. The first refresh after a seed downloads the full manifest once (445 ms, nothing changed), because `init` does not record the manifest ETag. An index last synced 2026-09-19 applied 13 advisories in about 0.6 s at boot. Running the seed from the schedule too means a seed that failed or was skipped at boot is retried on the next tick instead of on the next start. `CISA_CSAF_MIRROR_AUTO_INIT` still gates only seed and re-ingest; the refresh cron's `off` disables both the schedule and the boot refresh. Rejected: refreshing only when the index is older than the interval — a cron is a schedule, not an interval, and `node-cron` exposes no previous fire time — for a saving of one 304.
 
-**30. Two processes sharing one index never sync at once: a lease row, claimed under `BEGIN IMMEDIATE`, until the framework ships one.**
-The per-user default puts every stdio session on one file, and `defineMirror`'s overlap guard is an in-process flag. `sync-lease.ts` keeps a `mirror_meta` row `sync_lease` holding `{ owner, mode, expiresAt }`; claim, renewal, and release each read and write it inside `BEGIN IMMEDIATE`, which takes SQLite's write lock before the read, so the check and the write are atomic across processes. The owner is `<hostname>/<pid>/<random>` per service instance. The TTL is 120 s and the holder renews every 30 s on an unref'd timer; a renewal that finds another owner aborts the holder's sync rather than letting two writers run, and a lease whose holder crashed is taken over once it expires. A process that finds a live lease — or its own sync already running, which replaces the framework's `Conflict` — logs one line, skips, and keeps serving reads; the scheduled pass retries a skipped seed. `close()` aborts an in-flight sync and releases the lease before the handle closes, so a stdio process that exits mid-refresh does not block the next launch for a TTL. The `mirror:init` and `mirror:refresh` scripts take the same lease and exit 0 when skipped. Measured with two stdio processes on one temp file: on an empty index one seeded (1.9 s) while the other logged the skip; on a synced one, one refreshed and the other skipped. The whole seed is shorter than the TTL, so the event loop never stalls long enough to miss a renewal. The row lives in the existing `mirror_meta` table, so no migration. Replace it with the primitive cyanheads/mcp-ts-core#517 tracks. Rejected: a lockfile beside the database, which goes stale on a crash and needs its own path handling.
+**30. Two processes sharing one index coordinate preflight and sync; the framework fences writes.**
+The per-user default puts every stdio session on one file. `sync-lease.ts` keeps a `mirror_meta` row `sync_lease` holding `{ owner, mode, expiresAt }`; claim, renewal, and release each read and write it inside `BEGIN IMMEDIATE`, so the check and write are atomic across processes. The owner is `<hostname>/<pid>/<random>` per service instance. The TTL is 120 s and the holder renews every 30 s on an unref'd timer; losing ownership aborts the sync, and a crashed holder's lease becomes available after expiry. A process finding a live lease or its own active sync skips and keeps serving reads. `close()` aborts active work and releases the lease before closing the store. The `mirror:init` and `mirror:refresh` scripts take the same lease and exit 0 when skipped. This outer lease covers readiness and content-version preflight and coordinates with older server and CLI versions. The framework's SQLite sync lease separately fences page and state commits, preventing a holder that lost ownership from committing. Retaining both preserves preflight coordination during upgrades without replacing the framework's write fencing. The server lease uses the existing `mirror_meta` table and needs no migration. Rejected: a lockfile beside the database, which goes stale on a crash and needs its own path handling.
 
 **31. `off` disables a refresh cron; empty means the default; anything else `node-cron` rejects fails startup.**
 The docs said an empty value disabled a schedule, but `parseEnvConfig` reads empty, whitespace-only, and unsubstituted `${…}` values as unset — deliberately, because the `.mcpb` host forwards `""` for every option left blank — so the default applied and the `trim() === ''` guard in the scheduler was unreachable. Meanwhile `off`, `none`, and a mistyped expression all "disabled" a job the same way: a warning and a server running without it. The cron schema now trims, reads `off` in any case as the disable value (matching the `on`/`off` vocabulary `z.stringbool()` accepts), and refines everything else against `node-cron`'s own `validate()` — the check `schedulerService.schedule` applies — so an invalid value fails startup with a `ConfigurationError` naming the variable. Keeping empty as the default matters more once schedules run on stdio (Decision 29): "empty disables" would switch refresh off for every `.mcpb` user who left the field blank.

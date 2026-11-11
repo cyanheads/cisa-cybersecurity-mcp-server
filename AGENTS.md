@@ -2,8 +2,8 @@
 
 **Server:** cisa-cybersecurity-mcp-server
 **Version:** 0.4.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -57,7 +57,7 @@ No prompts: every workflow here is a direct lookup or a filtered search the tool
 - Transient `SQLITE_BUSY`/`SQLITE_LOCKED` open failures, including extended variants on the cause chain, are `mirror_busy` (`ServiceUnavailable`, retryable). They recover without a restart; listing/completion still degrade to empty and `sources` reports `busy` without the path.
 - A partial refresh retains applied rows and its ingested high-water `checkpoint`, but preserves `lastCompletedAt`, `lastSuccessfulCheckpoint`, and the prior manifest ETag. `sources` reports `partial` and `failedDocumentCount`; document/coverage counts follow row mutations, including another process's partial updates. Refresh rejects a never-completed index under its lease before upstream I/O.
 - Closing cancels pending boot preflight, active sync, and first-seed retries before closing the store. An automatic first seed skipped under contention rechecks with an unref'd delay capped at five seconds until ready or closed; a seed that fails waits for the next scheduled pass instead. Cron `off` does not disable the recheck, while auto-init false does.
-- Two processes never sync one index at once. Seed and refresh go through `CsafMirrorService.sync()`, which holds the `mirror_meta` lease (`sync-lease.ts`) — never call `mirrorInstance.runSync()` directly outside tests.
+- Two processes never sync one index at once. Seed and refresh go through `CsafMirrorService.sync()`, whose `mirror_meta` lease (`sync-lease.ts`) covers preflight and coordinates with older server and CLI versions; the framework lease additionally fences page and state commits. Never call `mirrorInstance.runSync()` directly outside tests.
 - Raise `INGEST_CONTENT_VERSION` (`src/services/csaf-mirror/ingest.ts`) whenever ingest would store different content for a document upstream has not revised — a row field, the stored document, a junction table. `refresh` never revisits an unchanged document, so without the bump the change never reaches an existing index. A new auxiliary table also needs a migration and a raised store-spec `version`.
 - A computed BOD 26-04 timeline and CISA's assigned KEV due date are two separate facts, reported side by side and never reconciled.
 - Preserve definitions from branches, `full_product_names`, and relationships; never synthesize dangling IDs. Relationship references are flat fields and `identificationHelper` is lossless JSON text. Product selection retains whole-document totals and marks `selected` independently of legacy `truncated`.
@@ -497,7 +497,7 @@ The `mirror:*` commands select `tsconfig.mirror.json`: current source modules in
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`), platform-specific native bindings that would lock the bundle to the platform it was packed on (`NATIVE_BINDING_ENTRY`), node-gyp build output beside a `binding.gyp` (compiled addons stay), and build-only sources (`BUILD_ONLY_ENTRY`), including framework development files.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package root, plus `SKILL.md` anywhere), preserving runtime directories such as the SDK's `dist/ext/skills/`, platform-specific native bindings that would lock the bundle to the platform it was packed on (`NATIVE_BINDING_ENTRY`), node-gyp build output beside a `binding.gyp` (compiled addons stay), and build-only sources (`BUILD_ONLY_ENTRY`), including framework development files.
 
 `better-sqlite3` is a regular dependency here and the bundle **carries it**: the npm tarball ships all eight platform prebuilds and `lib/binding.js` picks one at runtime, so the bundle stays cross-platform with no install script and no node-gyp step. `BUILD_ONLY_ENTRY` strips only its `deps/` and `src/` trees — 9.8 MB of SQLite C source used solely for a source build — and never `prebuilds/`, which must survive. That is why it is a separate literal from `NATIVE_BINDING_ENTRY`, whose whole job is removing platform-locked natives. The regexes are duplicated in `scripts/lint-packaging.ts`; the files' own comments require editing them together. Under Bun the driver is never loaded at all — `openSqliteHandle` uses the built-in `bun:sqlite`.
 
@@ -531,6 +531,8 @@ security: false                            # optional — true ONLY for a source
 `agent-notes` is an optional free-form field for maintenance agents processing the release downstream. Content here won't appear in the rendered CHANGELOG — it's consumed by agents running the `maintenance` skill. Use it for adoption instructions that don't fit the human-facing sections: new files to create, fields to populate, one-time migration steps. Omit entirely when there's nothing to say.
 
 **Section order:** the Keep a Changelog sequence — Added, Changed, Deprecated, Removed, Fixed, Security — then `Dependencies` last. Include only sections with entries — don't ship empty headers.
+
+Credit outside reporters in the changelog, release PR, and annotated tag using the format in `changelog/template.md`.
 
 **Tag annotations** render as GitHub Release bodies via `--notes-from-tag`. They must be structured markdown — never a flat comma-separated string. Subject omits the version number (GitHub prepends it). See `changelog/template.md` for the full format reference.
 

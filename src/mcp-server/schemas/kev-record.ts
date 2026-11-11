@@ -148,11 +148,15 @@ export const KevRecordSchema = z
       ),
   })
   .describe(
-    'One KEV catalog entry, or a not-in-KEV result carrying only cveId and inKev. Under cisa_check_cve_status detail "summary" an entry carries only cveId, inKev, the dates and deadline status, directive, vendor and product labels, and the ransomware and forensic-triage flags.',
+    'One KEV catalog entry, or a not-in-KEV result carrying only cveId and inKev. Under detail "summary" in cisa_check_cve_status or cisa_search_kev, an entry carries only cveId, inKev, the dates and deadline status, directive, vendor and product labels, and the ransomware and forensic-triage flags.',
   );
 
 /** The inferred output shape of {@link KevRecordSchema}. */
 export type KevRecordOutput = z.infer<typeof KevRecordSchema>;
+
+/** Wire disclosure shared by the KEV summary projections. */
+export const KEV_SUMMARY_NOTE =
+  'summary — in-KEV results omit requiredAction, vulnerabilityName, shortDescription, cwes, references, notesCommentary, and kevUrl. Call again with detail "full" to restore them.';
 
 /** Project a domain record into the output shape, resolving the date-dependent fields. */
 export function toKevRecordOutput(record: KevRecord, asOf: string): KevRecordOutput {
@@ -180,7 +184,7 @@ export function toKevRecordOutput(record: KevRecord, asOf: string): KevRecordOut
 }
 
 /**
- * The triage view `cisa_check_cve_status` returns under `detail: "summary"`:
+ * The triage view KEV search and status checks return under `detail: "summary"`:
  * identity, deadline and overdue status, directive, CISA's labels, and the two
  * tier flags, in full-record order. It drops the prose, CWEs, references, and
  * the catalog URL, which is derivable from the CVE ID.

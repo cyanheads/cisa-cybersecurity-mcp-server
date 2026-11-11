@@ -470,24 +470,19 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
         'KEV membership was not evaluated: the KEV catalog snapshot has not loaded yet, so these results carry no kevCves. Retry in a few seconds, or pass the listed CVEs to cisa_check_cve_status.',
       );
     }
-    if (input.limit > MAX_PAGE_SIZE && hasMore)
-      notices.push(
-        `Requested limit ${input.limit}; applied ${limit}. Follow the cursor for more advisories.`,
-      );
     const truncated = page.items.length >= limit && hasMore;
     if (truncated) {
       const shown = page.items.length;
+      const guidance = [
+        `Results capped at ${limit}; showing ${shown}. Follow the cursor for more advisories.`,
+      ];
+      if (limit < MAX_PAGE_SIZE)
+        guidance.push(`To return more per page, raise limit up to ${MAX_PAGE_SIZE}.`);
+      if (input.limit > limit) guidance.push(`Requested limit ${input.limit}; applied ${limit}.`);
       ctx.enrich.truncated({
         shown,
         cap: limit,
-        ...(notices.length > 0
-          ? {
-              guidance: [
-                `Results capped at ${limit}; showing ${shown}. Raise the cap or narrow with filters.`,
-                ...notices,
-              ].join(' '),
-            }
-          : {}),
+        guidance: [...guidance, ...notices].join(' '),
       });
     } else if (notices.length > 0) {
       ctx.enrich.notice(notices.join(' '));

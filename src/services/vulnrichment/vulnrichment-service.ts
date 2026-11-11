@@ -34,6 +34,8 @@ const GUIDANCE = {
     'The CVE record exists but carries no CISA-authored enrichment container, so no SSVC decision points are available. Call cisa_check_cve_status for KEV status.',
   no_ssvc_metric:
     'CISA has enriched this CVE with CVSS or CWE data but has not published SSVC decision points for it. The CVSS and CWE values returned are what is available.',
+  fetch_failed:
+    'The CISA enrichment source could not be reached for this CVE. Retry in a few minutes, or call cisa_check_cve_status which serves from a cached catalog and needs no network.',
 } as const;
 
 /** Options for {@link initVulnrichment}. */
@@ -52,6 +54,31 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }
 
+/** Canonicalize known decision values while retaining any other published spelling. */
+function normalizeDecision(
+  value: string | undefined,
+  vocabulary: readonly string[],
+): string | undefined {
+  const lower = value?.toLowerCase();
+  return lower && vocabulary.includes(lower) ? lower : value;
+}
+
+/** Use the same vocabulary for published records and older cached records. */
+function normalizeDecisions(
+  exploitationValue: string | undefined,
+  automatableValue: string | undefined,
+  technicalImpactValue: string | undefined,
+) {
+  const exploitation = normalizeDecision(exploitationValue, ['none', 'poc', 'active']);
+  const automatable = normalizeDecision(automatableValue, ['yes', 'no']);
+  const technicalImpact = normalizeDecision(technicalImpactValue, ['partial', 'total']);
+  return {
+    ...(exploitation ? { exploitation } : {}),
+    ...(automatable ? { automatable } : {}),
+    ...(technicalImpact ? { technicalImpact } : {}),
+  };
+}
+
 /** Read the SSVC decision points out of a CISA-ADP `metrics[]` array. */
 function readSsvc(metrics: unknown[]): {
   automatable?: string;
@@ -67,11 +94,11 @@ function readSsvc(metrics: unknown[]): {
     const content = metric.other.content;
     const options = Array.isArray(content.options) ? content.options : [];
 
-    const values: Record<string, string> = {};
+    const values = new Map<string, string>();
     for (const option of options) {
       if (!isRecord(option)) continue;
       for (const [key, value] of Object.entries(option)) {
-        if (typeof value === 'string') values[key] = value;
+        if (typeof value === 'string') values.set(key, value);
       }
     }
 
@@ -79,10 +106,11 @@ function readSsvc(metrics: unknown[]): {
     const timestamp = str(content.timestamp);
     const role = str(content.role);
     return {
-      ...(values.Exploitation ? { exploitation: values.Exploitation } : {}),
-      ...(values.Automatable ? { automatable: values.Automatable } : {}),
-      /* The published key carries a space — "Technical Impact", not "TechnicalImpact". */
-      ...(values['Technical Impact'] ? { technicalImpact: values['Technical Impact'] } : {}),
+      ...normalizeDecisions(
+        values.get('Exploitation'),
+        values.get('Automatable'),
+        values.get('Technical Impact'),
+      ),
       ...(version ? { version } : {}),
       ...(timestamp ? { timestamp } : {}),
       ...(role ? { role } : {}),
@@ -195,6 +223,7 @@ export class VulnrichmentService {
    * partial outage degrades one row rather than the whole call.
    */
   async fetchMany(cveIds: string[], ctx: Context): Promise<SsvcRecord[]> {
+    ctx.signal.throwIfAborted();
     const results = new Array<SsvcRecord>(cveIds.length);
     let next = 0;
 
@@ -207,6 +236,7 @@ export class VulnrichmentService {
     };
 
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, cveIds.length) }, () => worker()));
+    ctx.signal.throwIfAborted();
     return results;
   }
 
@@ -224,7 +254,15 @@ export class VulnrichmentService {
 
     const cacheKey = `ssvc/${cveId}`;
     const cached = await ctx.state.get<SsvcRecord>(cacheKey).catch(() => null);
-    if (cached) return cached;
+    ctx.signal.throwIfAborted();
+    if (cached) {
+      return cached.outcome === 'ssvc'
+        ? {
+            ...cached,
+            ...normalizeDecisions(cached.exploitation, cached.automatable, cached.technicalImpact),
+          }
+        : cached;
+    }
 
     let record: SsvcRecord;
     try {
@@ -261,16 +299,13 @@ export class VulnrichmentService {
         },
       );
     } catch (error) {
-      ctx.log.warning('Vulnrichment fetch failed', {
-        cveId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      ctx.signal.throwIfAborted();
+      if (error instanceof Error && error.name === 'AbortError') throw error;
+      ctx.log.warning('Vulnrichment fetch failed', { cveId });
       return {
         cveId,
         outcome: 'fetch_failed',
-        guidance: `The CISA enrichment source could not be reached for this CVE (${
-          error instanceof Error ? error.message : String(error)
-        }). Retry in a few minutes, or call cisa_check_cve_status which serves from a cached catalog and needs no network.`,
+        guidance: GUIDANCE.fetch_failed,
         cwes: [],
         sourceUrl,
       };

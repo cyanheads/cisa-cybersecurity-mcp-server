@@ -26,19 +26,20 @@ import {
   initVulnrichment,
   resetVulnrichment,
 } from '@/services/vulnrichment/vulnrichment-service.js';
-import { buildKevFeedBody } from '../../../fixtures/kev-feed.js';
+import { buildKevFeedBody, KEV_RECORDS } from '../../../fixtures/kev-feed.js';
 import {
   buildSsvcRecord,
+  HISTORICAL_SSVC_RECORD,
   NO_CISA_CONTAINER_RECORD,
   NO_SSVC_METRIC_RECORD,
 } from '../../../fixtures/vulnrichment-records.js';
 import { contentText, firstText } from '../../../helpers/format-text.js';
 
-async function loadCatalog() {
+async function loadCatalog(extraRecords: unknown[] = []) {
   const http = createFetchMock([
     {
       match: KEV_FEED_URL,
-      respond: new Response(buildKevFeedBody(), {
+      respond: new Response(buildKevFeedBody(extraRecords), {
         headers: { 'content-type': 'application/json' },
       }),
     },
@@ -83,7 +84,7 @@ describe('cisa_get_ssvc', () => {
       );
       expect(second).toMatchObject({ foundCount: 0, notFoundCount: 1, failedCount: 1 });
       expect(getEnrichment(ctx).notice).toContain('1 lookup');
-      expect(getEnrichment(ctx).notice).not.toContain('None of the requested CVEs');
+      expect(getEnrichment(ctx).notice).not.toContain('None of the processed CVEs');
       expect(http.calls).toHaveLength(4);
       const contract = await runToolContract(getSsvcTool, { cveIds: ids });
       expect(contract.structuredContent).toMatchObject({ failedCount: 1, notFoundCount: 1 });
@@ -143,6 +144,7 @@ describe('cisa_get_ssvc', () => {
       const input = getSsvcTool.input.parse({ cveIds: [cveId] });
       const result = await getSsvcTool.handler(input, ctx);
       expect(result.results[0]?.bod2604?.timelines).toHaveLength(2);
+      expect(result.results[0]).not.toHaveProperty('assignmentAgrees');
       expect(result.results[0]?.bod2604?.timelines.map((t) => t.assetExposure).sort()).toEqual([
         'not_publicly_exposed',
         'publicly_exposed',
@@ -199,6 +201,9 @@ describe('cisa_get_ssvc', () => {
       });
       /* Table row 1: publicly exposed + in KEV + automatable + total = 3 days, matches kevAssigned's 3. */
       expect(entry?.assignmentAgrees).toBe(true);
+      expect(firstText(getSsvcTool.format?.(result))).toContain(
+        'Assignment agrees with the computed timeline:** yes',
+      );
     } finally {
       http.restore();
     }
@@ -220,6 +225,155 @@ describe('cisa_get_ssvc', () => {
       const input = getSsvcTool.input.parse({ cveIds: [cveId], assetExposure: 'publicly_exposed' });
       const result = await getSsvcTool.handler(input, ctx);
       expect(result.results[0]?.assignmentAgrees).toBe(false);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it.each([
+    ['CVE-2026-00005', 'total', true, 'No'],
+    ['CVE-2026-00001', 'partial', false, 'Yes'],
+  ])(
+    'reports triage disagreement for %s even when the day count matches',
+    async (cveId, technicalImpact, triage, assigned) => {
+      await loadCatalog();
+      const http = createFetchMock([
+        {
+          match: cveToVulnrichmentUrl(cveId) as string,
+          respond: Response.json(buildSsvcRecord({ technicalImpact })),
+        },
+      ]);
+      http.install();
+      try {
+        const result = await runToolContract(getSsvcTool, {
+          cveIds: [cveId],
+          assetExposure: 'publicly_exposed',
+        });
+        expect(result.structuredContent).toMatchObject({
+          results: [
+            {
+              assignmentAgrees: false,
+              bod2604: {
+                timelines: [{ remediationTimelineDays: 3, forensicTriageRequired: triage }],
+              },
+              kevAssigned: { daysFromAdd: 3, forensicTriage: assigned },
+            },
+          ],
+        });
+        expect(contentText(result)).toContain('Assignment agrees with the computed timeline:** no');
+      } finally {
+        http.restore();
+      }
+    },
+  );
+
+  it('resolves both timeline arms for the pinned historical record in a mixed batch', async () => {
+    const cveId = 'CVE-2024-27834';
+    await loadCatalog([{ ...KEV_RECORDS[0], cveID: cveId }]);
+    const http = createFetchMock([
+      {
+        match: cveToVulnrichmentUrl('CVE-2026-00001') as string,
+        respond: Response.json(buildSsvcRecord()),
+      },
+      {
+        match: cveToVulnrichmentUrl(cveId) as string,
+        respond: Response.json(HISTORICAL_SSVC_RECORD),
+      },
+    ]);
+    http.install();
+    try {
+      const result = await runToolContract(getSsvcTool, { cveIds: ['CVE-2026-00001', cveId] });
+      expect(result.structuredContent).toMatchObject({
+        echo: { requested: 2, assetExposure: 'unknown' },
+        foundCount: 2,
+        notFoundCount: 0,
+        failedCount: 0,
+        results: [
+          { cveId: 'CVE-2026-00001', outcome: 'ssvc' },
+          {
+            cveId,
+            exploitation: 'none',
+            automatable: 'yes',
+            technicalImpact: 'total',
+            bod2604: { timelines: [{ tableRow: 1 }, { tableRow: 9 }] },
+          },
+        ],
+      });
+      expect(contentText(result)).toContain('**Request:** 2 CVE(s), assetExposure unknown');
+      expect(contentText(result)).toContain(
+        'Exploitation none · Automatable yes · Technical Impact total',
+      );
+      expect(contentText(result)).toContain('not_publicly_exposed: row 9');
+      expect(contentText(result)).not.toContain('Assignment agrees');
+    } finally {
+      http.restore();
+    }
+  });
+
+  it.each([
+    ['Automatable', { automatable: 'Contextual' }, { automatable: 'Contextual' }],
+    ['Technical Impact', { technicalImpact: 'Conditional' }, { technicalImpact: 'Conditional' }],
+  ])('preserves complete SSVC evidence with unsupported %s', async (point, options, expected) => {
+    await loadCatalog();
+    const cveId = 'CVE-2026-00001';
+    const sourceUrl = cveToVulnrichmentUrl(cveId) as string;
+    const http = createFetchMock([
+      {
+        match: sourceUrl,
+        respond: Response.json(buildSsvcRecord({ ...options, exploitation: 'Pre-release' })),
+      },
+    ]);
+    http.install();
+    try {
+      const result = await runToolContract(getSsvcTool, {
+        cveIds: [cveId],
+        assetExposure: 'publicly_exposed',
+      });
+      const guidance = `No BOD 26-04 timeline was computed because CISA published unsupported SSVC ${point} value.`;
+      expect(result.structuredContent).toMatchObject({
+        foundCount: 1,
+        notFoundCount: 0,
+        failedCount: 0,
+        results: [
+          {
+            cveId,
+            found: true,
+            outcome: 'ssvc',
+            exploitation: 'Pre-release',
+            automatable: 'yes',
+            technicalImpact: 'total',
+            ...expected,
+            ssvcVersion: '2.0.3',
+            ssvcTimestamp: '2026-09-05T00:00:00Z',
+            ssvcRole: 'CISA Coordinator',
+            cvss: { baseScore: 9.8 },
+            cwes: [{ cweId: 'CWE-20' }],
+            inKev: true,
+            kevAssigned: { daysFromAdd: 3, forensicTriage: 'Yes' },
+            sourceUrl,
+            guidance,
+          },
+        ],
+      });
+      expect(result.structuredContent).not.toHaveProperty('results.0.bod2604');
+      expect(result.structuredContent).not.toHaveProperty('results.0.assignmentAgrees');
+      const text = contentText(result);
+      for (const value of [
+        guidance,
+        'Pre-release',
+        Object.values(expected)[0],
+        '2.0.3',
+        '2026-09-05T00:00:00Z',
+        'CISA Coordinator',
+        '9.8',
+        'CWE-20',
+        'forensic triage Yes',
+        sourceUrl,
+      ]) {
+        expect(text).toContain(value);
+      }
+      expect(text).not.toContain('BOD 26-04 computed timeline');
+      expect(text).not.toContain('Assignment agrees');
     } finally {
       http.restore();
     }
@@ -364,14 +518,20 @@ describe('cisa_get_ssvc', () => {
 
   it('processes only the first 50 IDs and returns the normalized remainder', async () => {
     await loadCatalog();
-    const ids = Array.from({ length: 51 }, (_, i) => `CVE-2026-${60000 + i}`);
+    const ids = Array.from({ length: 52 }, (_, i) => `CVE-2026-${60000 + i}`);
     ids[50] = ' cve-2026-60050 ';
-    const http = createFetchMock(
-      ids.slice(0, 50).map((id) => ({
+    const tailCve = 'CVE-2026-00001';
+    ids[51] = tailCve;
+    const http = createFetchMock([
+      ...ids.slice(0, 50).map((id) => ({
         match: cveToVulnrichmentUrl(id) as string,
         respond: () => new Response('', { status: 404 }),
       })),
-    );
+      {
+        match: cveToVulnrichmentUrl(tailCve) as string,
+        respond: () => Response.json(buildSsvcRecord()),
+      },
+    ]);
     http.install();
     try {
       const ctx = createMockContext({ errors: getSsvcTool.errors });
@@ -380,7 +540,7 @@ describe('cisa_get_ssvc', () => {
         foundCount: 0,
         notFoundCount: 50,
         failedCount: 0,
-        unprocessedIds: ['CVE-2026-60050'],
+        unprocessedIds: ['CVE-2026-60050', tailCve],
       });
       expect(result.results).toHaveLength(50);
       expect(http.calls).toHaveLength(50);
@@ -388,11 +548,23 @@ describe('cisa_get_ssvc', () => {
       expect(getEnrichment(ctx).notice).toContain('follow-up');
       expect(getEnrichment(ctx).notice).toContain('Coverage is incomplete');
       const contract = await runToolContract(getSsvcTool, { cveIds: ids });
+      const absence = 'None of the processed CVEs carry published SSVC decision points.';
       expect(contract.structuredContent).toMatchObject({
-        unprocessedIds: ['CVE-2026-60050'],
+        unprocessedIds: ['CVE-2026-60050', tailCve],
+        foundCount: 0,
         failedCount: 0,
+        notFoundCount: 50,
+        echo: { requested: 52 },
+        notice: expect.stringContaining(absence),
       });
       expect(contentText(contract)).toContain('CVE-2026-60050');
+      expect(contentText(contract)).toContain('**Request:** 52 CVE(s), assetExposure unknown');
+      expect(contentText(contract)).toContain(absence);
+      expect(http.calls).toHaveLength(100);
+      const followUp = await runToolContract(getSsvcTool, { cveIds: [tailCve] });
+      expect(followUp.structuredContent).toMatchObject({
+        results: [{ cveId: tailCve, found: true, outcome: 'ssvc' }],
+      });
     } finally {
       http.restore();
     }

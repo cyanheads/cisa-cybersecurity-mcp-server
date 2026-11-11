@@ -137,6 +137,15 @@ describe('cisa://advisory/{advisoryId} resource', () => {
       expect((error as McpError).message).toContain('cisa_search_ics_advisories');
     });
 
+    it('keeps the exact revision miss and names the indexed base in its error', async () => {
+      const params = advisoryParams.parse({ advisoryId: 'ICSA-26-260-07B' });
+      await expect(icsAdvisoryResource.handler(params, createMockContext())).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'advisory_not_found', advisoryId: 'ICSA-26-260-07B' },
+        message: expect.stringContaining('Indexed IDs with the same base: ICSA-26-260-07.'),
+      });
+    });
+
     it('a not-found names the checkpoint and last sync, with the may-be-newer note only for an ID dated after that sync', async () => {
       (await getCsafMirror().mirrorInstance.raw())
         .prepare('UPDATE mirror_sync_state SET checkpoint = ?, completed_at = ? WHERE id = 1')
@@ -177,6 +186,7 @@ describe('cisa://advisory/{advisoryId} resource', () => {
         {
           uri: 'cisa://advisory/ICSA-26-260-07',
           name: 'ICSA-26-260-07 — Acme Widgets PLC Remote Code Execution',
+          title: 'ICS advisory (CSAF)',
           mimeType: 'application/json',
         },
       ]);

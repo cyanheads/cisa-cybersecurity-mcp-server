@@ -28,6 +28,23 @@ describe('normalizeVulnrichment', () => {
   });
 
   it.each([
+    [
+      { exploitation: 'PoC', automatable: 'No', technicalImpact: 'Partial' },
+      { exploitation: 'poc', automatable: 'no', technicalImpact: 'partial' },
+    ],
+    [
+      { exploitation: 'Active', automatable: 'Yes', technicalImpact: 'Total' },
+      { exploitation: 'active', automatable: 'yes', technicalImpact: 'total' },
+    ],
+    [
+      { exploitation: ' Unknown ', automatable: 'Future', technicalImpact: 'Contextual' },
+      { exploitation: ' Unknown ', automatable: 'Future', technicalImpact: 'Contextual' },
+    ],
+  ])('normalizes recognized vocabulary only for %j', (options, expected) => {
+    expect(normalize(buildSsvcRecord(options))).toMatchObject({ outcome: 'ssvc', ...expected });
+  });
+
+  it.each([
     null,
     {},
     { containers: null },
@@ -231,6 +248,34 @@ describe('VulnrichmentService', () => {
     }
   });
 
+  it('normalizes decision values from records cached by an older server', async () => {
+    const cveId = 'CVE-2024-27834';
+    const ctx = createMockContext();
+    const http = createFetchMock([]);
+    http.install();
+    try {
+      await ctx.state.set(`ssvc/${cveId}`, {
+        cveId,
+        outcome: 'ssvc',
+        exploitation: 'None',
+        automatable: 'Yes',
+        technicalImpact: 'Total',
+        cwes: [],
+        sourceUrl: cveToVulnrichmentUrl(cveId),
+      });
+      const [record] = await getVulnrichment().fetchMany([cveId], ctx);
+      expect(record).toMatchObject({
+        outcome: 'ssvc',
+        exploitation: 'none',
+        automatable: 'yes',
+        technicalImpact: 'total',
+      });
+      expect(http.calls).toHaveLength(0);
+    } finally {
+      http.restore();
+    }
+  });
+
   it('resolves a batch preserving input order, one result per CVE', async () => {
     const cveIds = ['CVE-2026-00001', 'CVE-2026-00002', 'CVE-2026-00003'];
     const http = createFetchMock(
@@ -266,10 +311,35 @@ describe('VulnrichmentService', () => {
       const [record] = await getVulnrichment().fetchMany([cveId], ctx);
       expect(record?.outcome).toBe('fetch_failed');
       expect(record?.guidance).toContain('could not be reached');
+      expect(record?.guidance).not.toContain('network failure');
+      expect(await ctx.state.get(`ssvc/${cveId}`)).toBeNull();
     } finally {
       http.restore();
     }
   }, 15000);
+
+  it('propagates caller cancellation during a fetch without starting queued lookups', async () => {
+    const controller = new AbortController();
+    const reason = new Error('caller cancelled');
+    const ids = Array.from({ length: 8 }, (_, i) => `CVE-2026-${40000 + i}`);
+    const http = createFetchMock(
+      ids.map((id) => ({
+        match: cveToVulnrichmentUrl(id) as string,
+        respond: () => {
+          controller.abort(reason);
+          throw reason;
+        },
+      })),
+    );
+    http.install();
+    try {
+      const ctx = createMockContext({ signal: controller.signal });
+      await expect(getVulnrichment().fetchMany(ids, ctx)).rejects.toBe(reason);
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
 
   it('a storage read/write failure falls through to a fetch rather than breaking the lookup', async () => {
     const cveId = 'CVE-2026-77777';

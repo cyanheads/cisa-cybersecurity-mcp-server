@@ -1,17 +1,17 @@
 /**
- * @fileoverview Cross-process sync lease for the ICS advisory index. The
- * framework's `defineMirror` guards `runSync` with an in-process flag only, and
- * under a per-user default index path every stdio session a client launches
- * shares one SQLite file — so two processes could seed or refresh it at once,
- * doubling the upstream fetches and contending for the write lock.
+ * @fileoverview Cross-process lease for ICS advisory maintenance. Hold it
+ * across the readiness and ingest-version checks as well as the sync, so a
+ * process rechecks whether work is needed after the preceding sync completes.
+ * This lease also coordinates with older server and CLI versions sharing the
+ * per-user SQLite file. The framework lease separately fences its page and
+ * state commits within `runSync`.
  *
  * The lease is one `mirror_meta` row holding its owner, the sync mode, and an
  * expiry. It is claimed, renewed, and released under `BEGIN IMMEDIATE`, which
  * takes SQLite's write lock before the read, so the check and the write are one
  * atomic step across processes. The holder renews it well inside the TTL while
  * it syncs; a lease whose holder crashed simply expires and the next claim takes
- * it over. Replace with the framework primitive once cyanheads/mcp-ts-core#517
- * ships one.
+ * it over.
  * @module services/csaf-mirror/sync-lease
  */
 

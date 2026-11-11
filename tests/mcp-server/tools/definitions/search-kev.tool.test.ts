@@ -43,6 +43,111 @@ async function loadCatalog(extraRecords: unknown[] = []) {
 }
 
 describe('cisa_search_kev', () => {
+  it('returns full records and matching text by default', async () => {
+    await loadCatalog();
+    const result = await runToolContract(searchKevTool, { limit: 1 });
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        {
+          cveId: 'CVE-2026-00002',
+          shortDescription: 'Acme Gadget contains a privilege escalation vulnerability.',
+          requiredAction: 'Apply mitigations per BOD 26-04.',
+          references: [{ kind: 'nvd', url: 'https://nvd.nist.gov/vuln/detail/CVE-2026-00002' }],
+          kevUrl:
+            'https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-00002',
+        },
+      ],
+      totalCount: 5,
+      hasMore: true,
+    });
+    const text = contentText(result);
+    expect(text).toContain('Acme Gadget contains a privilege escalation vulnerability.');
+    expect(text).toContain('Apply mitigations per BOD 26-04.');
+    expect(text).toContain('https://nvd.nist.gov/vuln/detail/CVE-2026-00002');
+    expect(text).toContain(
+      'https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-00002',
+    );
+    expect(result.structuredContent).not.toHaveProperty('summaryNote');
+    const explicit = await runToolContract(searchKevTool, { limit: 1, detail: 'full' });
+    expect(explicit.structuredContent).toEqual(result.structuredContent);
+    expect(contentText(explicit)).toBe(contentText(result));
+  });
+
+  it('projects a legacy cursor page with the current request detail and limit', async () => {
+    await loadCatalog();
+    const cursor = Buffer.from(JSON.stringify({ offset: 1, limit: 1 })).toString('base64');
+    const summary = await runToolContract(searchKevTool, { cursor, detail: 'summary', limit: 2 });
+    const full = await runToolContract(searchKevTool, { cursor, limit: 2 });
+    const page = summary.structuredContent as {
+      cursor: string;
+      results: Array<Record<string, unknown>>;
+      summaryNote: string;
+    };
+    expect(page).toMatchObject({ totalCount: 5, hasMore: true, shown: 2, cap: 2 });
+    expect(JSON.parse(Buffer.from(page.cursor, 'base64').toString())).toEqual({
+      offset: 3,
+      limit: 2,
+    });
+    expect(page.results).toHaveLength(2);
+    for (const record of page.results) {
+      expect(Object.keys(record).sort()).toEqual([
+        'cveId',
+        'dateAdded',
+        'daysUntilDue',
+        'directive',
+        'dueDate',
+        'forensicTriage',
+        'inKev',
+        'knownRansomwareCampaignUse',
+        'overdue',
+        'product',
+        'vendorProject',
+      ]);
+      expect(contentText(summary)).toContain(`### ${record.cveId}`);
+      expect(contentText(summary)).toContain(String(record.dueDate));
+    }
+    expect(full.structuredContent).toMatchObject({
+      results: page.results.map((record) => ({ ...record, shortDescription: expect.any(String) })),
+      cursor: page.cursor,
+      totalCount: 5,
+      hasMore: true,
+    });
+    const summaryText = contentText(summary);
+    expect(page.summaryNote).toContain('detail "full"');
+    expect(summaryText).toContain(page.summaryNote);
+    expect(summaryText).not.toContain('**Required action:**');
+    expect(summaryText).not.toContain('**References:**');
+    const last = await runToolContract(searchKevTool, { cursor: page.cursor });
+    expect(last.structuredContent).toMatchObject({
+      results: [
+        expect.objectContaining({ requiredAction: expect.any(String) }),
+        expect.any(Object),
+      ],
+      hasMore: false,
+    });
+    expect(last.structuredContent).not.toHaveProperty('summaryNote');
+    expect(last.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it('discloses summary on an empty page and rejects an unknown detail', async () => {
+    await loadCatalog();
+    const empty = await runToolContract(searchKevTool, {
+      detail: 'summary',
+      cveIdPrefix: 'CVE-2099',
+    });
+    expect(empty.structuredContent).toMatchObject({ results: [], hasMore: false, totalCount: 0 });
+    const { summaryNote } = empty.structuredContent as { summaryNote: string };
+    expect(summaryNote).toContain('detail "full"');
+    expect(contentText(empty)).toContain(summaryNote);
+    const invalid = await runToolContract(searchKevTool, { detail: 'brief' } as unknown as z.input<
+      typeof searchKevTool.input
+    >);
+    expect(invalid.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    expect(contentText(invalid)).toContain('detail');
+  });
+
   it('uses effective limits for oversized and resized cursor pages without gaps', async () => {
     await loadCatalog(
       Array.from({ length: 130 }, (_, index) => ({
@@ -58,6 +163,21 @@ describe('cisa_search_kev', () => {
     };
     expect(initial.results).toHaveLength(100);
     expect(initial.totalCount).toBe(135);
+    for (const [args, notice] of [
+      [
+        {},
+        'Results capped at 25; showing 25. Follow the cursor for more entries. To return more per page, raise limit up to 100.',
+      ],
+      [{ limit: 100 }, 'Results capped at 100; showing 100. Follow the cursor for more entries.'],
+      [
+        { limit: 150 },
+        'Results capped at 100; showing 100. Follow the cursor for more entries. Requested limit 150; applied 100.',
+      ],
+    ] as const) {
+      const result = await runToolContract(searchKevTool, args);
+      expect(result.structuredContent).toMatchObject({ notice });
+      expect(contentText(result)).toContain(notice);
+    }
     expect(first.structuredContent).toMatchObject({
       cap: 100,
       shown: 100,
@@ -503,14 +623,14 @@ describe('cisa_search_kev', () => {
   });
 
   describe('non-empty results', () => {
-    it('carry no zero-hit notice, and the truncation notice is unchanged', async () => {
+    it('carry no zero-hit notice and guide callers to the next page', async () => {
       await loadCatalog();
       const whole = await runToolContract(searchKevTool, { vendorProject: 'acme' });
       expect((whole.structuredContent as { notice?: string }).notice).toBeUndefined();
 
       const paged = await runToolContract(searchKevTool, { vendorProject: 'acme', limit: 1 });
       expect((paged.structuredContent as { notice?: string }).notice).toMatchInlineSnapshot(
-        `"Results capped at 1; showing 1. Raise the cap or narrow with filters."`,
+        `"Results capped at 1; showing 1. Follow the cursor for more entries. To return more per page, raise limit up to 100."`,
       );
     });
   });
@@ -706,7 +826,7 @@ describe('cisa_search_kev', () => {
       const structured = result.structuredContent as Structured;
       expect(structured).toMatchObject({ truncated: true, shown: 1, cap: 1, totalCount: 2 });
       expect(structured.notice).toBe(
-        `Results capped at 1; showing 1. Raise the cap or narrow with filters. ${DROPPED('"漏洞"', 'remote')}`,
+        `Results capped at 1; showing 1. Follow the cursor for more entries. To return more per page, raise limit up to 100. ${DROPPED('"漏洞"', 'remote')}`,
       );
       expect(contentText(result)).toContain(structured.notice as string);
     });
