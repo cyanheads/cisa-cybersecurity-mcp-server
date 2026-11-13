@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: cisa-cybersecurity-mcp-server
+abstract: "CISA Known Exploited Vulnerabilities with BOD 26-04 deadlines, SSVC prioritization, and the full ICS advisory corpus (CSAF) via MCP. Keyless. STDIO or Streamable HTTP."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/cisa-cybersecurity-mcp-server"
+license: Apache-2.0
+doi: 10.5281/zenodo.24193662
+keywords:
+  - mcp
+  - model-context-protocol
+  - cisa
+  - kev
+  - known-exploited-vulnerabilities
+  - bod-26-04
+  - ssvc
+  - csaf
+  - ics-advisories
+  - ics-security
+  - vulnerability
+  - vulnerability-management
+  - security
+  - cve
