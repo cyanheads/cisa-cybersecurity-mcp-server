@@ -1,6 +1,6 @@
 # cisa-cybersecurity-mcp-server - Directory Structure
 
-Generated on: 2026-11-01 03:44:00
+Generated on: 2026-11-14 06:18:45
 
 ```text
 cisa-cybersecurity-mcp-server/
@@ -28,6 +28,7 @@ cisa-cybersecurity-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -268,6 +269,7 @@ cisa-cybersecurity-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-11-13 · ⚠️ Breaking
+
+CISA advisory reads retain vulnerability references and ICS search finds republished advisories by their originating vendor IDs.
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-11-11
 
 KEV triage summaries, corrected SSVC timeline comparisons, and exact advisory revision guidance
