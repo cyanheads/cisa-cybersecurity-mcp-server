@@ -80,6 +80,7 @@ describe('cisa_get_advisory', () => {
         summary: '  FIRST [calculator]  ',
         url: ` https://www.first.org/cvss/calculator/4-0#${vector} `,
       },
+      { category: 'external', url: 'javascript:alert(1)' },
     ];
     const raw = {
       ...FULL_ADVISORY,
@@ -111,6 +112,7 @@ describe('cisa_get_advisory', () => {
       `&#32;&#32;FIRST \\[calculator\\]&#32;&#32;: [&#32;${destination}&#32;](<${destination}>)`,
     );
     expect(contentText(result)).toContain(`**CVSS v4 vector:** \`${vector}\``);
+    expect(contentText(result)).toContain('**Reference (external):** javascript:alert(1)');
     expect(contentText(result)).not.toContain('https://example.org/unselected');
   });
 

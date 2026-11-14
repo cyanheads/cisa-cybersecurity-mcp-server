@@ -6,9 +6,14 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { applyReadLimit, READ_INPUT_HARD_CEILING } from '@/mcp-server/read-limits.js';
 import { CalendarDateInputSchema } from '@/mcp-server/schemas/kev-record.js';
-import { getCisaFeeds, UPSTREAM_WINDOW_SIZE } from '@/services/cisa-feeds/cisa-feeds-service.js';
+import {
+  getCisaFeeds,
+  SUMMARY_CAP,
+  UPSTREAM_WINDOW_SIZE,
+} from '@/services/cisa-feeds/cisa-feeds-service.js';
 import { ADVISORY_ID_PATTERN } from '@/services/csaf-mirror/normalize.js';
 
 const WINDOW_CAVEAT =
@@ -300,7 +305,9 @@ export const getAlertsTool = tool('cisa_get_alerts', {
       lines.push(`**Published:** ${item.pubDate} · **Link:** ${item.link}`);
       lines.push(`**guid (upstream node path):** ${item.guid}`);
       if (item.advisoryId) lines.push(`**Advisory ID:** ${item.advisoryId}`);
-      lines.push(item.summary);
+      lines.push(
+        item.summary.length > SUMMARY_CAP ? escapeMarkdownInline(item.summary) : item.summary,
+      );
       lines.push(`**Summary truncated:** ${item.summaryTruncated ? 'yes' : 'no'}`);
       if (item.guidance) lines.push(`**Guidance:** ${item.guidance}`);
       lines.push('');

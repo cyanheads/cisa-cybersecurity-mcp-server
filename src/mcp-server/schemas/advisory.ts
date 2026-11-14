@@ -675,6 +675,10 @@ export function renderAdvisoryRevisions(revisions: Revision[]): string[] {
 function renderReferenceLink(summary: string | undefined, url: string): string {
   const label = summary === undefined ? '' : `${escapeMarkdownInline(summary)}: `;
   const destination = url.trim();
+  const protocol = URL.parse(destination)?.protocol;
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    return `${label}${escapeMarkdownInline(url)}`;
+  }
   const link = destination === url ? literalFields(url, 'url') : markdownLink(url, destination);
   return `${label}${link}`;
 }

@@ -40,9 +40,10 @@ describe('cisa_get_alerts', () => {
     initCisaFeeds({ cacheTtlSeconds: 900, timeoutMs: 5000 });
     const now = vi.spyOn(Date, 'now').mockReturnValue(0);
     const fullText = `${'x'.repeat(1200)} & omitted suffix`;
+    const suffix = ' with *literal asterisks* and <b>plain text</b>';
     const feed = buildAdvisoriesFeed().replace(
       'An alert with no advisory link.',
-      `${'x'.repeat(1200)} &amp;amp; omitted suffix`,
+      `${'x'.repeat(1200)} &amp;amp; omitted suffix with *literal asterisks* and &amp;lt;b&amp;gt;plain text&amp;lt;/b&amp;gt;`,
     );
     let fail = false;
     const http = createFetchMock([
@@ -71,9 +72,11 @@ describe('cisa_get_alerts', () => {
       expect(full.structuredContent).toMatchObject({
         hasMore: false,
         fetchedAt,
-        items: [{ guid: '/node/25500', summary: fullText, summaryTruncated: false }],
+        items: [{ guid: '/node/25500', summary: fullText + suffix, summaryTruncated: false }],
       });
-      expect(firstText(full.content)).toContain(fullText);
+      expect(firstText(full.content)).toContain(
+        fullText + ' with \\*literal asterisks\\* and \\<b>plain text\\</b>',
+      );
       expect(firstText(full.content)).toContain('Summary truncated:** no');
       const summary = await runToolContract(getAlertsTool, { cursor, detail: 'summary' });
       expect(summary).toEqual(await runToolContract(getAlertsTool, { cursor }));
@@ -103,7 +106,7 @@ describe('cisa_get_alerts', () => {
       expect(stale.structuredContent).toMatchObject({
         stale: true,
         fetchedAt,
-        items: [{ guid: '/node/25500', summary: fullText, summaryTruncated: false }],
+        items: [{ guid: '/node/25500', summary: fullText + suffix, summaryTruncated: false }],
       });
       expect(firstText(stale.content)).toContain(fullText);
       expect(http.calls).toHaveLength(2);
