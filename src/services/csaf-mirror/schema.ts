@@ -13,7 +13,12 @@
  * @module services/csaf-mirror/schema
  */
 
-import type { Migration, SqliteHandle, SqliteMirrorStoreSpec } from '@cyanheads/mcp-ts-core/mirror';
+import {
+  buildSchemaSql,
+  type Migration,
+  type SqliteHandle,
+  type SqliteMirrorStoreSpec,
+} from '@cyanheads/mcp-ts-core/mirror';
 
 /** The MirrorService-owned primary table. */
 export const ADVISORIES_TABLE = 'ics_advisories';
@@ -82,6 +87,29 @@ CREATE INDEX IF NOT EXISTS ${ADVISORY_CWES_TABLE}_cwe_idx ON ${ADVISORY_CWES_TAB
   },
 };
 
+/** Upgrade the FTS table and its sync triggers together with the new source columns. */
+const vendorAdvisorySearch: Migration = {
+  version: 3,
+  up(handle: SqliteHandle): void {
+    /* Fresh stores already have the current declarative DDL. The framework
+     * applies it before entering this migration's transaction. */
+    const columns = handle
+      .prepare<{ name: string }>(`PRAGMA table_info(${ADVISORIES_TABLE})`)
+      .all();
+    if (columns.some(({ name }) => name === 'vendorAdvisoriesText')) return;
+    handle.exec(`
+DROP TRIGGER IF EXISTS ${ADVISORIES_TABLE}_ai;
+DROP TRIGGER IF EXISTS ${ADVISORIES_TABLE}_ad;
+DROP TRIGGER IF EXISTS ${ADVISORIES_TABLE}_au;
+DROP TABLE IF EXISTS ${ADVISORIES_FTS};
+ALTER TABLE ${ADVISORIES_TABLE} ADD COLUMN vendorAdvisoriesText TEXT;
+ALTER TABLE ${ADVISORIES_TABLE} ADD COLUMN vendorAdvisories TEXT;
+`);
+    handle.exec(buildSchemaSql(advisoryStoreSpec('')));
+    handle.exec(`INSERT INTO ${ADVISORIES_FTS}(${ADVISORIES_FTS}) VALUES ('rebuild')`);
+  },
+};
+
 /**
  * The store spec. `version` must cover the highest migration: the runner applies
  * only a migration with `stored < migration.version <= version`, so an entry
@@ -96,13 +124,15 @@ export function advisoryStoreSpec(path: string): SqliteMirrorStoreSpec {
     path,
     table: ADVISORIES_TABLE,
     primaryKey: 'advisoryId',
-    version: 2,
+    version: 3,
     columns: {
       advisoryId: 'TEXT',
       series: 'TEXT',
       title: 'TEXT',
       vendorsText: 'TEXT',
       productsText: 'TEXT',
+      vendorAdvisoriesText: 'TEXT',
+      vendorAdvisories: 'TEXT',
       vendorCount: 'INTEGER',
       productCount: 'INTEGER',
       cveCount: 'INTEGER',
@@ -121,7 +151,7 @@ export function advisoryStoreSpec(path: string): SqliteMirrorStoreSpec {
       attribution: 'TEXT',
       document: 'TEXT',
     },
-    fts: ['title', 'vendorsText', 'productsText'],
+    fts: ['title', 'vendorsText', 'productsText', 'vendorAdvisoriesText'],
     indexes: [
       { columns: ['series'] },
       { columns: ['maxCvss'] },
@@ -130,6 +160,6 @@ export function advisoryStoreSpec(path: string): SqliteMirrorStoreSpec {
       { columns: ['publisherCategory'] },
       { columns: ['sourcePath'] },
     ],
-    migrations: [auxiliaryTables, cweJunction],
+    migrations: [auxiliaryTables, cweJunction, vendorAdvisorySearch],
   };
 }

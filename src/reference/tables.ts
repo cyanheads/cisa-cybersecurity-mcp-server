@@ -125,7 +125,7 @@ export const REFERENCE_BLOCKS: Record<ReferenceTopic, ReferenceBlock> = {
         key: 'dueDate',
         label: 'Due date',
         description:
-          'The federal remediation deadline CISA assigned, YYYY-MM-DD. Under BOD 26-04 the gap from dateAdded is 3 or 14 days; pre-26-04 entries run 14, 21, or 181 days.',
+          'The federal remediation deadline CISA assigned, YYYY-MM-DD. Historical gaps from dateAdded vary. BOD 26-04 sets a 3- or 14-day timeline for vulnerabilities in KEV, depending on its Table 1 decision points.',
       },
       {
         key: 'knownRansomwareCampaignUse',

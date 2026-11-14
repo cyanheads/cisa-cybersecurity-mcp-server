@@ -10,6 +10,7 @@
  * @module services/csaf-mirror/types
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import type { SeverityBand } from '@/reference/cvss.js';
 import type { SectorName } from '@/reference/sectors.js';
 
@@ -124,11 +125,13 @@ export interface AdvisoryNote {
 /** One vulnerability entry. */
 export interface AdvisoryVulnerability {
   cve: string;
+  cvssV4Vector?: string;
   cweId?: string;
   cweName?: string;
   flags?: { label: string; productIds: string[]; groupIds?: string[] }[];
   notes: AdvisoryNote[];
   productStatus: AdvisoryProductStatus;
+  references?: AdvisoryReference[];
   remediations: AdvisoryRemediation[];
   scores: AdvisoryScore[];
   threats?: { category: string; details: string; productIds: string[]; groupIds?: string[] }[];
@@ -143,12 +146,20 @@ export interface AdvisoryRevision {
   summary: string;
 }
 
-/** One document-level reference. */
+/** One CSAF document or vulnerability reference. */
 export interface AdvisoryReference {
   category: string;
   summary?: string;
   url: string;
 }
+
+/** One originating vendor reference on a republished advisory. */
+export const VendorAdvisorySchema = z
+  .object({
+    summary: z.string().optional().describe('The originating vendor reference summary.'),
+    url: z.string().describe('The originating vendor advisory URL.'),
+  })
+  .describe('One originating vendor advisory reference.');
 
 /** One acknowledgment entry. */
 export interface AdvisoryAcknowledgment {
@@ -206,6 +217,7 @@ export interface AdvisorySearchResult {
   series: AdvisorySeries;
   title: string;
   url: string;
+  vendorAdvisories?: z.infer<typeof VendorAdvisorySchema>[];
   vendorCount: number;
   vendors: string[];
 }
@@ -264,8 +276,8 @@ export interface AdvisorySearchPage {
 /**
  * Which ingest build the index content comes from. A `stale` index still serves
  * every row it holds, but rows may lack what the current ingest derives — until
- * the background re-ingest completes, the `advisory_cwes` junction may be empty or
- * partial, so a zero-hit `cwe` search is not proof that nothing matches.
+ * the background re-ingest completes, CWE membership and vendor advisory text
+ * can be incomplete.
  */
 export interface IngestContentState {
   /** The content version this build's ingest writes. */

@@ -162,7 +162,6 @@ export const icsAdvisoryResource = resource('cisa://advisory/{advisoryId}', {
       resources: recent.map((entry) => ({
         uri: `cisa://advisory/${entry.advisoryId}`,
         name: `${entry.advisoryId} — ${entry.title}`,
-        title: TITLE,
         mimeType: 'application/json',
       })),
     };

@@ -20,7 +20,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import type { Context } from '@cyanheads/mcp-ts-core';
+import { type Context, z } from '@cyanheads/mcp-ts-core';
 import {
   defineMirror,
   type Mirror,
@@ -55,17 +55,18 @@ import {
   renewSyncLease,
   SYNC_LEASE_RENEW_MS,
 } from './sync-lease.js';
-import type {
-  AdvisoryFilterCount,
-  AdvisoryFilterKey,
-  AdvisorySearchFilters,
-  AdvisorySearchPage,
-  AdvisorySearchResult,
-  AdvisorySeries,
-  CsafMirrorState,
-  IngestContentState,
-  NormalizedAdvisory,
-  StoreUnavailableReason,
+import {
+  type AdvisoryFilterCount,
+  type AdvisoryFilterKey,
+  type AdvisorySearchFilters,
+  type AdvisorySearchPage,
+  type AdvisorySearchResult,
+  type AdvisorySeries,
+  type CsafMirrorState,
+  type IngestContentState,
+  type NormalizedAdvisory,
+  type StoreUnavailableReason,
+  VendorAdvisorySchema,
 } from './types.js';
 
 /** Vendors listed inline on a search result before only the count is reported. */
@@ -88,6 +89,7 @@ const SEARCH_COLUMNS = [
   'series',
   'title',
   'vendorsText',
+  'vendorAdvisories',
   'vendorCount',
   'productCount',
   'cveCount',
@@ -125,9 +127,12 @@ interface SearchRow {
   series: string | null;
   title: string | null;
   url: string | null;
+  vendorAdvisories: string | null;
   vendorCount: number | null;
   vendorsText: string | null;
 }
+
+const VendorAdvisoriesSchema = z.array(VendorAdvisorySchema);
 
 /** Options for {@link initCsafMirror}. */
 export interface CsafMirrorOptions {
@@ -818,6 +823,9 @@ export class CsafMirrorService {
       title: row.title ?? '',
       series: (row.series === 'ICSMA' ? 'ICSMA' : 'ICSA') as AdvisorySeries,
       vendors: splitList(row.vendorsText).slice(0, VENDOR_PREVIEW),
+      ...(row.vendorAdvisories
+        ? { vendorAdvisories: VendorAdvisoriesSchema.parse(JSON.parse(row.vendorAdvisories)) }
+        : {}),
       vendorCount: row.vendorCount ?? 0,
       productCount: row.productCount ?? 0,
       cves: cves.slice(0, CVE_PREVIEW),

@@ -74,17 +74,21 @@ const FAILED_DOCUMENTS_KEY = 'failed_document_count';
 /** High-water mark of the last wholly successful application, separate from applied pages. */
 const SUCCESSFUL_CHECKPOINT_KEY = 'last_successful_checkpoint';
 
+/** First ingest content version that records CWE membership. */
+export const CWE_INGEST_CONTENT_VERSION = 1;
+
+/** First ingest content version that indexes originating vendor references. */
+export const VENDOR_ADVISORIES_INGEST_CONTENT_VERSION = 4;
+
 /**
  * What the current ingest derives from an unchanged upstream document. Raise it
  * whenever normalization changes a stored row, the stored document, or a junction
  * table for a document upstream has not revised — an index built at a lower
  * version re-ingests in the background on its next boot.
  *
- * 1 — every product row stored and indexed (no 200-row cap), short-form sector
- *     aliases, and the `advisory_cwes` junction. An index with no recorded
- *     version predates versioning and counts as older.
+ * Version 4 adds vulnerability references and vendor advisory search text.
  */
-export const INGEST_CONTENT_VERSION = 3;
+export const INGEST_CONTENT_VERSION = VENDOR_ADVISORIES_INGEST_CONTENT_VERSION;
 
 /** `mirror_meta` key holding the content version of the last completed `init`. */
 const CONTENT_VERSION_KEY = 'ingest_content_version';

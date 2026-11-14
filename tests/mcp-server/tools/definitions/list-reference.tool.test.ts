@@ -96,6 +96,22 @@ describe('cisa_list_reference', () => {
     expect(JSON.stringify(result)).not.toMatch(DRIFTING_CATALOG_COUNT);
   });
 
+  it('describes assigned due dates without fixed historical gaps on both surfaces', async () => {
+    const result = await runToolContract(listReferenceTool, { topic: 'kev_fields' });
+    expect(result.structuredContent).toHaveProperty(
+      'entries',
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'dueDate',
+          description: expect.stringContaining('Historical gaps from dateAdded vary.'),
+        }),
+      ]),
+    );
+    const text = firstText(result.content);
+    expect(text).toContain('Historical gaps from dateAdded vary.');
+    expect(text).not.toContain('181 days');
+  });
+
   it.each([
     ['sectors', 'Coverage begins in 2017'],
     ['advisory_id_formats', 'Revision suffix'],

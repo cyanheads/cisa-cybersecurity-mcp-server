@@ -72,6 +72,48 @@ describe('cisa_get_advisory', () => {
     });
   });
 
+  it('preserves the CVE-specific reference and exact FIRST vector on both surfaces', async () => {
+    const vector = 'CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N';
+    const references = [
+      {
+        category: 'external',
+        summary: '  FIRST [calculator]  ',
+        url: ` https://www.first.org/cvss/calculator/4-0#${vector} `,
+      },
+    ];
+    const raw = {
+      ...FULL_ADVISORY,
+      vulnerabilities: [
+        { ...FULL_ADVISORY.vulnerabilities[0], references },
+        {
+          cve: 'CVE-2026-95103',
+          references: [{ category: 'external', url: 'https://example.org/unselected' }],
+        },
+      ],
+    };
+    await seedMirror([
+      {
+        name: 'CSAF-develop/csaf_files/OT/white/2026/icsa-26-260-07.json',
+        data: JSON.stringify(raw),
+      },
+    ]);
+    const result = await runToolContract(getAdvisoryTool, {
+      advisoryId: 'ICSA-26-260-07',
+      cves: ['CVE-2026-12345'],
+    });
+    expect(result.structuredContent).toMatchObject({
+      vulnerabilities: [
+        { cve: 'CVE-2026-12345', references, cvssV4Vector: vector, scores: [{ version: '3.1' }] },
+      ],
+    });
+    const destination = `https://www.first.org/cvss/calculator/4-0#${vector}`;
+    expect(contentText(result)).toContain(
+      `&#32;&#32;FIRST \\[calculator\\]&#32;&#32;: [&#32;${destination}&#32;](<${destination}>)`,
+    );
+    expect(contentText(result)).toContain(`**CVSS v4 vector:** \`${vector}\``);
+    expect(contentText(result)).not.toContain('https://example.org/unselected');
+  });
+
   it('returns scoped flags, threats, and grouped remediations on both contract surfaces', async () => {
     await seedMirror([
       {

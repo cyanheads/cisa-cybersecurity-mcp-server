@@ -469,6 +469,43 @@ describe('buildAttribution', () => {
 });
 
 describe('normalizeAdvisory — whole document', () => {
+  it('preserves vulnerability references and projects one distinct FIRST v4 vector', () => {
+    const vector = 'CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N';
+    const calculator = 'https://www.first.org/cvss/calculator/4-0#';
+    const references = [
+      {
+        category: 'external',
+        summary: '  www.cve.org  ',
+        url: ' https://www.cve.org/CVERecord?id=CVE-2026-95102 ',
+      },
+      { category: 'external', summary: '', url: calculator + vector },
+      { category: 'external', url: calculator + encodeURIComponent(vector) },
+      {
+        category: 'external',
+        url: 'https://www.first.org.example/cvss/calculator/4-0#CVSS:4.0/AV:L',
+      },
+    ];
+    const normalize = (refs: typeof references) =>
+      normalizeAdvisory(
+        {
+          ...FULL_ADVISORY,
+          vulnerabilities: [{ ...FULL_ADVISORY.vulnerabilities[0], references: refs }],
+        },
+        '2026/icsa-26-260-07.json',
+      )?.vulnerabilities[0];
+    expect(normalize(references)).toMatchObject({
+      references,
+      cvssV4Vector: vector,
+      scores: [{ version: '3.1', baseScore: 9.8 }],
+    });
+    const ambiguous = [
+      ...references,
+      { category: 'external', url: calculator + vector.replace('AV:N', 'AV:L') },
+    ];
+    expect(normalize(ambiguous)?.references).toEqual(ambiguous);
+    expect(normalize(ambiguous)?.cvssV4Vector).toBeUndefined();
+    expect(normalize([])?.references).toEqual([]);
+  });
   it('normalizes a full advisory: header, summary, products, vulnerabilities, sectors', () => {
     const doc = normalizeAdvisory(FULL_ADVISORY, '2026/icsa-26-260-07.json');
     expect(doc).not.toBeNull();

@@ -31,7 +31,7 @@ function parseFeedCursor(cursor: string) {
 export const getAlertsTool = tool('cisa_get_alerts', {
   title: 'cisa_get_alerts',
   description:
-    "List what CISA has published recently — its combined advisory feed, its alerts feed, or its ICS advisory feed. Cursors continue within the current 30-item rolling window; upstream provides no pagination, history, or date-range query. The window's coverage varies from about a week to about two months depending on the feed. For ICS advisory history beyond the window, use cisa_search_ics_advisories, which covers the full corpus back to 2010.",
+    'List recent CISA publications from the combined advisories, alerts, or ICS advisories feed. Cursors continue within the available 30-item rolling window. Upstream provides no pagination, history, or date-range query. See window.oldest and window.newest for the dates the window covers. For ICS advisory history beyond the window, use cisa_search_ics_advisories.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   input: z.object({
@@ -39,7 +39,13 @@ export const getAlertsTool = tool('cisa_get_alerts', {
       .enum(['advisories', 'alerts', 'ics'])
       .default('advisories')
       .describe(
-        'Which feed to read: advisories (all.xml, ~8 days of coverage), alerts (alerts.xml, ~8 weeks), or ics (ics-advisories.xml, ~2.5 weeks).',
+        'Publication feed to read. Choose advisories for combined advisories, alerts for CISA alerts, or ics for ICS advisories. See window.oldest and window.newest for coverage dates.',
+      ),
+    detail: z
+      .enum(['summary', 'full'])
+      .default('summary')
+      .describe(
+        'Use summary for capped descriptions or full for complete feed descriptions where no advisory ID is available. A capped item with an advisory ID can be read with cisa_get_advisory.',
       ),
     limit: z
       .number()
@@ -94,7 +100,7 @@ export const getAlertsTool = tool('cisa_get_alerts', {
             summary: z
               .string()
               .describe(
-                'Item description with HTML stripped and entities decoded, capped at 1,200 characters.',
+                'Item description with HTML stripped and entities decoded. Capped at 1,200 characters unless detail is full and the item has no advisoryId.',
               ),
             summaryTruncated: z.boolean().describe('True when the summary was capped.'),
             guid: z
@@ -107,6 +113,12 @@ export const getAlertsTool = tool('cisa_get_alerts', {
               .regex(ADVISORY_ID_PATTERN)
               .optional()
               .describe('Present for ICS advisory items; chains straight into cisa_get_advisory.'),
+            guidance: z
+              .string()
+              .optional()
+              .describe(
+                'Advisory lookup to use when the description remains capped in full detail.',
+              ),
           })
           .describe('One feed item.'),
       )
@@ -196,7 +208,17 @@ export const getAlertsTool = tool('cisa_get_alerts', {
     const filtered = input.since
       ? remaining.filter((item) => item.pubDate.slice(0, 10) >= (input.since as string))
       : remaining;
-    const items = filtered.slice(0, limit);
+    const items = filtered.slice(0, limit).map(({ fullDescription, ...item }) => {
+      if (input.detail !== 'full') return item;
+      if (fullDescription !== undefined)
+        return { ...item, summary: fullDescription, summaryTruncated: false };
+      if (item.advisoryId && item.summaryTruncated)
+        return {
+          ...item,
+          guidance: `Call cisa_get_advisory with advisoryId ${item.advisoryId}.`,
+        };
+      return item;
+    });
     const hasMore = items.length < filtered.length;
     const last = items.at(-1);
 
@@ -280,6 +302,7 @@ export const getAlertsTool = tool('cisa_get_alerts', {
       if (item.advisoryId) lines.push(`**Advisory ID:** ${item.advisoryId}`);
       lines.push(item.summary);
       lines.push(`**Summary truncated:** ${item.summaryTruncated ? 'yes' : 'no'}`);
+      if (item.guidance) lines.push(`**Guidance:** ${item.guidance}`);
       lines.push('');
     }
     return [{ type: 'text', text: lines.join('\n') }];

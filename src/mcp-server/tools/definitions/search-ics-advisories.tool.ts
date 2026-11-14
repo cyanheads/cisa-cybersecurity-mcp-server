@@ -19,6 +19,7 @@ import {
   READ_INPUT_HARD_CEILING,
   READ_INPUT_LIMITS,
 } from '@/mcp-server/read-limits.js';
+import { renderVendorAdvisories } from '@/mcp-server/schemas/advisory.js';
 import {
   CalendarDateInputSchema,
   CveIdInputSchema,
@@ -27,11 +28,16 @@ import {
 import { SEVERITY_BANDS } from '@/reference/cvss.js';
 import { SECTOR_FILTER_VALUES } from '@/reference/sectors.js';
 import { getCsafMirror } from '@/services/csaf-mirror/csaf-mirror-service.js';
+import {
+  CWE_INGEST_CONTENT_VERSION,
+  VENDOR_ADVISORIES_INGEST_CONTENT_VERSION,
+} from '@/services/csaf-mirror/ingest.js';
 import { ADVISORY_ID_PATTERN } from '@/services/csaf-mirror/normalize.js';
-import type {
-  AdvisoryFilterCount,
-  AdvisoryFilterKey,
-  AdvisorySearchFilters,
+import {
+  type AdvisoryFilterCount,
+  type AdvisoryFilterKey,
+  type AdvisorySearchFilters,
+  VendorAdvisorySchema,
 } from '@/services/csaf-mirror/types.js';
 import { getKevCatalog } from '@/services/kev-catalog/kev-catalog-service.js';
 
@@ -40,7 +46,7 @@ const MAX_PAGE_SIZE = READ_INPUT_LIMITS.cisa_search_ics_advisories.cap;
 export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
   title: 'cisa_search_ics_advisories',
   description:
-    'Search the CISA industrial control system advisory corpus — every CSAF 2.0 advisory covering PLC, HMI, SCADA, building-automation, and medical-device products from 2010 onward. Filter by vendor, product, CVE, CWE, CVSS range, severity band, critical-infrastructure sector, advisory series, publication date, revision date, or whether an advisory covers a CVE in the CISA Known Exploited Vulnerabilities catalog, and run full-text search over advisory titles and product names. Sector filtering reaches only advisories that carry a sector note, which begins in 2017; the response reports how many documents a sector filter can never match. Returns advisory IDs for cisa_get_advisory, the CVEs each advisory covers and which of them are in KEV, and the source URL and attribution every advisory response carries.',
+    'Search the CISA industrial control system advisory corpus — every CSAF 2.0 advisory covering PLC, HMI, SCADA, building-automation, and medical-device products from 2010 onward. Filter by vendor, product, CVE, CWE, CVSS range, severity band, critical-infrastructure sector, advisory series, publication date, revision date, or whether an advisory covers a CVE in the CISA Known Exploited Vulnerabilities catalog, and run full-text search over advisory titles, vendor and product names, and originating vendor advisory reference summaries. Sector filtering reaches only advisories that carry a sector note, which begins in 2017; the response reports how many documents a sector filter can never match. Returns advisory IDs for cisa_get_advisory, the CVEs each advisory covers and which of them are in KEV, and the source URL and attribution every advisory response carries.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -49,21 +55,23 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       .min(2)
       .optional()
       .describe(
-        'Full-text search over advisory titles, vendor names, and product names. Tokens are AND-combined; FTS5 operators in the input are neutralized rather than honored, and a token with no letter or digit is ignored. Needs at least one word or number.',
+        'Full-text search over advisory titles, vendor and product names, and originating vendor advisory reference summaries. Tokens are AND-combined; FTS5 operators in the input are neutralized rather than honored, and a token with no letter or digit is ignored. Needs at least one word or number.',
       ),
     vendor: z
       .string()
+      .trim()
       .min(2)
       .optional()
       .describe(
-        'Case-insensitive substring of a vendor label, matched literally — % and _ are ordinary characters. Vendor names are unnormalized upstream — the same company appears under several spellings — so this is substring, not exact.',
+        'Case-insensitive literal substring of a vendor label. Surrounding whitespace is trimmed before the two-character minimum. Vendor names are unnormalized upstream — the same company can appear under several spellings.',
       ),
     product: z
       .string()
+      .trim()
       .min(2)
       .optional()
       .describe(
-        'Case-insensitive substring of a product name, matched literally — % and _ are ordinary characters.',
+        'Case-insensitive literal substring of a product name. Surrounding whitespace is trimmed before the two-character minimum.',
       ),
     cve: CveIdInputSchema.optional().describe(
       'Exact CVE membership, e.g. CVE-2021-44228. Case and surrounding whitespace are normalized.',
@@ -163,6 +171,12 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
               .array(z.string().describe('One vendor label.'))
               .describe('Up to ten vendor labels; vendorCount carries the full count.'),
             vendorCount: z.number().int().describe('Distinct vendors named in the product tree.'),
+            vendorAdvisories: z
+              .array(VendorAdvisorySchema)
+              .optional()
+              .describe(
+                'Originating vendor advisory references on republished advisories, in source order.',
+              ),
             productCount: z
               .number()
               .int()
@@ -417,11 +431,15 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       offset,
     };
 
+    const content =
+      input.cwe !== undefined || input.q !== undefined ? await mirror.contentState() : undefined;
+    const stored = content?.stored ?? 0;
+    const cweMayBeIncomplete = input.cwe !== undefined && stored < CWE_INGEST_CONTENT_VERSION;
+    const qMayBeIncomplete =
+      input.q !== undefined && stored < VENDOR_ADVISORIES_INGEST_CONTENT_VERSION;
     const page = await mirror.search(filters, ctx, kevCves);
     const state = await mirror.state();
     const hasMore = offset + page.items.length < page.total;
-    /* Until the ingest-content re-ingest lands, advisory_cwes may be empty or partial. */
-    const cweMayBeIncomplete = input.cwe !== undefined && (await mirror.contentState()).stale;
 
     const applied: Record<string, string> = {};
     for (const [key, value] of Object.entries(filters)) {
@@ -457,12 +475,17 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
     const notices: string[] = [];
     if (page.total === 0) {
       const counts = await mirror.filterCounts(filters, kevCves);
-      const zeroHit = zeroHitNotice(filters, counts, cweMayBeIncomplete);
+      const zeroHit = zeroHitNotice(filters, counts, cweMayBeIncomplete, qMayBeIncomplete);
       if (zeroHit) notices.push(zeroHit);
     }
     if (cweMayBeIncomplete) {
       notices.push(
         'This cwe result may be incomplete: the advisory index was built before CWE membership was recorded and has not been re-ingested since, so an advisory it has not re-ingested cannot match. The server re-ingests such an index in the background when it starts, and cisa_list_reference with topic sources shows sync status in_progress while that runs; repeat the search once it finishes, when this notice no longer appears.',
+      );
+    }
+    if (qMayBeIncomplete) {
+      notices.push(
+        'This q result may be incomplete until the advisory index has re-ingested originating vendor references. Check sync status with cisa_list_reference, topic sources, and repeat the search after re-ingest.',
       );
     }
     if (!kevCves && page.items.length > 0) {
@@ -541,6 +564,8 @@ export const searchIcsAdvisoriesTool = tool('cisa_search_ics_advisories', {
       if (advisory.sectorsRaw) lines.push(`**Sector note (verbatim):** ${advisory.sectorsRaw}`);
       lines.push(`**Web:** ${advisory.url} · **CSAF:** ${advisory.csafUrl}`);
       lines.push(`**Attribution:** ${advisory.attribution}`);
+      if (advisory.vendorAdvisories)
+        lines.push(...renderVendorAdvisories(advisory.vendorAdvisories));
       lines.push('');
     }
 
@@ -598,19 +623,22 @@ function unmatchedFragment(
  * on its own, the combination is the miss: each filter whose removal restores
  * results is named with that count. Every figure comes from the counts.
  *
- * On an index still being re-ingested, `advisory_cwes` may be partial, so a `cwe`
- * that matches nothing is not evidence: it is never named, and no count sentence
- * that depends on it is printed — the incomplete-`cwe` notice beside this one is
- * the honest explanation. Empty when nothing else applies.
+ * During re-ingest, omit diagnostics for a missing CWE on an index without
+ * CWE membership, or for q before vendor reference text has been indexed.
+ * Independent misses can still be explained without those filters' counts.
  */
 function zeroHitNotice(
   filters: AdvisorySearchFilters,
   allCounts: AdvisoryFilterCount[],
   cweMayBeIncomplete: boolean,
+  qMayBeIncomplete: boolean,
 ): string {
   const cweWithheld =
     cweMayBeIncomplete && allCounts.some((count) => count.filter === 'cwe' && count.alone === 0);
-  const counts = cweWithheld ? allCounts.filter((count) => count.filter !== 'cwe') : allCounts;
+  const counts = allCounts.filter(
+    (count) =>
+      !(cweWithheld && count.filter === 'cwe') && !(qMayBeIncomplete && count.filter === 'q'),
+  );
   const unmatched = counts.filter((count) => count.alone === 0);
 
   const fragments: string[] = [];
@@ -625,7 +653,7 @@ function zeroHitNotice(
       `${plain.join(', ')} ${plain.length === 1 ? 'matches no advisory on its own — relax or drop it.' : 'each match no advisory on their own — relax or drop them.'}`,
     );
   }
-  if (cweWithheld) return fragments.join(' ');
+  if (cweWithheld || qMayBeIncomplete) return fragments.join(' ');
 
   /* Every advisory fails a filter that matches nothing, so what dropping it
    * restores is exactly what the other filters match together — often nothing. */

@@ -409,14 +409,61 @@ function readReferences(value: unknown): AdvisoryReference[] {
   const references: AdvisoryReference[] = [];
   for (const entry of value) {
     if (!isRecord(entry)) continue;
-    const url = str(entry.url);
-    if (!url) continue;
-    const summary = str(entry.summary);
+    const { url, summary } = entry;
+    if (typeof url !== 'string' || url.trim() === '') continue;
     references.push({
       category: str(entry.category) ?? 'external',
-      ...(summary ? { summary } : {}),
+      ...(typeof summary === 'string' ? { summary } : {}),
       url,
     });
+  }
+  return references;
+}
+
+function readCvssV4Vector(references: AdvisoryReference[]): string | undefined {
+  let vector: string | undefined;
+  for (const reference of references) {
+    const url = URL.parse(reference.url);
+    if (
+      url?.protocol !== 'https:' ||
+      (url.host !== 'www.first.org' && url.host !== 'first.org') ||
+      url.pathname !== '/cvss/calculator/4-0'
+    ) {
+      continue;
+    }
+    let fragment: string;
+    try {
+      fragment = decodeURIComponent(url.hash.slice(1));
+    } catch {
+      continue;
+    }
+    if (!/^CVSS:4\.0(?:\/[A-Z]+:[A-Z0-9]+)+$/.test(fragment)) continue;
+    if (vector !== undefined && fragment !== vector) return;
+    vector = fragment;
+  }
+  return vector;
+}
+
+function vendorAdvisories(doc: NormalizedAdvisory): Omit<AdvisoryReference, 'category'>[] {
+  if (doc.advisory.publisherCategory !== 'other') return [];
+  const seen = new Set<string>();
+  const references: Omit<AdvisoryReference, 'category'>[] = [];
+  for (const { category, summary, url } of doc.references) {
+    if (category !== 'self') continue;
+    const parsed = URL.parse(url);
+    if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) continue;
+    const { hostname, pathname } = parsed;
+    if (hostname === 'cisa.gov' || hostname.endsWith('.cisa.gov')) continue;
+    if (
+      (hostname === 'github.com' || hostname === 'raw.githubusercontent.com') &&
+      /^\/cisagov\/csaf(?:\/|$)/i.test(pathname)
+    ) {
+      continue;
+    }
+    const key = JSON.stringify([summary, url]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    references.push({ ...(summary === undefined ? {} : { summary }), url });
   }
   return references;
 }
@@ -508,7 +555,7 @@ export function normalizeAdvisory(raw: unknown, sourcePath: string): NormalizedA
   const selfWeb = references.find(
     (reference) => reference.category === 'self' && isCisaAdvisoryUrl(reference.url),
   );
-  const url = selfWeb?.url ?? advisoryWebUrl(advisoryId);
+  const url = selfWeb?.url.trim() ?? advisoryWebUrl(advisoryId);
 
   const sectorsRaw = noteByTitle(documentNotes, SECTOR_NOTE_TITLE);
   const publisherName = str(publisher.name) ?? 'CISA';
@@ -601,11 +648,15 @@ export function normalizeAdvisory(raw: unknown, sourcePath: string): NormalizedA
     const cweId = cwe ? str(cwe.id) : undefined;
     const cweName = cwe ? str(cwe.name) : undefined;
     const vulnerabilityTitle = str(entry.title);
+    const vulnerabilityReferences = readReferences(entry.references);
+    const cvssV4Vector = readCvssV4Vector(vulnerabilityReferences);
     vulnerabilities.push({
       cve: cve.toUpperCase(),
       ...(cweId ? { cweId } : {}),
       ...(cweName ? { cweName } : {}),
       ...(vulnerabilityTitle ? { title: vulnerabilityTitle } : {}),
+      ...(cvssV4Vector ? { cvssV4Vector } : {}),
+      references: vulnerabilityReferences,
       scores: readScores(entry),
       remediations,
       flags: (Array.isArray(entry.flags) ? entry.flags : [])
@@ -652,6 +703,7 @@ export function toMirrorRow(doc: NormalizedAdvisory, sourcePath: string): Mirror
     ]),
   );
   const cves = [...new Set(doc.vulnerabilities.map((vulnerability) => vulnerability.cve))];
+  const originatingReferences = vendorAdvisories(doc);
 
   return {
     advisoryId: doc.advisory.advisoryId,
@@ -659,6 +711,8 @@ export function toMirrorRow(doc: NormalizedAdvisory, sourcePath: string): Mirror
     title: doc.advisory.title,
     vendorsText: vendorNames.join(' | '),
     productsText: productNames.join(' | '),
+    vendorAdvisoriesText: originatingReferences.map(({ summary }) => summary ?? '').join(' | '),
+    vendorAdvisories: originatingReferences.length ? JSON.stringify(originatingReferences) : null,
     vendorCount: doc.products.vendorCount,
     productCount: doc.products.productCount,
     cveCount: cves.length,

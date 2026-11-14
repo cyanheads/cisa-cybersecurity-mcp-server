@@ -72,6 +72,7 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 ### `cisa_search_kev` <sub>tool</sub>
 
 - Filters AND together: `vendorProject` and `product` (CISA's own labels, not CPE names), `nameContains`, `cwe`, `cveIdPrefix`, `dateAddedFrom` / `dateAddedTo`, `dueBefore` / `dueAfter`, `overdue`, `ransomware`, `forensicTriage`, `directive` (`BOD 26-04` / `BOD 22-01` / `none`); up to 100 per page (default 25) with an opaque `cursor`; sorts by `dateAdded` (default) or `dueDate`
+- `vendorProject` and `product` match case-insensitive substrings and require at least two characters after trimming surrounding whitespace
 - Reports `totalCount` and `appliedFilters`; each continued page uses the current call's limit. A zero-hit result names the filter responsible and what dropping it restores. `nameContains` searches a-z and 0-9 after folding case and accents, and the notice names any other characters it dropped
 - `detail: "summary"` returns the eleven triage fields used by `cisa_check_cve_status`; `full` remains the default. Each call chooses its own detail, including cursor continuations. Non-final pages point to the cursor and suggest a larger limit only below the 100-row maximum
 - Typed errors: `catalog_unavailable` (retryable), `invalid_date_range`, `empty_search_text`
@@ -81,7 +82,7 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 ### `cisa_get_ssvc` <sub>tool</sub>
 
 - Processes up to 50 `cveIds` per call through the Vulnrichment cache, fetching uncached records; inputs up to 1,000 IDs return normalized `unprocessedIds` for a follow-up call. `assetExposure`: `publicly_exposed`, `not_publicly_exposed`, or `unknown` (default, returns both arms)
-- Per CVE: `found`, `exploitation`, `automatable`, `technicalImpact`, `cvss` and `cwes` where CISA published them, and `bod2604.timelines[]` (`tableRow`, `remediationTimelineDays`, `forensicTriageRequired`); a KEV entry adds `kevAssigned`. When an exposure is stated and both timelines are available, `assignmentAgrees` compares both day count and forensic-triage requirement
+- Per CVE: `found`, `exploitation`, `automatable`, `technicalImpact`, `cvss` and `cwes` where CISA published them, and `bod2604.timelines[]` (`tableRow`, `remediationTimelineDays`, `forensicTriageRequired`); a KEV entry adds `kevAssigned`. `assignmentAgrees` compares the day count and forensic-triage requirement when both timelines are comparable, exposure is stated, and the KEV entry cites BOD 26-04
 - Recognized SSVC values are normalized without regard to case. Unsupported Automatable or Technical Impact values retain the published evidence with guidance, omitting only the computed timeline and agreement. `echo.requested` counts every submitted ID, while result totals count only processed IDs
 - Each result carries `outcome`: `ssvc`, `not_found`, `no_cisa_container`, `no_ssvc_metric`, or `fetch_failed`. `foundCount`, `notFoundCount`, and `failedCount` separate published SSVC, confirmed misses, and unavailable lookups; `enrichment_source_unavailable` (retryable) fires when every processed lookup fails
 
@@ -89,7 +90,8 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 
 ### `cisa_search_ics_advisories` <sub>tool</sub>
 
-- Full-text `q` over titles, vendor names, and product names, plus `vendor`, `product` (case-insensitive substrings), `cve`, `cwe`, `inKev`, `cvssMin` / `cvssMax`, `severity`, `sector`, `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` / `other`), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`; sorts by `revised` (default), `published`, `maxCvss`, or `relevance` (needs `q`); up to 50 per page (default 20) with an opaque `cursor`
+- Full-text `q` over titles, vendor names, product names, and originating vendor advisory summaries, plus `vendor`, `product` (case-insensitive substrings, at least two characters after trimming), `cve`, `cwe`, `inKev`, `cvssMin` / `cvssMax`, `severity`, `sector`, `series` (`ICSA` / `ICSMA`), `publisher` (`coordinator` / `other`), `publishedFrom` / `publishedTo`, `revisedFrom` / `revisedTo`; sorts by `revised` (default), `published`, `maxCvss`, or `relevance` (needs `q`); up to 50 per page (default 20) with an opaque `cursor`
+- Republished advisories include `vendorAdvisories` when the source document identifies originating vendor references. A notice flags incomplete coverage of vendor advisory text while an older index re-ingests
 - Results carry `advisoryId`, up to 20 `cves` with `cveCount`, `kevCves`, `maxCvss` with `severityDerived`, `sectors`, `url`, `csafUrl`, and `attribution`, plus `totalCount` and `appliedFilters`; a zero-hit result names the filter responsible. If the KEV snapshot isn't loaded, `kevCves` is left out and says so. Non-final pages point to the cursor and suggest a larger limit only below the 50-row maximum
 - Typed errors: `mirror_not_ready`, `mirror_busy`, and `catalog_unavailable` (retryable), `mirror_unavailable`, `invalid_cvss_range`, `invalid_date_range`, `relevance_sort_without_query`, `empty_search_text`
 
@@ -100,6 +102,7 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 - `advisoryId` (optional revision suffix), optional `sections` (`advisory`, `summary`, `products`, `vulnerabilities`, `revisionHistory`, `references`, `acknowledgments`), `cves` to pick vulnerability entries, and `productIds` to pick exact, case-sensitive product definitions; `cves` and `productIds` imply their sections
 - Returns `kind: "full"`, or `kind: "outline"` (per-section byte sizes plus the CVE IDs) when a read without `sections` exceeds 24,000 bytes; re-call with `sections`. Both arms retain advisory identity, source links, and attribution
 - Vulnerability entries retain applicability `flags` and `threats`; remediations, flags, and threats resolve referenced product groups into `productIds` and keep `groupIds`. Undefined groups remain visible without invented product definitions
+- Vulnerability entries include their own `references` separately from the advisory's document-level references. `cvssV4Vector` is present when FIRST calculator links for that vulnerability identify one unambiguous CVSS v4 vector
 - An ID not in the index returns `found: false` with `guidance`, `indexCheckpoint`, and `indexLastSyncedAt`; the guidance names indexed revisions with the same base ID and notes when the advisory may be newer than the index. It never substitutes a different advisory
 - Typed errors: `mirror_not_ready` and `mirror_busy` (retryable), `mirror_unavailable`, `unknown_section`, `unknown_cve`, `cves_need_vulnerabilities_section`, `unknown_product_id`, `product_ids_need_products_section`
 
@@ -107,8 +110,8 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 
 ### `cisa_get_alerts` <sub>tool</sub>
 
-- `feed`: `advisories` (default), `alerts`, or `ics`; default `limit` 30, the upstream window size; `since` (`YYYY-MM-DD`) filters within that window and cannot reach past it. `hasMore` and an opaque `cursor` continue after the last returned item within the same feed; an unavailable anchor returns an empty page with restart guidance
-- Items carry `title`, `link`, `pubDate`, `summary` (HTML stripped, capped at 1,200 characters, flagged by `summaryTruncated`), and on ICS items an `advisoryId` for `cisa_get_advisory`; `window` reports `itemCount`, `oldest`, `newest`, and `upstreamWindowSize`
+- `feed` selects `advisories` (default), `alerts`, or `ics`. The page size defaults to 30. `since` (`YYYY-MM-DD`) filters within the available window, whose coverage dates are reported in `window.oldest` and `window.newest`. `hasMore` and an opaque `cursor` continue after the last returned item within the same feed. An unavailable anchor returns an empty page with restart guidance
+- Items carry `title`, `link`, `pubDate`, and `summary` with HTML stripped. The default `detail: "summary"` caps descriptions at 1,200 characters and flags them with `summaryTruncated`. Use `detail: "full"` to read complete feed descriptions for items without an `advisoryId`. Capped items with an `advisoryId` include guidance to call `cisa_get_advisory` when full detail is requested
 - Every response carries `fetchedAt` and `stale`; if a refresh fails, the last window is returned as stale with retry guidance, and a stale empty result doesn't prove nothing was published. With no cached window, `feed_unavailable` (retryable)
 
 ---
@@ -116,14 +119,14 @@ Both data resources are fully covered by the tools above. The [CISA cybersecurit
 ### `cisa://kev/{cveId}` <sub>resource</sub>
 
 - One KEV record as `application/json`, the same shape as a `cisa_check_cve_status` result under the default `detail: "full"`; a CVE not in KEV is a not-found error
-- Listing returns the 30 most recently added entries; `cveId` completes from the snapshot, up to 100 suggestions
+- Listing returns the 30 most recently added entries, each named by CVE ID and vulnerability name. `cveId` completes from the snapshot, up to 100 suggestions
 
 ---
 
 ### `cisa://advisory/{advisoryId}` <sub>resource</sub>
 
 - One flattened advisory as `application/json`, with the same 24,000-byte outline-on-overflow as `cisa_get_advisory`; the template takes no `sections`, `cves`, or `productIds`, so follow an outline up with the tool
-- Listing returns the 30 most recently revised advisories; `advisoryId` completes from the index, up to 100 suggestions
+- Listing returns the 30 most recently revised advisories, each named by advisory ID and advisory title. `advisoryId` completes from the index, up to 100 suggestions
 
 ## Features
 
@@ -313,6 +316,8 @@ bun run mirror:verify    # readiness, sync status, checkpoint, count, content ve
 ```
 
 A transient SQLite lock returns retryable `mirror_busy`; retry shortly. After a partial refresh, applied rows stay readable and failed documents are retried next time; `sources` reports `syncStatus: partial` and `failedDocumentCount`, and `mirror:refresh` and `mirror:verify` exit non-zero.
+
+Older indexes re-ingest in the background when auto-init is enabled. If you manage the index manually, run `mirror:init` to reprocess unchanged advisories when the content version advances.
 
 ### Docker
 

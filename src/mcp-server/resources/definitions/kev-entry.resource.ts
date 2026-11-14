@@ -57,7 +57,6 @@ export const kevEntryResource = resource('cisa://kev/{cveId}', {
       resources: recent.map((record) => ({
         uri: `cisa://kev/${record.cveId}`,
         name: `${record.cveId} — ${record.vulnerabilityName}`,
-        title: TITLE,
         mimeType: 'application/json',
       })),
     };

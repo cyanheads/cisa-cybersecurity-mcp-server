@@ -21,11 +21,168 @@ import {
   initCisaFeeds,
   resetCisaFeeds,
 } from '@/services/cisa-feeds/cisa-feeds-service.js';
-import { buildAdvisoriesFeed, buildRollingFeed } from '../../../fixtures/rss-feeds.js';
+import {
+  buildAdvisoriesFeed,
+  buildIcsAdvisoriesFeedWithOversizedItem,
+  buildRollingFeed,
+} from '../../../fixtures/rss-feeds.js';
 import { strictClientValidator } from '../../../helpers/emitted-schema.js';
 import { firstText } from '../../../helpers/format-text.js';
 
 describe('cisa_get_alerts', () => {
+  it('describes feed contents and points to the actual coverage dates', () => {
+    expect(getAlertsTool.description).toContain('window.oldest and window.newest');
+    expect(getAlertsTool.input.shape.feed.description).toContain('combined advisories');
+    expect(getAlertsTool.input.shape.feed.description).not.toMatch(/days|weeks|months/);
+  });
+
+  it('switches detail across cursor pages and shares a stale cached window', async () => {
+    initCisaFeeds({ cacheTtlSeconds: 900, timeoutMs: 5000 });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(0);
+    const fullText = `${'x'.repeat(1200)} & omitted suffix`;
+    const feed = buildAdvisoriesFeed().replace(
+      'An alert with no advisory link.',
+      `${'x'.repeat(1200)} &amp;amp; omitted suffix`,
+    );
+    let fail = false;
+    const http = createFetchMock([
+      {
+        match: FEED_URLS.advisories,
+        respond: () => (fail ? new Response('', { status: 400 }) : new Response(feed)),
+      },
+    ]);
+    http.install();
+    try {
+      const first = await runToolContract(getAlertsTool, { limit: 1 });
+      expect(first.structuredContent).toMatchObject({
+        truncated: true,
+        items: [{ guid: '/node/25513', summary: 'Acme published a fix.', summaryTruncated: false }],
+        window: { oldest: '2026-09-17T09:00:00.000Z', newest: '2026-09-18T12:00:00.000Z' },
+      });
+      const { cursor, fetchedAt } = first.structuredContent as {
+        cursor: string;
+        fetchedAt: string;
+      };
+      const full = await runToolContract(getAlertsTool, {
+        cursor,
+        since: '2026-09-17',
+        detail: 'full',
+      });
+      expect(full.structuredContent).toMatchObject({
+        hasMore: false,
+        fetchedAt,
+        items: [{ guid: '/node/25500', summary: fullText, summaryTruncated: false }],
+      });
+      expect(firstText(full.content)).toContain(fullText);
+      expect(firstText(full.content)).toContain('Summary truncated:** no');
+      const summary = await runToolContract(getAlertsTool, { cursor, detail: 'summary' });
+      expect(summary).toEqual(await runToolContract(getAlertsTool, { cursor }));
+      expect(summary.structuredContent).toMatchObject({
+        items: [{ guid: '/node/25500', summary: `${'x'.repeat(1199)}…`, summaryTruncated: true }],
+      });
+      const firstFull = await runToolContract(getAlertsTool, { limit: 1, detail: 'full' });
+      expect(firstFull).toEqual(first);
+      const lastCursor = Buffer.from(
+        JSON.stringify({ feed: 'advisories', guid: '/node/25500' }),
+      ).toString('base64url');
+      const pastEnd = await runToolContract(getAlertsTool, { cursor: lastCursor, detail: 'full' });
+      expect(pastEnd.structuredContent).toMatchObject({ items: [], hasMore: false });
+      expect(firstText(pastEnd.content)).not.toContain(fullText);
+      const empty = await runToolContract(getAlertsTool, {
+        cursor,
+        since: '2026-09-18',
+        detail: 'full',
+      });
+      expect(empty.structuredContent).toMatchObject({ items: [], hasMore: false });
+      expect(firstText(empty.content)).not.toContain(fullText);
+      expect(http.calls).toHaveLength(1);
+
+      fail = true;
+      now.mockReturnValue(900_000);
+      const stale = await runToolContract(getAlertsTool, { cursor, detail: 'full' });
+      expect(stale.structuredContent).toMatchObject({
+        stale: true,
+        fetchedAt,
+        items: [{ guid: '/node/25500', summary: fullText, summaryTruncated: false }],
+      });
+      expect(firstText(stale.content)).toContain(fullText);
+      expect(http.calls).toHaveLength(2);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('keeps linked descriptions capped and adds the advisory handoff only in full detail', async () => {
+    const http = createFetchMock([
+      { match: FEED_URLS.ics, respond: new Response(buildIcsAdvisoriesFeedWithOversizedItem()) },
+    ]);
+    http.install();
+    try {
+      const summary = await runToolContract(getAlertsTool, { feed: 'ics' });
+      const full = await runToolContract(getAlertsTool, { feed: 'ics', detail: 'full' });
+      const guidance = 'Call cisa_get_advisory with advisoryId ICSA-26-260-08.';
+      expect(full.structuredContent).toMatchObject({
+        items: [{ summary: `${'x'.repeat(1199)}…`, summaryTruncated: true, guidance }],
+      });
+      expect(firstText(full.content)).toContain(guidance);
+      expect(summary.structuredContent).not.toHaveProperty('items.0.guidance');
+      expect(firstText(summary.content)).not.toContain(guidance);
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('rejects unsupported detail values before fetching', async () => {
+    const http = createFetchMock([]);
+    http.install();
+    try {
+      const result = await runToolContract(getAlertsTool, { detail: 'raw' as never });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_arguments' } },
+      });
+      expect(firstText(result.content)).toContain('detail');
+      expect(http.calls).toHaveLength(0);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('returns the established default shape for an oversized alert and a short item', async () => {
+    const feed = buildAdvisoriesFeed().replace(
+      'An alert with no advisory link.',
+      `${'x'.repeat(1200)} &amp;amp; omitted suffix`,
+    );
+    const http = createFetchMock([{ match: FEED_URLS.advisories, respond: new Response(feed) }]);
+    http.install();
+    try {
+      const result = await runToolContract(getAlertsTool, {});
+      expect(result.structuredContent).toHaveProperty('items', [
+        {
+          title: 'Acme Widget Advisory',
+          link: 'https://www.cisa.gov/news-events/ics-advisories/icsa-26-260-07',
+          pubDate: '2026-09-18T12:00:00.000Z',
+          summary: 'Acme published a fix.',
+          summaryTruncated: false,
+          guid: '/node/25513',
+          advisoryId: 'ICSA-26-260-07',
+        },
+        {
+          title: 'Widget Corp Alert',
+          link: 'https://www.cisa.gov/news-events/alerts/aa26-260a',
+          pubDate: '2026-09-17T09:00:00.000Z',
+          summary: `${'x'.repeat(1199)}…`,
+          summaryTruncated: true,
+          guid: '/node/25500',
+        },
+      ]);
+      expect(firstText(result.content)).toContain(`${'x'.repeat(1199)}…`);
+      expect(firstText(result.content)).not.toContain('omitted suffix');
+    } finally {
+      http.restore();
+    }
+  });
+
   it('walks every page of a warm window once and preserves the default 30-item read', async () => {
     const http = createFetchMock([
       { match: FEED_URLS.advisories, respond: () => new Response(buildRollingFeed()) },

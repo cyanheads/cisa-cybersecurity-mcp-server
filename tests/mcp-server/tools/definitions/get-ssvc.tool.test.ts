@@ -230,6 +230,45 @@ describe('cisa_get_ssvc', () => {
     }
   });
 
+  it('keeps the timeline and assignment but omits agreement for absent or other directive citations', async () => {
+    await loadCatalog();
+    const cveIds = ['CVE-2021-00003', 'CVE-2019-00004'];
+    const http = createFetchMock(
+      cveIds.map((cveId) => ({
+        match: cveToVulnrichmentUrl(cveId) as string,
+        respond: Response.json(buildSsvcRecord({ automatable: 'yes', technicalImpact: 'total' })),
+      })),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(getSsvcTool, {
+        cveIds,
+        assetExposure: 'publicly_exposed',
+      });
+      expect(result.structuredContent).toMatchObject({
+        results: [
+          { bod2604: expect.any(Object), kevAssigned: { directive: 'BOD 22-01' } },
+          { bod2604: expect.any(Object), kevAssigned: { directive: null } },
+        ],
+      });
+      expect(result.structuredContent).not.toHaveProperty('results.0.assignmentAgrees');
+      expect(result.structuredContent).not.toHaveProperty('results.1.assignmentAgrees');
+      const message = 'The KEV entry does not cite BOD 26-04.';
+      expect(result.structuredContent).toHaveProperty(
+        'results.0.guidance',
+        expect.stringContaining(message),
+      );
+      expect(result.structuredContent).toHaveProperty(
+        'results.1.guidance',
+        expect.stringContaining(message),
+      );
+      expect(contentText(result).split(message)).toHaveLength(3);
+      expect(contentText(result)).not.toContain('Assignment agrees with the computed timeline');
+    } finally {
+      http.restore();
+    }
+  });
+
   it.each([
     ['CVE-2026-00005', 'total', true, 'No'],
     ['CVE-2026-00001', 'partial', false, 'Yes'],

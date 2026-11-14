@@ -15,6 +15,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -29,6 +30,7 @@ import {
   INGEST_CONTENT_VERSION,
 } from '@/services/csaf-mirror/ingest.js';
 import { CSAF_OT_BASE, toSubstringGlob } from '@/services/csaf-mirror/normalize.js';
+import { advisoryStoreSpec } from '@/services/csaf-mirror/schema.js';
 import type { AdvisorySearchFilters } from '@/services/csaf-mirror/types.js';
 import { MAX_SEARCH_TEXT_LENGTH } from '@/services/search-text.js';
 import {
@@ -78,6 +80,63 @@ describe('CsafMirrorService — real ingest path', () => {
     await getCsafMirror().close();
     resetCsafMirror();
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('upgrades v2 FTS and keeps old text and subsequent inserts, updates, and deletes searchable', async () => {
+    const path = join(dir, 'upgrade.sqlite3');
+    const current = advisoryStoreSpec(path);
+    const {
+      vendorAdvisories: _projection,
+      vendorAdvisoriesText: _text,
+      ...columns
+    } = current.columns;
+    const old = sqliteMirrorStore({
+      ...current,
+      columns,
+      fts: ['title', 'vendorsText', 'productsText'],
+      migrations: (current.migrations ?? []).filter(({ version }) => version <= 2),
+      version: 2,
+    });
+    const oldHandle = await old.raw();
+    oldHandle.exec(`
+INSERT INTO ics_advisories(advisoryId, title, vendorsText, productsText)
+VALUES ('ICSA-26-260-07', 'OldTitle', 'OldVendor', 'OldProduct');
+`);
+    await old.close();
+
+    const upgraded = sqliteMirrorStore(current);
+    try {
+      const handle = await upgraded.raw();
+      const search = (term: string) =>
+        handle
+          .prepare<{ advisoryId: string }>(`
+SELECT a.advisoryId FROM ics_advisories AS a
+JOIN ics_advisories_fts ON ics_advisories_fts.rowid = a.rowid
+WHERE ics_advisories_fts MATCH ?
+`)
+          .all(term)
+          .map(({ advisoryId }) => advisoryId);
+      for (const term of ['OldTitle', 'OldVendor', 'OldProduct']) {
+        expect(search(term)).toEqual(['ICSA-26-260-07']);
+      }
+      expect(search('VendorRef')).toEqual([]);
+      handle.exec(`
+INSERT INTO ics_advisories(advisoryId, vendorAdvisoriesText)
+VALUES ('ICSA-26-260-08', 'VendorRef');
+`);
+      expect(search('VendorRef')).toEqual(['ICSA-26-260-08']);
+      handle.exec(`
+UPDATE ics_advisories SET vendorAdvisoriesText = 'RevisedRef'
+WHERE advisoryId = 'ICSA-26-260-08';
+`);
+      expect(search('VendorRef')).toEqual([]);
+      expect(search('RevisedRef')).toEqual(['ICSA-26-260-08']);
+      handle.exec("DELETE FROM ics_advisories WHERE advisoryId = 'ICSA-26-260-08'");
+      expect(search('RevisedRef')).toEqual([]);
+      expect(search('OldTitle')).toEqual(['ICSA-26-260-07']);
+    } finally {
+      await upgraded.close();
+    }
   });
 
   it('seeds 3 advisories from the archive, excluding sidecars and the OT index.json', async () => {
@@ -1361,7 +1420,7 @@ describe('CsafMirrorService — real ingest path', () => {
       const version = handle
         .prepare<{ version: number }>('SELECT MAX(version) AS version FROM schema_version')
         .get();
-      expect(version?.version).toBe(2);
+      expect(version?.version).toBe(3);
     });
   });
 

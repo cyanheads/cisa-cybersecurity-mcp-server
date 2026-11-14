@@ -118,6 +118,115 @@ type Structured = {
 describe('cisa_search_ics_advisories', () => {
   let dir: string;
 
+  it.each([
+    ['vendor', 'aCmE iNdUsTrIeS'],
+    ['product', 'wIdGeT cOnTrOlLeR'],
+  ] as const)('trims %s before applying and echoing the filter', async (field, term) => {
+    await seedMirror();
+    const canonical = (await runToolContract(searchIcsAdvisoriesTool, { [field]: term }))
+      .structuredContent as Structured;
+    const padded = (await runToolContract(searchIcsAdvisoriesTool, { [field]: ` ${term}\t` }))
+      .structuredContent as Structured;
+    expect(canonical.totalCount).toBeGreaterThan(0);
+    expect(padded.results).toEqual(canonical.results);
+    expect(padded.appliedFilters[field]).toBe(term);
+  });
+
+  it.each([
+    ['vendor', 'acme%'],
+    ['product', 'widget_control'],
+  ] as const)('matches wildcard characters literally in %s', async (field, term) => {
+    await seedMirror();
+    const result = await runToolContract(searchIcsAdvisoriesTool, { [field]: term });
+    expect((result.structuredContent as Structured).results).toEqual([]);
+  });
+
+  it('finds a republished advisory by its originating ID and returns its two vendor links', async () => {
+    const vendorAdvisories = [
+      {
+        summary: 'SSA-457936 - CSAF Version',
+        url: 'https://cert-portal.siemens.com/productcert/csaf/ssa-457936.json',
+      },
+      {
+        summary: 'SSA-457936 - HTML Version',
+        url: 'https://cert-portal.siemens.com/productcert/html/ssa-457936.html',
+      },
+    ];
+    const raw = {
+      ...REPUBLISHED_ADVISORY,
+      document: {
+        ...REPUBLISHED_ADVISORY.document,
+        references: [
+          ...[...vendorAdvisories, vendorAdvisories[0]!].map((ref) => ({
+            category: 'self',
+            ...ref,
+          })),
+          {
+            category: 'self',
+            url: 'https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/2026/icsa-26-295-11.json',
+          },
+          {
+            category: 'self',
+            url: 'https://www.cisa.gov/news-events/ics-advisories/icsa-26-295-11',
+          },
+        ],
+      },
+    };
+    const archive = [{ ...BASE_ENTRIES[2]!, data: JSON.stringify(raw) }];
+    await seedMirror(archive);
+    const result = await runToolContract(searchIcsAdvisoriesTool, { q: 'SSA-457936' });
+    expect(result.structuredContent).toMatchObject({
+      results: [{ advisoryId: 'ICSA-25-100-02', vendorAdvisories }],
+    });
+    for (const { summary, url } of vendorAdvisories) {
+      expect(contentText(result)).toContain(`${summary}: <${url}>`);
+    }
+
+    const handle = await getCsafMirror().mirrorInstance.raw();
+    handle.exec(`
+UPDATE ics_advisories SET vendorAdvisories = NULL, vendorAdvisoriesText = NULL;
+UPDATE mirror_meta SET value = '3' WHERE key = 'ingest_content_version';
+`);
+    const stale = await runToolContract(searchIcsAdvisoriesTool, { q: 'SSA-457936' });
+    expect(stale.structuredContent).toMatchObject({
+      results: [],
+      notice: expect.stringContaining('This q result may be incomplete'),
+    });
+    const http = createFetchMock([
+      { match: CSAF_ARCHIVE_URL, respond: () => buildTarGzResponse(archive) },
+    ]);
+    http.install();
+    try {
+      await getCsafMirror().autoInit();
+    } finally {
+      http.restore();
+    }
+    const reingested = await runToolContract(searchIcsAdvisoriesTool, { q: 'SSA-457936' });
+    expect(reingested.structuredContent).toMatchObject({
+      results: [{ advisoryId: 'ICSA-25-100-02', vendorAdvisories }],
+    });
+    expect(contentText(reingested)).not.toContain('This q result may be incomplete');
+  });
+
+  it.each(['vendor', 'product'] as const)('validates the trimmed %s length', (field) => {
+    expect(searchIcsAdvisoriesTool.input.safeParse({ [field]: ' \t' }).success).toBe(false);
+    expect(searchIcsAdvisoriesTool.input.safeParse({ [field]: ' x ' }).success).toBe(false);
+  });
+
+  it('qualifies vendor reference misses while existing full-text hits remain readable', async () => {
+    await seedMirror();
+    const handle = await getCsafMirror().mirrorInstance.raw();
+    handle.exec("UPDATE mirror_meta SET value = '3' WHERE key = 'ingest_content_version'");
+    const missing = await runToolContract(searchIcsAdvisoriesTool, { q: 'SSA-457936' });
+    const structured = missing.structuredContent as Structured;
+    expect(structured.totalCount).toBe(0);
+    expect(structured.notice).toContain('This q result may be incomplete');
+    expect(structured.notice).not.toContain('matches no advisory');
+    expect(contentText(missing)).toContain(structured.notice!);
+    const existing = await runToolContract(searchIcsAdvisoriesTool, { q: 'Widget' });
+    expect((existing.structuredContent as Structured).results).toHaveLength(1);
+  });
+
   it('applies the 50-item cap through the real index and preserves continuation', async () => {
     const entries = Array.from({ length: 55 }, (_, index) => {
       const id = `ICSA-26-001-${String(index + 1).padStart(2, '0')}`;

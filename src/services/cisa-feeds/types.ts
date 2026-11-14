@@ -11,6 +11,8 @@ export type FeedId = 'advisories' | 'alerts' | 'ics';
 export interface FeedItem {
   /** Present when the item links to an ICS advisory page; chains into `cisa_get_advisory`. */
   advisoryId?: string;
+  /** Full normalized text retained only for truncated items without an advisory ID. */
+  fullDescription?: string;
   /** The upstream node path (e.g. `/node/25513`) — not a URL and not a permalink. */
   guid: string;
   link: string;

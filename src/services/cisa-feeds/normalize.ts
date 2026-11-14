@@ -43,9 +43,6 @@ function decodeEntities(value: string): string {
  * once for XML transport, so entities are decoded before tags are stripped and
  * again afterwards for entities that were double-encoded. Block-level tags
  * collapse to spaces so adjacent words do not fuse.
- *
- * ICS advisory descriptions run to 14 KB each and thirty of them unstripped is
- * 420 KB of markup, which is why the feed tool caps the result and discloses it.
  */
 export function stripFeedHtml(description: string): string {
   const html = decodeEntities(description);

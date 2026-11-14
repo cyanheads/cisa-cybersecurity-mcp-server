@@ -48,14 +48,20 @@ export const searchKevTool = tool('cisa_search_kev', {
       ),
     vendorProject: z
       .string()
+      .trim()
       .min(2)
       .optional()
-      .describe("Case-insensitive substring of CISA's own vendor label."),
+      .describe(
+        "Case-insensitive substring of CISA's own vendor label; surrounding whitespace is trimmed, with at least two characters after trimming.",
+      ),
     product: z
       .string()
+      .trim()
       .min(2)
       .optional()
-      .describe("Case-insensitive substring of CISA's own product label."),
+      .describe(
+        "Case-insensitive substring of CISA's own product label; surrounding whitespace is trimmed, with at least two characters after trimming.",
+      ),
     nameContains: z
       .string()
       .min(2)

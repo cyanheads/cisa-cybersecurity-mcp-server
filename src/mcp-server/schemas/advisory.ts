@@ -11,14 +11,14 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { OUTLINE_VARIANT } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdownLink, OUTLINE_VARIANT } from '@cyanheads/mcp-ts-core/utils';
 import {
   ADVISORY_ID_PATTERN,
   advisoryIdDate,
   advisoryWebUrl,
   normalizeAdvisoryId,
 } from '@/services/csaf-mirror/normalize.js';
-import type { NormalizedAdvisory } from '@/services/csaf-mirror/types.js';
+import type { NormalizedAdvisory, VendorAdvisorySchema } from '@/services/csaf-mirror/types.js';
 
 /**
  * An advisory ID as callers type it. {@link normalizeAdvisoryId} runs before
@@ -182,6 +182,14 @@ export const AdvisoryProductsSchema = z
   })
   .describe('Affected products, flattened from the CSAF product tree.');
 
+export const AdvisoryReferenceSchema = z
+  .object({
+    category: z.string().describe('CSAF reference category, e.g. self or external.'),
+    summary: z.string().optional().describe('Reference summary, when present.'),
+    url: z.string().describe('The reference URL.'),
+  })
+  .describe('One CSAF reference.');
+
 export const AdvisoryVulnerabilitySchema = z
   .object({
     cve: z
@@ -191,6 +199,14 @@ export const AdvisoryVulnerabilitySchema = z
     cweId: z.string().optional().describe('CWE identifier, when the entry carries one.'),
     cweName: z.string().optional().describe('CWE name, when the entry carries one.'),
     title: z.string().optional().describe('Vulnerability title, when the entry carries one.'),
+    references: z
+      .array(AdvisoryReferenceSchema)
+      .optional()
+      .describe('Vulnerability references in source order. Absent on rows awaiting re-ingest.'),
+    cvssV4Vector: z
+      .string()
+      .optional()
+      .describe('The unambiguous CVSS v4 vector from a FIRST calculator reference, when present.'),
     scores: z
       .array(
         z
@@ -313,14 +329,6 @@ export const AdvisoryRevisionSchema = z
       .describe('Legacy version label, when the entry carries one.'),
   })
   .describe('One revision-history entry.');
-
-export const AdvisoryReferenceSchema = z
-  .object({
-    category: z.string().describe('CSAF reference category, e.g. self or external.'),
-    summary: z.string().optional().describe('Reference summary, when present.'),
-    url: z.string().describe('The reference URL.'),
-  })
-  .describe('One document-level reference.');
 
 export const AdvisoryAcknowledgmentSchema = z
   .object({
@@ -481,7 +489,7 @@ function literalText(value: string): string {
 /** Project nested advisory fields to literal Markdown, retaining usable URL destinations. */
 function literalFields<T>(value: T, key = ''): T {
   if (typeof value === 'string') {
-    if (key === 'productId' || key === 'vectorString') {
+    if (key === 'productId' || key === 'vectorString' || key === 'cvssV4Vector') {
       let longest = 0;
       let run = 0;
       for (const char of value) {
@@ -585,9 +593,9 @@ export function renderAdvisoryProducts(products: Products): string[] {
 
 /** Render the vulnerabilities block. */
 export function renderAdvisoryVulnerabilities(vulnerabilities: Vulnerability[]): string[] {
-  vulnerabilities = literalFields(vulnerabilities);
   const lines = ['## Vulnerabilities'];
-  for (const vulnerability of vulnerabilities) {
+  for (const { references, ...fields } of vulnerabilities) {
+    const vulnerability = literalFields(fields);
     lines.push(`### ${vulnerability.cve}${vulnerability.title ? ` — ${vulnerability.title}` : ''}`);
     if (vulnerability.cweId || vulnerability.cweName) {
       lines.push(
@@ -604,6 +612,15 @@ export function renderAdvisoryVulnerabilities(vulnerabilities: Vulnerability[]):
           } ${score.vectorString} → ${score.productIds.join(', ') || 'no product ids'}`,
         );
       }
+    }
+    if (vulnerability.cvssV4Vector) {
+      lines.push(`**CVSS v4 vector:** ${vulnerability.cvssV4Vector}`);
+    }
+    if (references?.length === 0) lines.push('**Vulnerability references:** none listed');
+    for (const { category, summary, url } of references ?? []) {
+      lines.push(
+        `**Reference (${escapeMarkdownInline(category)}):** ${renderReferenceLink(summary, url)}`,
+      );
     }
     for (const remediation of vulnerability.remediations) {
       lines.push(
@@ -655,17 +672,30 @@ export function renderAdvisoryRevisions(revisions: Revision[]): string[] {
   return lines;
 }
 
+function renderReferenceLink(summary: string | undefined, url: string): string {
+  const label = summary === undefined ? '' : `${escapeMarkdownInline(summary)}: `;
+  const destination = url.trim();
+  const link = destination === url ? literalFields(url, 'url') : markdownLink(url, destination);
+  return `${label}${link}`;
+}
+
 /** Render the references block. */
 export function renderAdvisoryReferences(references: Reference[]): string[] {
-  references = literalFields(references);
   const lines = ['## References'];
-  for (const reference of references) {
-    lines.push(
-      `- [${reference.category}] ${reference.summary ? `${reference.summary}: ` : ''}${reference.url}`,
-    );
+  for (const { category, summary, url } of references) {
+    lines.push(`- [${escapeMarkdownInline(category)}] ${renderReferenceLink(summary, url)}`);
   }
   lines.push('');
   return lines;
+}
+
+/** Render originating vendor references as literal summaries and usable links. */
+export function renderVendorAdvisories(
+  references: z.infer<typeof VendorAdvisorySchema>[],
+): string[] {
+  return references.map(
+    ({ summary, url }) => `**Vendor advisory:** ${renderReferenceLink(summary, url)}`,
+  );
 }
 
 /** Render the acknowledgments block. */

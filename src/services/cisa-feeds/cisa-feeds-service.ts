@@ -3,8 +3,7 @@
  * no `etag` and no `last-modified`, and set `cache-control: private, no-cache,
  * must-revalidate`, so there is nothing to make a request conditional on. Each
  * feed is therefore fetched at most once per TTL window per process and the
- * parsed window is held in memory; worst case is three unconditional fetches per
- * window totalling about 1 MB, against a source that publishes no rate limit.
+ * parsed window is held in memory.
  *
  * Each feed is a rolling window of exactly 30 items with no history and no
  * pagination. That ceiling is the upstream's, not a server choice.
@@ -28,10 +27,10 @@ export const FEED_URLS: Record<FeedId, string> = {
 /** The rolling window size every feed serves. Upstream's ceiling, not a server choice. */
 export const UPSTREAM_WINDOW_SIZE = 30;
 
-/** Characters of stripped description text retained per item. */
+/** Maximum characters in an item's summary. */
 export const SUMMARY_CAP = 1200;
 
-/** Ceiling on a feed body. The largest is 531 KB; this is two orders above it. */
+/** Ceiling on a feed body. */
 const FEED_MAX_BYTES = 32 * 1024 * 1024;
 
 /** Options for {@link initCisaFeeds}. */
@@ -75,6 +74,7 @@ function toFeedItem(raw: unknown): FeedItem | null {
     pubDate: normalizePubDate(text(raw.pubDate)),
     summary: truncated ? `${summary.slice(0, SUMMARY_CAP - 1).trimEnd()}…` : summary,
     summaryTruncated: truncated,
+    ...(truncated && !advisoryId ? { fullDescription: summary } : {}),
     /* Upstream `guid` is a node path (`/node/25513`), not a URL and not a permalink. */
     guid: text(raw.guid).trim(),
     ...(advisoryId ? { advisoryId } : {}),

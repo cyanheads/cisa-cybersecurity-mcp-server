@@ -99,6 +99,29 @@ describe('cisa://advisory/{advisoryId} resource', () => {
     );
   });
 
+  it('keeps vulnerability references and the vector in the full resource', async () => {
+    const vector = 'CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N';
+    const references = [
+      { category: 'external', url: `https://www.first.org/cvss/calculator/4-0#${vector}` },
+    ];
+    await seedMirror([
+      {
+        name: 'CSAF-develop/csaf_files/OT/white/2026/icsa-26-260-07.json',
+        data: JSON.stringify({
+          ...FULL_ADVISORY,
+          vulnerabilities: [{ ...FULL_ADVISORY.vulnerabilities[0], references }],
+        }),
+      },
+    ]);
+    const output = advisoryOutput.parse(
+      await icsAdvisoryResource.handler(
+        advisoryParams.parse({ advisoryId: 'ICSA-26-260-07' }),
+        createMockContext(),
+      ),
+    );
+    expect(output.vulnerabilities).toMatchObject([{ references, cvssV4Vector: vector }]);
+  });
+
   it('list() returns an empty array before the mirror is ready', async () => {
     const listing = (await icsAdvisoryResource.list?.(listExtra)) as { resources: unknown[] };
     expect(listing.resources).toEqual([]);
@@ -186,10 +209,10 @@ describe('cisa://advisory/{advisoryId} resource', () => {
         {
           uri: 'cisa://advisory/ICSA-26-260-07',
           name: 'ICSA-26-260-07 — Acme Widgets PLC Remote Code Execution',
-          title: 'ICS advisory (CSAF)',
           mimeType: 'application/json',
         },
       ]);
+      expect(icsAdvisoryResource.title).toBe('ICS advisory (CSAF)');
     });
 
     it('complete() matches advisory IDs by prefix', async () => {

@@ -9,9 +9,8 @@
  * and CISA cannot publish it — so it is an input, and `unknown` returns both arms
  * rather than a guess.
  *
- * The computed timeline and CISA's own assigned KEV due date are reported side by
- * side and never reconciled: in a 24-CVE sample, 9 disagreed under a
- * publicly-exposed assumption.
+ * Compare the computed timeline with the assigned KEV deadline and triage
+ * requirement when the exposure is stated and the KEV entry cites BOD 26-04.
  * @module mcp-server/tools/definitions/get-ssvc.tool
  */
 
@@ -196,7 +195,7 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
               .boolean()
               .optional()
               .describe(
-                "Whether CISA's assigned day count and forensic-triage requirement both match the computed timeline. Present when both are available and an exposure was stated.",
+                "Whether CISA's assigned day count and forensic-triage requirement both match the computed timeline. Requires a comparable timeline, stated exposure, and a KEV entry citing BOD 26-04.",
               ),
             sourceUrl: z
               .string()
@@ -205,7 +204,7 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
               .string()
               .optional()
               .describe(
-                'Guidance for a miss, a failed lookup, or unsupported decision points that prevent timeline computation.',
+                'Guidance for a miss, a failed lookup, unsupported decision points, or a KEV entry that does not cite BOD 26-04 when a comparison would otherwise apply.',
               ),
           })
           .describe('One SSVC lookup result.'),
@@ -325,15 +324,11 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
           }
         : undefined;
 
-      const timeline = bod2604?.timelines[0];
-      const assignedTriage = kevAssigned?.forensicTriage;
+      const timeline = input.assetExposure === 'unknown' ? undefined : bod2604?.timelines[0];
       const assignmentAgrees =
-        kevAssigned &&
-        timeline &&
-        input.assetExposure !== 'unknown' &&
-        (assignedTriage === 'Yes' || assignedTriage === 'No')
+        timeline && kevAssigned?.directive === 'BOD 26-04'
           ? timeline.remediationTimelineDays === kevAssigned.daysFromAdd &&
-            (timeline.forensicTriageRequired ? 'Yes' : 'No') === assignedTriage
+            timeline.forensicTriageRequired === (kevAssigned.forensicTriage === 'Yes')
           : undefined;
 
       let guidance = record.guidance;
@@ -344,6 +339,11 @@ export const getSsvcTool = tool('cisa_get_ssvc', {
             ? 'Automatable value'
             : 'Automatable and Technical Impact values';
         guidance = `No BOD 26-04 timeline was computed because CISA published unsupported SSVC ${unsupported}.`;
+      }
+      if (timeline && kevAssigned && kevAssigned.directive !== 'BOD 26-04') {
+        const comparisonGuidance =
+          'The KEV entry does not cite BOD 26-04. Agreement was not assessed.';
+        guidance = guidance ? `${guidance} ${comparisonGuidance}` : comparisonGuidance;
       }
 
       if (kev && record.ssvcTimestamp && record.ssvcTimestamp.slice(0, 10) < kev.dateAdded) {

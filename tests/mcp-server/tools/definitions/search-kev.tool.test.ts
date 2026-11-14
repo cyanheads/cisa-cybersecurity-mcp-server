@@ -635,6 +635,61 @@ describe('cisa_search_kev', () => {
     });
   });
 
+  describe('vendor and product substring filters', () => {
+    it.each([
+      ['vendorProject', ' \taCmE Corp\n', 'aCmE Corp', ['CVE-2026-00002', 'CVE-2026-00001']],
+      ['product', '\tWidget Pro \n', 'Widget Pro', ['CVE-2026-00001']],
+    ] as const)(
+      'trims %s before matching and echoes it on both surfaces',
+      async (key, value, canonical, ids) => {
+        await loadCatalog();
+        const result = await runToolContract(searchKevTool, { [key]: value });
+        const data = result.structuredContent as {
+          appliedFilters: Record<string, string>;
+          results: Array<{ cveId: string }>;
+        };
+        expect(data.results.map((record) => record.cveId)).toEqual(ids);
+        expect(data.appliedFilters[key]).toBe(canonical);
+        expect(contentText(result)).toContain(`${key}=${canonical}`);
+      },
+    );
+
+    it.each([
+      ['vendorProject', ' \t '],
+      ['vendorProject', ' A '],
+      ['product', '\n  '],
+      ['product', ' G\t'],
+    ] as const)(
+      'rejects %s %j below the trimmed minimum before reading the catalog',
+      async (key, value) => {
+        await loadCatalog();
+        const snapshot = vi.spyOn(getKevCatalog(), 'snapshot');
+        try {
+          const result = await runToolContract(searchKevTool, { [key]: value });
+          expect(result.structuredContent).toMatchObject({
+            error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+          });
+          expect(contentText(result)).toContain(key);
+          expect(snapshot).not.toHaveBeenCalled();
+        } finally {
+          snapshot.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      ['vendorProject', 'aCmE Corp', ['CVE-2026-00002', 'CVE-2026-00001']],
+      ['product', 'wIdGeT Pro', ['CVE-2026-00001']],
+      ['product', 'Widget  Pro', []],
+      ['product', '%_', []],
+    ] as const)('preserves literal case-insensitive %s %j matching', async (key, value, ids) => {
+      await loadCatalog();
+      const result = await runToolContract(searchKevTool, { [key]: value });
+      const data = result.structuredContent as { results: Array<{ cveId: string }> };
+      expect(data.results.map((record) => record.cveId)).toEqual(ids);
+    });
+  });
+
   describe('cwe and cveIdPrefix case and whitespace', () => {
     type Structured = { appliedFilters: Record<string, string>; results: Array<{ cveId: string }> };
     const run = (args: Record<string, string>) =>

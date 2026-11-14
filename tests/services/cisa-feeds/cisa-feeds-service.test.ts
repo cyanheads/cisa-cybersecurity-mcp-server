@@ -125,6 +125,7 @@ describe('CisaFeedsService', () => {
       expect(item?.summaryTruncated).toBe(true);
       expect(item?.summary.length).toBe(SUMMARY_CAP);
       expect(item?.summary.endsWith('…')).toBe(true);
+      expect(item).not.toHaveProperty('fullDescription');
     } finally {
       http.restore();
     }
